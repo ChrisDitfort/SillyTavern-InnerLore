@@ -1,6 +1,6 @@
 # InnerLore — Living Characters & World
 
-InnerLore is a SillyTavern client extension backed by the `airpg-storage` server plugin for four related jobs:
+InnerLore is a SillyTavern client extension backed by its bundled `innerlore-storage` server plugin (pure SQLite) for four related jobs:
 
 1. **Private character minds:** each relevant NPC has a durable Persistent Self, an individual textual voice, multidimensional subjective relationships, and one replaceable Current Mind for the immediate scene.
 2. **Automatic living lore:** individually significant characters, locations, items, factions, organizations, creatures, events, and concepts become detailed native World Info entries and continue updating as the story changes.
@@ -16,7 +16,7 @@ It is designed for arbitrary character cards and genres. No scenario, relationsh
 - SillyTavern 1.13+ (tested on 1.13.x)
 - Any chat-completion API connection (OpenAI-compatible, OpenRouter, z.ai, etc.) — one profile for the story model, and optionally a second, cheaper profile for background analysis
 
-**State storage:** the bundled **`innerlore-storage`** server plugin keeps everything in pure SQLite (see install step 2) — this is the default and recommended mode. An *Embedded* fallback (state inside the chat file) is available in **InnerLore → State storage** for zero-plugin setups, and the heavier **`airpg-storage`** engine (FTS5 search, graph projections, server-prepared contexts) remains compatible for existing installs.
+**State storage:** the bundled **`innerlore-storage`** server plugin keeps everything in pure SQLite (see install step 2) — this is the default and recommended mode. An *Embedded* fallback (state inside the chat file) is available in **InnerLore → State storage** for zero-plugin setups.
 
 **Installing the extension + bundled SQLite storage**
 
@@ -41,10 +41,6 @@ It is designed for arbitrary character cards and genres. No scenario, relationsh
 All state — entities, minds, progression, narrative history — lives in a single SQLite database at `data/worlds/innerlore-storage.db` with per-save revision history (last 20 per chat). No chat-JSONL state, no external services.
 
 The narrator prompt, narration length (Brief / Standard / Long), context budgets, history handling, and event behavior are all configured from the InnerLore panel — no prompt-manager editing required.
-
-**Installing the optional storage plugin**
-
-Only needed for the SQLite backend. Clone or download `airpg-storage` into `SillyTavern/plugins/airpg-storage`, install its npm dependencies, set `enableServerPlugins: true` in `config.yaml`, and restart SillyTavern. Health check: `GET /api/plugins/airpg-storage/v1/health`.
 
 ## Inspiration and architecture
 
@@ -83,7 +79,7 @@ AI Dungeon's scripts ask the story model to emit maintenance syntax inside the n
 
 ## First use
 
-1. Install `airpg-storage` in SillyTavern's `plugins/` directory, install its npm dependencies, and set `enableServerPlugins: true` in `config.yaml`.
+1. Install the bundled `innerlore-storage` plugin (see Installation above) and set `enableServerPlugins: true` in `config.yaml`.
 2. Reload SillyTavern after installing the extension. The first load of each legacy chat commits its complete old metadata state to SQLite before replacing it with a small pointer.
 3. Open **Extensions → InnerLore**.
 4. Under **Background Model**, confirm the desired Connection Profile. On first load, InnerLore adopts Summaryception's selected profile when it exists; the current configured profile is `OpenRouterDeepseekV4Pro0813Think`.
@@ -102,11 +98,11 @@ The DSL middleware parses into the exact same canonical objects used by JSON mod
 
 ## Server persistence and queries
 
-Each chat receives an isolated server-side world under `data/worlds/<world-id>/`. SQLite is the sole authority. Entity fields, NPC Persistent Self, Voice, subjective relationships, Current Mind, progression goals/processes/events, and full-text content are normalized into queryable tables in the same transaction as the exact lossless snapshot.
+All state lives in a single SQLite database at `data/worlds/innerlore-storage.db`, owned by the bundled `innerlore-storage` plugin. Every save stores the complete lossless snapshot for the chat's world plus a bounded revision history (the last 20 revisions per world), with optimistic-revision concurrency so concurrent tabs cannot silently overwrite each other. Worlds are keyed by a deterministic hash of the chat id, and chat renames/branches fork cleanly.
 
-LadybugDB projects this state into traversable `npc_brain`, `npc_brain_entry`, `npc_subjective_relationship`, lore entity, and progression nodes. Its updates use a durable SQLite outbox; if LadybugDB is unavailable or damaged, narration state remains safe and the graph can be rebuilt. The server plugin's default `auto` mode uses the included SQLite graph fallback only when LadybugDB cannot load.
+The plugin exposes authenticated routes under `/api/plugins/innerlore-storage/v1/worlds/:worldId/...` for health, world creation, snapshot load/save, forks, renames, deletion, and context profiles. Prompt context itself is compiled client-side by the extension's deterministic compiler — the plugin is pure persistence, which keeps it dependency-free (Node built-ins only).
 
-The server exposes authenticated routes under `/api/plugins/airpg-storage/v1/worlds/:worldId/innerlore/` for exact snapshots, brain filters, individual brain records, mind-entry filters, FTS5 search, bounded revisions, restoration, branch forks, context profiles, prepared state, delivery receipts, and renames. Existing generic graph routes provide neighbors, bounded traversal, shortest paths, and full rebuilds. See `airpg-storage/docs/INNERLORE_STORAGE.md` for the complete API.
+> **Legacy:** installs that predate the bundled plugin may still use the heavier `airpg-storage` engine (FTS5 search, graph projections, server-prepared contexts); existing chats on it keep working automatically. New installs do not need it.
 
 The story model and background model are independent. The current configuration uses OpenRouter DeepSeek V4 Pro 0813 Thinking for prose, InnerLore, and World Progression. SummarySception may retain its separate MiMo 2.5 Pro Thinking summarizer profile.
 
