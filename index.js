@@ -69,7 +69,7 @@ import {
     removeEventProposal,
     recordEventDirectorAttempt,
 } from './event-director.js';
-import { decideInnerLoreMaintenance } from './maintenance-scheduler.js?v=2';
+import { decideInnerLoreMaintenance } from './maintenance-scheduler.js?v=3';
 import { EmbeddedStorageClient } from './embedded-storage.js?v=1';
 import { requestProgressionPatch, testProgressionConnection } from './progression-client.js';
 import { buildProgressionMessages } from './progression-prompts.js';
@@ -3939,7 +3939,7 @@ async function addTriggerEvent() {
             description: '',
             triggerAfterSeconds: null,
             actionCondition: '',
-            activationVisibility: 'hidden',
+            activationVisibility: 'observable',
             priority: 70,
         }, {
             clock: state.clock,

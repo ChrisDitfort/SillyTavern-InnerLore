@@ -108,6 +108,11 @@ export function decideInnerLoreMaintenance(input = {}) {
     // it to ever fire; the chronologist should not wait for the full cadence.
     const hasArmedTimeEvent = records.some(record => record.enabled && record.status === 'armed' && record.triggerAfterSeconds !== null);
     if (progressionPendingTurns > 0 && hasArmedTimeEvent) progressionReasons.push('armed_time_event');
+    // Armed action watchers need the LLM evaluator to acknowledge the action;
+    // the lexical pre-filter misses paraphrases ("come in" vs "step inside"),
+    // so waiting for the full cadence delays firing by several turns.
+    const hasArmedActionEvent = records.some(record => record.enabled && record.status === 'armed' && record.actionCondition);
+    if (progressionPendingTurns > 0 && hasArmedActionEvent) progressionReasons.push('armed_action_event');
     if (adaptive && progressionPendingTurns > 0 && explicitTimeSeconds > 0) progressionReasons.push('explicit_time');
     if (adaptive && progressionPendingTurns > 0 && awaitingDelivery) progressionReasons.push('delivery_verification');
     if (adaptive && progressionPendingTurns > 0 && hasPendingCreationAnchor(progression)) progressionReasons.push('creation_anchor');
