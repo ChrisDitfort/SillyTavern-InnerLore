@@ -24,15 +24,17 @@ It is designed for arbitrary character cards and genres. No scenario, relationsh
 
 Extensions → Install extension → paste `https://github.com/ChrisDitfort/SillyTavern-InnerLore` → reload.
 
-**Step 2 — run the setup script** (one command, then restart SillyTavern):
+**Step 2 — run the setup script** from the downloaded extension folder:
 
 ```
 node setup.js
 ```
 
-Run it from the downloaded extension folder or pass the path (`node setup.js /path/to/SillyTavern`). It works on Linux, macOS, and Windows, needs only the Node.js SillyTavern already requires, and does three things automatically: links the bundled SQLite plugin into `plugins/`, enables server plugins in `config.yaml` (backup kept), and verifies nothing is missing.
+(Or from anywhere: `node setup.js /path/to/SillyTavern`.)
 
-**Step 3 — restart SillyTavern**, then check the **InnerLore** panel in Extensions: pick a background-model connection profile and press **Test Connection**. That's it — open any character chat and the first analysis pass builds lore and minds automatically after the next story reply (or press **Scan New Turns**).
+It works on Linux, macOS, and Windows, needs only the Node.js SillyTavern already requires, and does everything else automatically: links the bundled SQLite plugin into `plugins/`, enables server plugins in `config.yaml` (backup kept), and — if SillyTavern is running — **restarts it for you** and waits until the storage plugin is healthy. If SillyTavern is not running, the script says so and you simply start it as usual.
+
+**Step 3** — check the **InnerLore** panel in Extensions: pick a background-model connection profile and press **Test Connection**. That's it — open any character chat and the first analysis pass builds lore and minds automatically after the next story reply (or press **Scan New Turns**).
 
 All state — entities, minds, progression, narrative history — lives in a single SQLite database at `data/worlds/innerlore-storage.db` with per-save revision history (last 20 per chat). No chat-JSONL state, no external services.
 
