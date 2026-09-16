@@ -1626,7 +1626,7 @@ export function mergeEntityOperations(store, operations, options = {}) {
 
         const operation = rawOperation;
         let type = normalizeEntityType(operation.type);
-        const name = normalizeName(operation.name);
+        let name = normalizeName(operation.name);
         type = authoritativeEntityType(store, type, name, operation.aliases);
         if (!name || name.length < 2 || !enabledTypes.has(type)) {
             result.skipped++;

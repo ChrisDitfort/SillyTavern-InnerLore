@@ -28,7 +28,7 @@ import {
     snapshotMessageRange,
     summaryceptionRecallText,
     uniqueStrings,
-} from './core.js?v=39';
+} from './core.js?v=40';
 import { compileContext } from './context-compiler.js?v=4';
 import {
     applyContextProfileToSettings,
