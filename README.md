@@ -18,25 +18,21 @@ It is designed for arbitrary character cards and genres. No scenario, relationsh
 
 **State storage:** the bundled **`innerlore-storage`** server plugin keeps everything in pure SQLite (see install step 2) — this is the default and recommended mode. An *Embedded* fallback (state inside the chat file) is available in **InnerLore → State storage** for zero-plugin setups.
 
-**Installing the extension + bundled SQLite storage**
+## Installation
 
-1. In SillyTavern, open **Extensions → Install extension**, and paste:
+**Step 1 — install the extension** (SillyTavern UI):
 
-   ```
-   https://github.com/ChrisDitfort/SillyTavern-InnerLore
-   ```
+Extensions → Install extension → paste `https://github.com/ChrisDitfort/SillyTavern-InnerLore` → reload.
 
-2. Install the bundled storage plugin — the repository is dual-mode, so the same URL works (pure SQLite, zero npm dependencies — uses Node's built-in `node:sqlite`, requires Node 22.5+):
+**Step 2 — run the setup script** (one command, then restart SillyTavern):
 
-   ```
-   # from your SillyTavern folder
-   git clone https://github.com/ChrisDitfort/SillyTavern-InnerLore plugins/SillyTavern-InnerLore
-   ```
+```
+node setup.js
+```
 
-   Then set `enableServerPlugins: true` in `config.yaml` and restart SillyTavern. Prefer not to clone twice? Run `node setup.js` from either checkout instead — cross-platform (Linux/macOS/Windows, Node only), it auto-detects the SillyTavern root, links the bundled plugin into `plugins/` (junction/symlink with copy fallback), and flips the config flag with a backup.
-3. After the restart, confirm the plugin: `GET /api/plugins/innerlore-storage/v1/health`.
-4. Open the **InnerLore** panel in Extensions, pick a background-model connection profile, and press **Test Connection**.
-5. Open any character chat — the first analysis pass builds the initial lore and minds automatically after the next story reply (or press **Scan New Turns**).
+Run it from the downloaded extension folder or pass the path (`node setup.js /path/to/SillyTavern`). It works on Linux, macOS, and Windows, needs only the Node.js SillyTavern already requires, and does three things automatically: links the bundled SQLite plugin into `plugins/`, enables server plugins in `config.yaml` (backup kept), and verifies nothing is missing.
+
+**Step 3 — restart SillyTavern**, then check the **InnerLore** panel in Extensions: pick a background-model connection profile and press **Test Connection**. That's it — open any character chat and the first analysis pass builds lore and minds automatically after the next story reply (or press **Scan New Turns**).
 
 All state — entities, minds, progression, narrative history — lives in a single SQLite database at `data/worlds/innerlore-storage.db` with per-save revision history (last 20 per chat). No chat-JSONL state, no external services.
 
