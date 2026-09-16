@@ -1404,6 +1404,21 @@ function identityDescriptorKey(value) {
     return words.join(' ');
 }
 
+function looksLikeProperName(value) {
+    const name = normalizeName(value);
+    if (!name || name.length > 60) return false;
+    if (/^(?:the|a|an)\s+/iu.test(name)) return false;
+    // A public name is 1-4 capitalized words (Hobbe, Hobbe of Mill Lane).
+    return /^(?:[A-Z][\p{L}'’-]*(?:\s+(?:of|the)\s+|[A-Z][\p{L}'’-]*\s*)?)$/u.test(name)
+        && /^[A-Z]/.test(name);
+}
+
+function sharesDescriptorToken(descriptor, candidate) {
+    const tokens = new Set(identityDescriptorKey(descriptor) ? descriptor.toLowerCase().split(/\s+/u) : []);
+    if (!tokens.size) return false;
+    return candidate.toLowerCase().split(/\s+/u).some(word => tokens.has(word));
+}
+
 function recordHasDescriptorIdentity(record) {
     if (normalizeIdentityKind(record?.identityKind) === 'descriptor') return true;
     const name = normalizeName(record?.name);
@@ -1642,10 +1657,24 @@ export function mergeEntityOperations(store, operations, options = {}) {
         const operationKeys = operationArray(operation, 'keys', 'keys');
         const explicitlyLinksPriorIdentity = uniqueStrings([...operationAliases, ...operationKeys], 60)
             .some(value => canonicalNameKey(value) === canonicalNameKey(previousName));
+        // A descriptor-identity record that acquires a proper-name alias has
+        // been publicly identified in the story, even when the curator forgot
+        // promote_name. Promote locally so the record (and its brain) takes
+        // the revealed name instead of carrying it forever as an alias.
+        const revealedProperName = !isNew
+            && recordHasDescriptorIdentity(record)
+            ? uniqueStrings(operationAliases, 60)
+                .filter(alias => canonicalNameKey(alias) !== canonicalNameKey(previousName))
+                .find(alias => looksLikeProperName(alias) && !sharesDescriptorToken(previousName, alias))
+            : null;
+        if (revealedProperName && canonicalNameKey(name) === canonicalNameKey(previousName)) {
+            name = normalizeName(revealedProperName);
+            operation.promote_name = true;
+        }
         const promoteName = !isNew
             && Boolean(operation.promoteName ?? operation.promote_name)
             && canonicalNameKey(name) !== canonicalNameKey(previousName)
-            && explicitlyLinksPriorIdentity
+            && (explicitlyLinksPriorIdentity || Boolean(revealedProperName))
             && recordHasDescriptorIdentity(record);
         const canonicalName = isNew || promoteName ? name : previousName;
         record.type = type;
@@ -2219,10 +2248,19 @@ export function mergeMindOperations(store, operations, options = {}) {
         const operationAliases = operationArray(operation, 'aliases', 'aliases');
         const explicitlyLinksPriorIdentity = uniqueStrings(operationAliases, 30)
             .some(value => canonicalNameKey(value) === canonicalNameKey(previousName));
+        // Mirror the entity-side fallback: a descriptor mind that gains a
+        // proper-name character reference has been publicly identified.
+        const mindRevealedName = !isNew
+            && recordHasDescriptorIdentity(brain)
+            && canonicalNameKey(name) !== canonicalNameKey(previousName)
+            && looksLikeProperName(name)
+            && !sharesDescriptorToken(previousName, name)
+            ? name : null;
+        if (mindRevealedName) operation.promote_name = true;
         const promoteName = !isNew
             && Boolean(operation.promoteName ?? operation.promote_name)
             && canonicalNameKey(name) !== canonicalNameKey(previousName)
-            && explicitlyLinksPriorIdentity
+            && (explicitlyLinksPriorIdentity || Boolean(mindRevealedName))
             && recordHasDescriptorIdentity(brain);
         const canonicalName = isNew || promoteName ? name : previousName;
         brain.name = canonicalName;
