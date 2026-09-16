@@ -33,7 +33,7 @@ It is designed for arbitrary character cards and genres. No scenario, relationsh
    git clone https://github.com/ChrisDitfort/SillyTavern-InnerLore plugins/SillyTavern-InnerLore
    ```
 
-   Then set `enableServerPlugins: true` in `config.yaml` and restart SillyTavern. Prefer not to clone twice? Run `node setup.js` from either checkout instead — cross-platform (Linux/macOS/Windows, Node only), it auto-detects the SillyTavern root, links the bundled plugin into `plugins/` (junction/symlink with copy fallback), and flips the config flag with a backup. (`setup.sh` is a thin bash wrapper for the same script.)
+   Then set `enableServerPlugins: true` in `config.yaml` and restart SillyTavern. Prefer not to clone twice? Run `node setup.js` from either checkout instead — cross-platform (Linux/macOS/Windows, Node only), it auto-detects the SillyTavern root, links the bundled plugin into `plugins/` (junction/symlink with copy fallback), and flips the config flag with a backup.
 3. After the restart, confirm the plugin: `GET /api/plugins/innerlore-storage/v1/health`.
 4. Open the **InnerLore** panel in Extensions, pick a background-model connection profile, and press **Test Connection**.
 5. Open any character chat — the first analysis pass builds the initial lore and minds automatically after the next story reply (or press **Scan New Turns**).
