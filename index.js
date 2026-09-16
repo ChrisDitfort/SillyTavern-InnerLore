@@ -4794,6 +4794,20 @@ function registerEvents() {
     eventSource.on(events.MESSAGE_RECEIVED, (messageIndex, generationType) => {
         const store = getChatStore();
         const message = context().chat[messageIndex];
+        if (!store && message && !message.is_user && !message.is_system) {
+            // A brand-new chat can complete its first fast story reply before
+            // the storage backend finishes attaching. Without a deferred
+            // re-check, an empty first reply skips quarantine recovery and
+            // sits in the chat forever.
+            setTimeout(() => {
+                if (runtime.cutoffRecovery || currentChatId() !== (context().chatId ?? '')) return;
+                const retryMessage = context().chat[messageIndex];
+                if (!retryMessage || retryMessage.is_user || retryMessage.is_system) return;
+                if (!generatedProseIssue(retryMessage.mes)) return;
+                eventSource.emit(events.MESSAGE_RECEIVED ?? 'message_received', messageIndex, generationType);
+            }, 4_000);
+            return;
+        }
         if (!store || !message || message.is_user || message.is_system) return;
         if (runtime.cutoffRecovery) return;
 
