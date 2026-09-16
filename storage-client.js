@@ -1,4 +1,14 @@
-const API_ROOT = '/api/plugins/airpg-storage/v1';
+import { cleanString } from './core.js?v=1';
+const DEFAULT_API_ROOT = '/api/plugins/airpg-storage/v1';
+
+function apiRoot() {
+    try {
+        const settings = globalThis.SillyTavern?.getContext?.()?.extensionSettings?.inner_lore;
+        const root = cleanString(settings?.storageApiRoot, 200);
+        if (root && /^\/api\/plugins\/[a-z0-9-]+\/v1$/.test(root)) return root;
+    } catch { /* context unavailable during module init */ }
+    return DEFAULT_API_ROOT;
+}
 const POINTER_BACKEND = 'airpg-storage';
 const POINTER_VERSION = 1;
 const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
@@ -87,7 +97,7 @@ export class InnerLoreStorageClient {
         });
 
         try {
-            const response = await Promise.race([this.fetchImpl(`${API_ROOT}${path}`, {
+            const response = await Promise.race([this.fetchImpl(`${apiRoot()}${path}`, {
                 method,
                 headers: this.getHeaders(),
                 signal: controller.signal,
@@ -277,4 +287,4 @@ export class InnerLoreStorageClient {
     }
 }
 
-export const INNERLORE_STORAGE_API_ROOT = API_ROOT;
+export const INNERLORE_STORAGE_API_ROOT = DEFAULT_API_ROOT;

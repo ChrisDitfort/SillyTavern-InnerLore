@@ -98,7 +98,7 @@ import {
     InnerLoreStorageClient,
     isInnerLoreStoragePointer,
     isLegacyInnerLoreStore,
-} from './storage-client.js';
+} from './storage-client.js?v=3';
 import {
     createLocalContextPacket,
     INNERLORE_CONTEXT_MACROS,
@@ -402,7 +402,8 @@ const defaultSettings = Object.freeze({
     automaticEventDirectorExpirationTurns: 40,
     lorebookRegistry: {},
     pendingChatCleanups: {},
-    storageBackend: 'embedded',
+    storageBackend: 'sqlite',
+    storageApiRoot: '/api/plugins/innerlore-storage/v1',
     storageRegistry: {},
     pendingStorageCleanups: {},
     debug: false,
