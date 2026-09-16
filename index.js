@@ -5087,7 +5087,12 @@ function initializeServerStateAfterAppReady(ctx) {
     else queueMicrotask(start);
 }
 
-(async function init() {
+// Dual-mode entry: this file is the browser extension AND, when SillyTavern's
+// plugin loader imports it from plugins/, the server plugin. Browser startup
+// must not run under Node, and Node must not touch browser globals.
+const RUNNING_IN_BROWSER = typeof window !== 'undefined';
+
+if (RUNNING_IN_BROWSER) (async function init() {
     try {
         const ctx = context();
         getSettings();
@@ -5105,3 +5110,27 @@ function initializeServerStateAfterAppReady(ctx) {
         toastr.error(`InnerLore failed to load: ${error.message || error}`, DISPLAY_NAME, { timeOut: 0 });
     }
 })();
+
+// ---- Server-plugin facade -------------------------------------------------
+// SillyTavern's plugin loader imports plugins/<name>/index.js and calls
+// init(router, args). When this repository is cloned or linked into
+// plugins/, these exports delegate to the bundled SQLite storage plugin
+// without affecting browser loading (the dynamic import only runs in Node).
+
+export const info = {
+    id: 'innerlore-storage',
+    name: 'InnerLore Storage',
+    description: 'Lean SQLite persistence for the InnerLore extension (bundled in the SillyTavern-InnerLore repository).',
+};
+
+export async function init(router, args) {
+    if (RUNNING_IN_BROWSER) return;
+    const plugin = await import('./server/innerlore-storage/index.js');
+    return plugin.init(router, args);
+}
+
+export async function exit() {
+    if (RUNNING_IN_BROWSER) return;
+    const plugin = await import('./server/innerlore-storage/index.js');
+    return plugin.exit();
+}
