@@ -70,6 +70,7 @@ import {
     recordEventDirectorAttempt,
 } from './event-director.js';
 import { decideInnerLoreMaintenance } from './maintenance-scheduler.js?v=2';
+import { EmbeddedStorageClient } from './embedded-storage.js?v=1';
 import { requestProgressionPatch, testProgressionConnection } from './progression-client.js';
 import { buildProgressionMessages } from './progression-prompts.js';
 import {
@@ -401,10 +402,17 @@ const defaultSettings = Object.freeze({
     automaticEventDirectorExpirationTurns: 40,
     lorebookRegistry: {},
     pendingChatCleanups: {},
+    storageBackend: 'embedded',
     storageRegistry: {},
     pendingStorageCleanups: {},
     debug: false,
 });
+
+const embeddedStorageClient = new EmbeddedStorageClient();
+
+function activeStorageClient() {
+    return getSettings().storageBackend === 'sqlite' ? storageClient : embeddedStorageClient;
+}
 
 const runtime = {
     processing: false,
@@ -671,7 +679,7 @@ async function migrateStorageRegistry(oldChatId, newChatId) {
     const expectedRevision = runtime.storeChatId === oldId && runtime.storageWorldId === worldId
         ? runtime.storageRevision
         : undefined;
-    const result = await storageClient.rename(worldId, newId, expectedRevision);
+    const result = await activeStorageClient().rename(worldId, newId, expectedRevision);
     delete settings.storageRegistry[oldId];
     delete settings.pendingStorageCleanups[oldId];
     settings.storageRegistry[newId] = worldId;
@@ -777,7 +785,7 @@ async function cleanupDeletedChat(chatId, { silent = false } = {}) {
     }
 
     try {
-        storageResult = await storageClient.deleteWorld(id, storageWorldId);
+        storageResult = await activeStorageClient().deleteWorld(id, storageWorldId);
         delete settings.pendingStorageCleanups[id];
         delete settings.storageRegistry[id];
     } catch (error) {
@@ -979,13 +987,18 @@ async function loadChatStore() {
         : (registryPointer || metadataPointer);
     const legacyStore = isLegacyInnerLoreStore(metadataValue) ? metadataValue : null;
     const initialStore = createInitialChatStore(chatId, legacyStore);
+    // Chats with existing SQLite worlds always keep using the server backend;
+    // everything else follows the configured backend (embedded = standalone).
+    runtime.storageBackendUsed = (settings.storageBackend === 'sqlite' || pointer)
+        ? 'sqlite'
+        : 'embedded';
 
     try {
-        const result = await storageClient.loadOrCreate({
+        const result = await activeStorageClient().loadOrCreate({
             chatId,
-            pointer,
+            pointer: runtime.storageBackendUsed === 'sqlite' ? pointer : null,
             initialStore,
-            migrationSource: legacyStore ? 'legacy_chat_metadata' : null,
+            migrationSource: legacyStore && runtime.storageBackendUsed === 'sqlite' ? 'legacy_chat_metadata' : null,
         });
         if (generation !== runtime.storageLoadGeneration || chatId !== currentChatId()) return null;
 
@@ -995,20 +1008,32 @@ async function loadChatStore() {
         runtime.storageRevision = result.revision;
         runtime.storageSnapshotHash = result.snapshotHash;
         runtime.storageReady = true;
-        const nextPointer = attachTransientStoreFacade(createInnerLoreStoragePointer(result));
-        settings.storageRegistry[chatId] = result.worldId;
-        delete settings.pendingStorageCleanups[chatId];
-        saveSettings();
-
-        // The server commit has completed. It is now safe to replace the old
-        // multi-kilobyte chat JSON state with a small routing pointer.
-        if (!storagePointerMatches(metadataValue, nextPointer)
-            || metadataValue.revision !== nextPointer.revision
-            || metadataValue.snapshotHash !== nextPointer.snapshotHash) {
-            ctx.chatMetadata[MODULE_KEY] = nextPointer;
-            await ctx.saveMetadata();
+        if (runtime.storageBackendUsed === 'embedded') {
+            // Standalone mode: the full store lives in the chat's own metadata
+            // (the legacy location), persisted with the chat file automatically.
+            if (!isLegacyInnerLoreStore(metadataValue)) {
+                ctx.chatMetadata[MODULE_KEY] = clone(runtime.store);
+                await ctx.saveMetadata();
+            }
+            delete settings.storageRegistry[chatId];
+            delete settings.pendingStorageCleanups[chatId];
+            saveSettings();
         } else {
-            attachTransientStoreFacade(metadataValue);
+            const nextPointer = attachTransientStoreFacade(createInnerLoreStoragePointer(result));
+            settings.storageRegistry[chatId] = result.worldId;
+            delete settings.pendingStorageCleanups[chatId];
+            saveSettings();
+
+            // The server commit has completed. It is now safe to replace the old
+            // multi-kilobyte chat JSON state with a small routing pointer.
+            if (!storagePointerMatches(metadataValue, nextPointer)
+                || metadataValue.revision !== nextPointer.revision
+                || metadataValue.snapshotHash !== nextPointer.snapshotHash) {
+                ctx.chatMetadata[MODULE_KEY] = nextPointer;
+                await ctx.saveMetadata();
+            } else {
+                attachTransientStoreFacade(metadataValue);
+            }
         }
 
         let changed = false;
@@ -1037,7 +1062,7 @@ async function saveChatStore() {
         const snapshot = clone(runtime.store);
         const branch = narrativeBranchDescriptor();
         const scene = narrativeScene(runtime.lastCompilation?.scene);
-        const result = await storageClient.save(worldId, requestedChatId, snapshot, {
+        const result = await activeStorageClient().save(worldId, requestedChatId, snapshot, {
             expectedRevision,
             branch,
             scene,
@@ -1117,7 +1142,7 @@ async function maybeRunAutomaticEventDirector({ force = false } = {}) {
     const sourceWorldId = runtime.storageWorldId;
     const sourceHead = branch.headFingerprint;
     try {
-        const directorContext = await storageClient.buildEventDirectorContext(sourceWorldId, {
+        const directorContext = await activeStorageClient().buildEventDirectorContext(sourceWorldId, {
             expectedRevision: sourceRevision,
             branchId: branch.id,
             headFingerprint: sourceHead,
@@ -1351,7 +1376,7 @@ async function prepareServerContext({ force = false } = {}) {
     const requestedWorldId = runtime.storageWorldId;
     const promise = (async () => {
         try {
-            const result = await storageClient.buildContext(requestedWorldId, request.input, { signal: controller.signal });
+            const result = await activeStorageClient().buildContext(requestedWorldId, request.input, { signal: controller.signal });
             if (requestedWorldId !== runtime.storageWorldId || request.key !== contextStateKey()) return null;
             runtime.preparedContext = normalizePreparedContext(result, request.key);
             runtime.contextPreparationError = '';
@@ -1761,7 +1786,7 @@ function updateContextBudgetUI() {
 async function refreshContextProfiles({ synchronizeSettings = true } = {}) {
     if (!runtime.storageReady || !runtime.storageWorldId) return runtime.contextProfiles;
     try {
-        const profiles = await storageClient.contextProfiles(runtime.storageWorldId);
+        const profiles = await activeStorageClient().contextProfiles(runtime.storageWorldId);
         if (Array.isArray(profiles) && profiles.length) runtime.contextProfiles = profiles;
         const settings = getSettings();
         const selected = runtime.contextProfiles.find(profile => profile.id === settings.contextProfileId);
@@ -1808,6 +1833,7 @@ function applySettingsToUI() {
     const settings = getSettings();
     const fields = {
         il_enabled: settings.enabled,
+        il_storage_backend: settings.storageBackend,
         il_auto_update: settings.autoUpdate,
         il_auto_recover_incomplete: settings.autoRecoverIncomplete,
         il_incomplete_recovery_attempts: settings.incompleteRecoveryAttempts,
@@ -4237,6 +4263,14 @@ function bindUIEvents() {
     bindCheckbox('il_debug', 'debug');
     bindNumber('il_maximum_response_tokens', 'maximumResponseTokens', 800, 32_000);
     bindNumber('il_temperature', 'temperature', 0, 1.5);
+    document.getElementById('il_storage_backend')?.addEventListener('change', event => {
+        const value = ['embedded', 'sqlite'].includes(event.target.value) ? event.target.value : 'embedded';
+        getSettings().storageBackend = value;
+        saveSettings();
+        // Re-attach on the next chat event so the active backend takes effect.
+        runtime.storageReady = false;
+        runtime.storageBackendUsed = value;
+    });
     bindNumber('il_request_timeout', 'requestTimeoutSeconds', 15, 300);
     bindNumber('il_process_every', 'processEveryAssistantTurns', 1, 20);
     bindCheckbox('il_adaptive_maintenance', 'adaptiveMaintenanceEnabled');

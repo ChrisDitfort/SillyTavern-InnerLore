@@ -19,6 +19,16 @@
 
             <div id="il_status_detail" class="inner-lore-status-detail">Waiting for a chat.</div>
 
+            <label for="il_storage_backend">State storage</label>
+            <select id="il_storage_backend" class="text_pole">
+                <option value="embedded">Embedded — inside the chat file (standalone, no plugins)</option>
+                <option value="sqlite">SQLite server — airpg-storage plugin (search, projections, prepared context)</option>
+            </select>
+            <small class="inner-lore-hint">
+                Embedded keeps the full InnerLore state inside the chat's own JSONL file: portable, branch-aware,
+                zero setup. Existing chats that already use the SQLite server stay on it automatically.
+            </small>
+
             <hr class="sysHR" />
 
             <label class="checkbox_label" for="il_auto_update">

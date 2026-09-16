@@ -14,8 +14,11 @@ It is designed for arbitrary character cards and genres. No scenario, relationsh
 **Requirements**
 
 - SillyTavern 1.13+ (tested on 1.13.x)
-- The companion **`airpg-storage` server plugin** (SQLite world storage) in SillyTavern's `plugins/` directory, with `enableServerPlugins: true` in `config.yaml`
 - Any chat-completion API connection (OpenAI-compatible, OpenRouter, z.ai, etc.) — one profile for the story model, and optionally a second, cheaper profile for background analysis
+
+That's it — **InnerLore is standalone by default**. State storage is *Embedded*: the full per-chat store lives inside the chat's own JSONL file, so it is portable, branch-aware, and needs no server components.
+
+**Optional:** the companion **`airpg-storage` server plugin** (per-chat SQLite worlds with FTS5 search, graph projections, and server-prepared contexts) can be enabled via **InnerLore → State storage → SQLite server**. Existing chats that already use it keep using it automatically.
 
 **Installing the extension**
 
@@ -31,9 +34,9 @@ It is designed for arbitrary character cards and genres. No scenario, relationsh
 
 The narrator prompt, narration length (Brief / Standard / Long), context budgets, history handling, and event behavior are all configured from the InnerLore panel — no prompt-manager editing required.
 
-**Installing the storage plugin**
+**Installing the optional storage plugin**
 
-The `airpg-storage` plugin provides the per-chat SQLite worlds InnerLore reads and writes. Clone or download it into `SillyTavern/plugins/airpg-storage`, install its npm dependencies, and restart SillyTavern. Health check: `GET /api/plugins/airpg-storage/v1/health`.
+Only needed for the SQLite backend. Clone or download `airpg-storage` into `SillyTavern/plugins/airpg-storage`, install its npm dependencies, set `enableServerPlugins: true` in `config.yaml`, and restart SillyTavern. Health check: `GET /api/plugins/airpg-storage/v1/health`.
 
 ## Inspiration and architecture
 
