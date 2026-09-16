@@ -69,7 +69,7 @@ import {
     removeEventProposal,
     recordEventDirectorAttempt,
 } from './event-director.js';
-import { decideInnerLoreMaintenance } from './maintenance-scheduler.js?v=3';
+import { decideInnerLoreMaintenance } from './maintenance-scheduler.js?v=4';
 import { EmbeddedStorageClient } from './embedded-storage.js?v=1';
 import { requestProgressionPatch, testProgressionConnection } from './progression-client.js';
 import { buildProgressionMessages } from './progression-prompts.js';
@@ -377,7 +377,7 @@ const defaultSettings = Object.freeze({
     autoRebuildMessageLimit: 120,
     customInstructions: '',
     worldProgressionEnabled: true,
-    progressionEveryAssistantTurns: 4,
+    progressionEveryAssistantTurns: 2,
     progressionAutonomy: 'conservative',
     progressionTimeMode: 'balanced',
     progressionConnectionProfileId: '',
