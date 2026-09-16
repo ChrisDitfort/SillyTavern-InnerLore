@@ -1,0 +1,12 @@
+{
+    "display_name": "InnerLore \u2014 Living Characters & World",
+    "loading_order": 60,
+    "requires": [],
+    "optional": [],
+    "js": "index.js",
+    "css": "style.css",
+    "author": "ChrisDitfort",
+    "version": "0.9.4",
+    "auto_update": true,
+    "home_page": "https://github.com/ChrisDitfort/SillyTavern-InnerLore"
+}

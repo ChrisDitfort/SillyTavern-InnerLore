@@ -1,0 +1,747 @@
+<div id="inner_lore_settings" class="extension_container inner-lore-root">
+    <div class="inline-drawer">
+        <div class="inline-drawer-toggle inline-drawer-header">
+            <b><i class="fa-solid fa-brain"></i> InnerLore <small>v0.9.1</small></b>
+            <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+        </div>
+        <div class="inline-drawer-content">
+            <div class="inner-lore-heading-row">
+                <label class="checkbox_label" for="il_enabled">
+                    <input id="il_enabled" type="checkbox" />
+                    <span>Enable InnerLore</span>
+                </label>
+                <span id="il_status_badge" class="inner-lore-status is-idle">Idle</span>
+            </div>
+            <small class="inner-lore-hint">
+                Private, per-character minds plus automatic native World Info records for this chat.
+                Background analysis never appears in the story output.
+            </small>
+
+            <div id="il_status_detail" class="inner-lore-status-detail">Waiting for a chat.</div>
+
+            <hr class="sysHR" />
+
+            <label class="checkbox_label" for="il_auto_update">
+                <input id="il_auto_update" type="checkbox" />
+                <span>Update automatically after story replies</span>
+            </label>
+            <label class="checkbox_label" for="il_auto_recover_incomplete">
+                <input id="il_auto_recover_incomplete" type="checkbox" />
+                <span>Complete replies interrupted mid-sentence</span>
+            </label>
+            <label>
+                <span>Maximum automatic completion attempts</span>
+                <input id="il_incomplete_recovery_attempts" class="text_pole" type="number" min="1" max="3" step="1" />
+            </label>
+            <small class="inner-lore-hint">
+                Only strong cutoff signals are repaired, such as an unclosed quotation, a trailing connector,
+                or missing terminal punctuation. Pressing Stop is always respected.
+            </small>
+            <label class="checkbox_label" for="il_inner_self_enabled">
+                <input id="il_inner_self_enabled" type="checkbox" />
+                <span>Maintain private character minds</span>
+            </label>
+            <label class="checkbox_label" for="il_auto_lore_enabled">
+                <input id="il_auto_lore_enabled" type="checkbox" />
+                <span>Maintain automatic world lore</span>
+            </label>
+
+            <div class="inner-lore-actions">
+                <button id="il_scan_now" class="menu_button">
+                    <i class="fa-solid fa-wand-magic-sparkles"></i> Scan New Turns
+                </button>
+                <button id="il_rebuild" class="menu_button">
+                    <i class="fa-solid fa-arrows-rotate"></i> Rebuild From Chat
+                </button>
+                <button id="il_stop" class="menu_button menu_button_danger" disabled>
+                    <i class="fa-solid fa-stop"></i> Stop
+                </button>
+                <button id="il_open_lorebook" class="menu_button">
+                    <i class="fa-solid fa-book-atlas"></i> Open Lorebook
+                </button>
+            </div>
+
+            <div id="il_stats" class="inner-lore-stats"></div>
+
+            <div class="inline-drawer">
+                <div class="inline-drawer-toggle inline-drawer-header">
+                    <b><i class="fa-solid fa-scroll"></i> Narrator Prompt</b>
+                    <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+                </div>
+                <div class="inline-drawer-content">
+                    <label class="checkbox_label" for="il_narrator_prompt_enabled">
+                        <input id="il_narrator_prompt_enabled" type="checkbox" checked />
+                        <span>Use the InnerLore narrator prompt (ignores SillyTavern's Main Prompt)</span>
+                    </label>
+                    <small class="inner-lore-hint">
+                        While enabled, story generations use this plugin-owned prompt instead of the Main Prompt
+                        in SillyTavern's prompt manager. Your prompt manager is never modified — it is simply
+                        bypassed at generation time.
+                    </small>
+                    <label for="il_narrator_prompt">Prompt template</label>
+                    <textarea id="il_narrator_prompt" class="text_pole" rows="14" spellcheck="false"></textarea>
+                    <div class="inner-lore-macro-legend">
+                        <b>Available macros</b>
+                        <code>{{user}}</code> player name ·
+                        <code>{{char}}</code> character name ·
+                        <code>{{innerlore_state_context}}</code> full game state (scene, private minds, lore, progression)
+                    </div>
+                    <div class="inner-lore-fieldset">
+                        <b><i class="fa-solid fa-database"></i> SQLite Chat History in Macro</b>
+                        <label class="checkbox_label" for="il_history_in_macro">
+                            <input id="il_history_in_macro" type="checkbox" checked />
+                            <span>Deliver chat history from SQLite inside the state macro</span>
+                        </label>
+                        <small class="inner-lore-hint">
+                            Off (recommended): SillyTavern renders the conversation as real chat turns — the most
+                            reliable structure for narration. The SQLite transcript stays synchronized either way.
+                            Turning this on moves history into the state macro and bypasses SillyTavern's own
+                            rendering, which weakens action narration.
+                        </small>
+                        <div class="inner-lore-grid two-columns">
+                            <label>
+                                <span>History character budget</span>
+                                <input id="il_history_budget" class="text_pole" type="number" min="500" max="40000" step="500" />
+                            </label>
+                            <label>
+                                <span>Maximum turns kept</span>
+                                <input id="il_history_max_turns" class="text_pole" type="number" min="2" max="200" step="1" />
+                            </label>
+                        </div>
+                        <small class="inner-lore-hint">
+                            Trimming keeps the newest turns first; anything past the budget or turn cap is noted as
+                            "in SQLite" and omitted.
+                        </small>
+                    </div>
+                    <label for="il_narration_length">Narration length</label>
+                    <select id="il_narration_length" class="text_pole">
+                        <option value="brief">Brief — one tight paragraph (~120 words)</option>
+                        <option value="standard">Standard — two to four paragraphs (~250–400 words)</option>
+                        <option value="long">Long — immersive (~500–800 words)</option>
+                    </select>
+                    <div class="inner-lore-actions">
+                        <button id="il_narrator_prompt_preview" class="menu_button"><i class="fa-solid fa-eye"></i> Preview Expanded</button>
+                        <button id="il_narrator_prompt_reset" class="menu_button"><i class="fa-solid fa-rotate-left"></i> Reset to Default</button>
+                    </div>
+                    <textarea id="il_narrator_prompt_preview_out" class="text_pole displayNone" rows="16" readonly></textarea>
+                </div>
+            </div>
+
+            <hr class="sysHR" />
+
+            <div class="inline-drawer">
+                <div class="inline-drawer-toggle inline-drawer-header">
+                    <b><i class="fa-solid fa-plug"></i> Background Model</b>
+                    <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+                </div>
+                <div class="inline-drawer-content">
+                    <label for="il_connection_source">Connection source</label>
+                    <select id="il_connection_source" class="text_pole">
+                        <option value="profile">Connection profile</option>
+                        <option value="active">Current story connection</option>
+                    </select>
+
+                    <div id="il_profile_row">
+                        <label for="il_connection_profile">Connection profile</label>
+                        <select id="il_connection_profile" class="text_pole"></select>
+                        <label for="il_fallback_connection_profile">Fallback profile after transient failures</label>
+                        <select id="il_fallback_connection_profile" class="text_pole"></select>
+                    </div>
+
+                    <div class="inner-lore-grid two-columns">
+                        <label>
+                            <span>Maximum response tokens</span>
+                            <input id="il_maximum_response_tokens" class="text_pole" type="number" min="800" max="32000" step="200" />
+                        </label>
+                        <label>
+                            <span>Temperature</span>
+                            <input id="il_temperature" class="text_pole" type="number" min="0" max="1.5" step="0.05" />
+                        </label>
+                        <label>
+                            <span>Request timeout (seconds)</span>
+                            <input id="il_request_timeout" class="text_pole" type="number" min="15" max="300" step="15" />
+                        </label>
+                    </div>
+
+                    <label for="il_maintenance_output_format">Background analysis response format</label>
+                    <select id="il_maintenance_output_format" class="text_pole">
+                        <option value="json">Strict JSON (established)</option>
+                        <option value="dsl">InnerLore DSL v1 (experimental)</option>
+                    </select>
+                    <small class="inner-lore-hint">
+                        DSL uses readable records such as <code>LOCATION Ben Tavern … END</code>, then converts them
+                        locally into the same validated objects as JSON. It does not bypass canon or safety checks.
+                    </small>
+
+                    <label class="checkbox_label" for="il_repair_json">
+                        <input id="il_repair_json" type="checkbox" />
+                        <span>Repair malformed analysis output with one retry</span>
+                    </label>
+
+                    <button id="il_test_connection" class="menu_button">
+                        <i class="fa-solid fa-plug-circle-check"></i> Test Connection
+                    </button>
+                    <small class="inner-lore-hint">
+                        Recent story text and relevant state are sent to this profile. Provider privacy and ZDR rules still apply.
+                        InnerLore initially follows Summaryception's selected profile when available.
+                    </small>
+                </div>
+            </div>
+
+            <div class="inline-drawer">
+                <div class="inline-drawer-toggle inline-drawer-header">
+                    <b><i class="fa-solid fa-bolt"></i> Triggerable Event Editor</b>
+                    <span id="il_event_status_chip" class="il-event-chip is-draft displayNone">Draft</span>
+                    <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+                </div>
+                <div class="inline-drawer-content">
+                    <div class="inner-lore-add-row">
+                        <input id="il_new_trigger_event_title" class="text_pole" type="text" placeholder="New event name, e.g. Night patrol ambush" />
+                        <button id="il_add_trigger_event" class="menu_button"><i class="fa-solid fa-plus"></i> Create</button>
+                    </div>
+                    <select id="il_trigger_event_select" class="text_pole"></select>
+
+                    <div id="il_trigger_event_editor" class="inner-lore-editor is-empty">
+                        <div id="il_trigger_event_state" class="inner-lore-trigger-state"></div>
+
+                        <div class="il-step"><b>1</b><span>What happens</span></div>
+                        <input id="il_trigger_event_title" class="text_pole" type="text" placeholder="Event title" />
+                        <textarea id="il_trigger_event_description" class="text_pole" rows="2" placeholder="A robbery begins at the manor; a messenger arrives with urgent news..."></textarea>
+
+                        <div class="il-step"><b>2</b><span>When it fires</span> <small>(set at least one)</span></div>
+                        <div class="il-when-row">
+                            <i class="fa-solid fa-clock"></i>
+                            <input id="il_trigger_event_time_amount" class="text_pole" type="number" min="0" step="0.1" placeholder="—" aria-label="Time amount" />
+                            <select id="il_trigger_event_time_unit" class="text_pole">
+                                <option value="seconds">sec</option>
+                                <option value="minutes" selected>min</option>
+                                <option value="hours">hours</option>
+                                <option value="days">days</option>
+                            </select>
+                            <select id="il_trigger_event_time_basis" class="text_pole">
+                                <option value="after_creation">after arming</option>
+                                <option value="story_elapsed">after story start</option>
+                            </select>
+                        </div>
+                        <div class="il-when-or">— or when this action completes —</div>
+                        <textarea id="il_trigger_event_action" class="text_pole" rows="2" placeholder="The guard leaves his post; the player opens the sealed vault..."></textarea>
+
+                        <div class="il-step"><b>3</b><span>How it surfaces</span></div>
+                        <select id="il_trigger_event_visibility" class="text_pole">
+                            <option value="observable">Appears in the story when it fires</option>
+                            <option value="hidden">Stays hidden until revealed</option>
+                        </select>
+
+                        <div class="il-step"><b>4</b><span>What it changes</span></div>
+                        <textarea id="il_trigger_event_consequences" class="text_pole" rows="2" placeholder="Advance the invasion off-screen, change NPC goals, spread news..."></textarea>
+                        <input id="il_trigger_event_subjects" class="text_pole" type="text" placeholder="People/factions/places involved (comma separated)" />
+
+                        <button id="il_arm_trigger_event" class="menu_button il-arm-button">
+                            <i class="fa-solid fa-bolt"></i> Arm Event
+                        </button>
+                        <small class="inner-lore-hint">Arming enables the event from this story point. It needs a time or action trigger above.</small>
+
+                        <div class="inner-lore-actions">
+                            <button id="il_save_trigger_event" class="menu_button"><i class="fa-solid fa-floppy-disk"></i> Save Draft</button>
+                            <button id="il_rearm_trigger_event" class="menu_button"><i class="fa-solid fa-rotate"></i> Re-arm</button>
+                            <button id="il_retry_trigger_event_delivery" class="menu_button"><i class="fa-solid fa-paper-plane"></i> Retry Delivery</button>
+                            <button id="il_delete_trigger_event" class="menu_button menu_button_danger"><i class="fa-solid fa-trash"></i> Delete</button>
+                        </div>
+
+                        <details class="il-advanced">
+                            <summary><i class="fa-solid fa-sliders"></i> Advanced</summary>
+                            <div class="inner-lore-grid two-columns">
+                                <label><span>Stable key</span><input id="il_trigger_event_key" class="text_pole" type="text" /></label>
+                                <label><span>Priority</span><input id="il_trigger_event_priority" class="text_pole" type="number" min="0" max="100" step="1" /></label>
+                                <label><span>If both triggers set</span>
+                                    <select id="il_trigger_event_mode" class="text_pole"><option value="any">Either one fires</option><option value="all">Wait for both</option></select></label>
+                                <label><span>Uncertain story time counts?</span>
+                                    <select id="il_trigger_event_time_certainty" class="text_pole"><option value="estimated">Use estimated time</option><option value="definite">Wait until definite</option></select></label>
+                                <label><span>Who must do the action?</span>
+                                    <select id="il_trigger_event_actor_scope" class="text_pole"><option value="any">Anyone</option><option value="player">Player</option><option value="npc">Any NPC</option><option value="named">Named actor</option></select></label>
+                                <label><span>Player action timing</span>
+                                    <select id="il_trigger_event_action_timing" class="text_pole"><option value="after_outcome">After narration confirms</option><option value="same_reply_attempt">Same reply (experimental)</option></select></label>
+                                <label id="il_trigger_event_named_actor_row" class="displayNone"><span>Named actor</span><input id="il_trigger_event_actor_name" class="text_pole" type="text" /></label>
+                                <label class="il-check-cell"><span>Enabled</span><input id="il_trigger_event_enabled" type="checkbox" /></label>
+                            </div>
+                            <label>Cancel the event if…</label>
+                            <textarea id="il_trigger_event_cancel" class="text_pole" rows="1" placeholder="The treaty is signed before hostilities begin..."></textarea>
+                            <label>Reveal after delay (hidden events)</label>
+                            <div class="il-when-row">
+                                <input id="il_trigger_event_reveal_amount" class="text_pole" type="number" min="0" step="0.1" placeholder="—" />
+                                <select id="il_trigger_event_reveal_unit" class="text_pole"><option value="seconds">sec</option><option value="minutes">min</option><option value="hours">hours</option><option value="days">days</option></select>
+                            </div>
+                            <label>Reveal when… / Mark finished when…</label>
+                            <textarea id="il_trigger_event_reveal_condition" class="text_pole" rows="1" placeholder="A messenger reaches the scene..."></textarea>
+                            <textarea id="il_trigger_event_resolution" class="text_pole" rows="1" placeholder="The thieves are captured..."></textarea>
+                        </details>
+
+                        <details class="il-advanced">
+                            <summary><i class="fa-solid fa-magnifying-glass-chart"></i> Diagnostics</summary>
+                            <div id="il_trigger_event_inspector_summary" class="inner-lore-trigger-state"></div>
+                            <label>Definition sent to evaluator</label>
+                            <textarea id="il_trigger_event_evaluator_payload" class="text_pole" rows="6" readonly></textarea>
+                            <label>Last evaluator acknowledgement</label>
+                            <textarea id="il_trigger_event_evaluation_result" class="text_pole" rows="5" readonly></textarea>
+                            <label>Last story-delivery prompt</label>
+                            <textarea id="il_trigger_event_delivery_prompt" class="text_pole" rows="6" readonly></textarea>
+                        </details>
+                    </div>
+                </div>
+            </div>
+
+            <div class="inline-drawer">
+                <div class="inline-drawer-toggle inline-drawer-header">
+<b><i class="fa-solid fa-gears"></i> Automation</b>
+                    <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+                </div>
+                <div class="inline-drawer-content">
+                    <label class="checkbox_label" for="il_adaptive_maintenance">
+                        <input id="il_adaptive_maintenance" type="checkbox" />
+                        <span>Adaptively batch background maintenance</span>
+                    </label>
+                    <small class="inner-lore-hint">
+                        Ordinary replies are batched. Explicit time advances, pending event delivery,
+                        and relevant event actions can run World Progression immediately without also calling the curator.
+                    </small>
+                    <div class="inner-lore-grid two-columns">
+                        <label>
+                            <span>Curator maximum interval (assistant replies)</span>
+                            <input id="il_process_every" class="text_pole" type="number" min="1" max="20" step="1" />
+                        </label>
+                        <label>
+                            <span>Minimum adaptive curator batch</span>
+                            <input id="il_minimum_adaptive_batch" class="text_pole" type="number" min="1" max="10" step="1" />
+                        </label>
+                        <label>
+                            <span>Messages per analysis batch</span>
+                            <input id="il_lookback_messages" class="text_pole" type="number" min="2" max="40" step="1" />
+                        </label>
+                        <label>
+                            <span>Maximum entity patches/pass</span>
+                            <input id="il_max_entities_per_pass" class="text_pole" type="number" min="1" max="20" step="1" />
+                        </label>
+                        <label>
+                            <span>Maximum mind patches/pass</span>
+                            <input id="il_max_minds_per_pass" class="text_pole" type="number" min="1" max="50" step="1" />
+                        </label>
+                        <label>
+                            <span>New-entry importance threshold</span>
+                            <input id="il_minimum_importance" class="text_pole" type="number" min="0" max="100" step="5" />
+                        </label>
+                    </div>
+
+                    <label for="il_card_detail">Automatic card detail</label>
+                    <select id="il_card_detail" class="text_pole">
+                        <option value="compact">Compact (80–160 words)</option>
+                        <option value="detailed">Detailed (180–350 words)</option>
+                        <option value="expansive">Expansive (300–600 words)</option>
+                    </select>
+
+                    <div class="inner-lore-fieldset">
+                        <span>Generated lore types</span>
+                        <div id="il_entity_types" class="inner-lore-type-grid">
+                            <label class="checkbox_label"><input type="checkbox" value="character" /> Character</label>
+                            <label class="checkbox_label"><input type="checkbox" value="location" /> Location</label>
+                            <label class="checkbox_label"><input type="checkbox" value="item" /> Item</label>
+                            <label class="checkbox_label"><input type="checkbox" value="faction" /> Faction</label>
+                            <label class="checkbox_label"><input type="checkbox" value="organization" /> Organization</label>
+                            <label class="checkbox_label"><input type="checkbox" value="creature" /> Creature</label>
+                            <label class="checkbox_label"><input type="checkbox" value="event" /> Event</label>
+                            <label class="checkbox_label"><input type="checkbox" value="concept" /> Concept</label>
+                        </div>
+                    </div>
+
+                    <label class="checkbox_label" for="il_auto_rebuild_history">
+                        <input id="il_auto_rebuild_history" type="checkbox" />
+                        <span>Automatically rebuild after edits, swipes, or deletions</span>
+                    </label>
+                    <label>
+                        <span>Maximum messages for automatic rebuild</span>
+                        <input id="il_auto_rebuild_limit" class="text_pole" type="number" min="10" max="1000" step="10" />
+                    </label>
+                </div>
+            </div>
+
+            <div class="inline-drawer">
+                <div class="inline-drawer-toggle inline-drawer-header">
+                    <b><i class="fa-solid fa-clock-rotate-left"></i> World Progression Engine</b>
+                    <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+                </div>
+                <div class="inline-drawer-content">
+                    <label class="checkbox_label" for="il_world_progression_enabled">
+                        <input id="il_world_progression_enabled" type="checkbox" />
+                        <span>Infer story time and progress the world</span>
+                    </label>
+                    <small class="inner-lore-hint">
+                        A private chronologist reads each completed player/story exchange, estimates elapsed fictional time,
+                        and updates goals, processes, deadlines, and restrained future beats. Simulated events remain private
+                        until narration reveals them, and player-required actions are never completed automatically.
+                    </small>
+
+                    <div class="inner-lore-fieldset">
+                        <b><i class="fa-solid fa-wand-sparkles"></i> Automatic Event Director (optional)</b>
+                        <label class="checkbox_label" for="il_event_director_enabled">
+                            <input id="il_event_director_enabled" type="checkbox" />
+                            <span>Derive triggerable events from committed lore and world progression</span>
+                        </label>
+                        <small class="inner-lore-hint">
+                            Off by default. When the event pool needs another beat, a focused background call reads the committed
+                            SQLite/graph state and proposes at most one source-cited event. It never runs while disabled or while an event awaits delivery.
+                        </small>
+                        <div class="inner-lore-grid two-columns">
+                            <label>
+                                <span>Approval</span>
+                                <select id="il_event_director_mode" class="text_pole">
+                                    <option value="review">Keep proposals for review</option>
+                                    <option value="auto_arm">Validate and arm automatically</option>
+                                </select>
+                            </label>
+                            <label>
+                                <span>Activity</span>
+                                <select id="il_event_director_activity" class="text_pole">
+                                    <option value="quiet">Quiet (1 event, 10-turn gap)</option>
+                                    <option value="balanced">Balanced (2 events, 6-turn gap)</option>
+                                    <option value="lively">Lively (3 events, 4-turn gap)</option>
+                                </select>
+                            </label>
+                            <label>
+                                <span>Minimum grounding confidence</span>
+                                <input id="il_event_director_confidence" class="text_pole" type="number" min="0.5" max="1" step="0.01" />
+                            </label>
+                            <label>
+                                <span>Expire after messages</span>
+                                <input id="il_event_director_expiration" class="text_pole" type="number" min="4" max="200" step="1" />
+                            </label>
+                        </div>
+                        <label class="checkbox_label" for="il_event_director_private_minds">
+                            <input id="il_event_director_private_minds" type="checkbox" />
+                            <span>Allow private NPC motives as sources (separate opt-in)</span>
+                        </label>
+                        <div id="il_event_director_summary" class="inner-lore-trigger-state"></div>
+                        <label for="il_event_proposal_select">Saved proposals</label>
+                        <select id="il_event_proposal_select" class="text_pole"></select>
+                        <textarea id="il_event_proposal_detail" class="text_pole" rows="10" readonly></textarea>
+                        <div class="inner-lore-actions">
+                            <button id="il_event_director_generate" class="menu_button"><i class="fa-solid fa-wand-magic-sparkles"></i> Generate One Now</button>
+                            <button id="il_event_proposal_approve" class="menu_button"><i class="fa-solid fa-check"></i> Approve &amp; Arm</button>
+                            <button id="il_event_proposal_reject" class="menu_button"><i class="fa-solid fa-ban"></i> Reject</button>
+                            <button id="il_event_proposal_delete" class="menu_button menu_button_danger"><i class="fa-solid fa-trash"></i> Delete Proposal</button>
+                        </div>
+                    </div>
+
+                    <div class="inner-lore-grid two-columns">
+                        <label>
+                            <span>Progression maximum interval (assistant replies)</span>
+                            <input id="il_progression_every" class="text_pole" type="number" min="1" max="20" step="1" />
+                        </label>
+                        <label>
+                            <span>Autonomy</span>
+                            <select id="il_progression_autonomy" class="text_pole">
+                                <option value="advisory">Advisory (track only)</option>
+                                <option value="conservative">Conservative (recommended)</option>
+                                <option value="simulation">World simulation</option>
+                                <option value="director">Story director</option>
+                            </select>
+                        </label>
+                        <label>
+                            <span>Time inference</span>
+                            <select id="il_progression_time_mode" class="text_pole">
+                                <option value="cinematic">Cinematic</option>
+                                <option value="balanced">Balanced</option>
+                                <option value="simulation">Simulation</option>
+                            </select>
+                        </label>
+                    </div>
+
+                    <label for="il_progression_profile">Progression agent profile</label>
+                    <select id="il_progression_profile" class="text_pole"></select>
+                    <label for="il_progression_fallback_profile">Progression fallback profile after transient failures</label>
+                    <select id="il_progression_fallback_profile" class="text_pole"></select>
+
+                    <div class="inner-lore-grid two-columns">
+                        <label>
+                            <span>Maximum response tokens</span>
+                            <input id="il_progression_maximum_response_tokens" class="text_pole" type="number" min="800" max="32000" step="200" />
+                        </label>
+                        <label>
+                            <span>Temperature</span>
+                            <input id="il_progression_temperature" class="text_pole" type="number" min="0" max="1.5" step="0.05" />
+                        </label>
+                        <label>
+                            <span>Request timeout (seconds)</span>
+                            <input id="il_progression_request_timeout" class="text_pole" type="number" min="15" max="300" step="15" />
+                        </label>
+                        <label>
+                            <span>Messages per rebuild time pass</span>
+                            <input id="il_progression_rebuild_batch" class="text_pole" type="number" min="2" max="100" step="1" />
+                        </label>
+                        <label>
+                            <span>Maximum goal patches/pass</span>
+                            <input id="il_progression_maximum_goals" class="text_pole" type="number" min="1" max="200" step="1" />
+                        </label>
+                        <label>
+                            <span>Maximum process patches/pass</span>
+                            <input id="il_progression_maximum_processes" class="text_pole" type="number" min="1" max="200" step="1" />
+                        </label>
+                        <label>
+                            <span>Maximum beat patches/pass</span>
+                            <input id="il_progression_maximum_events" class="text_pole" type="number" min="1" max="200" step="1" />
+                        </label>
+                        <label>
+                            <span>Maximum progression entries injected</span>
+                            <input id="il_progression_maximum_injected" class="text_pole" type="number" min="1" max="30" step="1" />
+                        </label>
+                        <label>
+                            <span>Progression injection budget</span>
+                            <input id="il_progression_injection_budget" class="text_pole" type="number" min="500" max="40000" step="250" />
+                        </label>
+                        <label>
+                            <span>Story-delivery attempts before manual review</span>
+                            <input id="il_trigger_delivery_attempts" class="text_pole" type="number" min="1" max="20" step="1" />
+                        </label>
+                        <label>
+                            <span>Maximum same-reply action candidates</span>
+                            <input id="il_trigger_attempt_previews" class="text_pole" type="number" min="1" max="20" step="1" />
+                        </label>
+                    </div>
+
+                    <label for="il_progression_custom_instructions">Additional scenario-independent progression instructions</label>
+                    <textarea id="il_progression_custom_instructions" class="text_pole" rows="4" placeholder="Optional preferences for pacing or off-screen simulation..."></textarea>
+
+                    <div class="inner-lore-actions">
+                        <button id="il_test_progression_connection" class="menu_button">
+                            <i class="fa-solid fa-plug-circle-check"></i> Test Progression Agent
+                        </button>
+                        <button id="il_reset_progression" class="menu_button menu_button_danger">
+                            <i class="fa-solid fa-clock-rotate-left"></i> Reset Progression
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="inline-drawer">
+                <div class="inline-drawer-toggle inline-drawer-header">
+                    <b><i class="fa-solid fa-masks-theater"></i> Mind and Injection Limits</b>
+                    <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+                </div>
+                <div class="inline-drawer-content">
+                    <div class="inner-lore-fieldset">
+                        <b>Context Amount</b>
+                        <small class="inner-lore-hint">
+                            This is the maximum InnerLore state packet, not the model's full context window. Explicitly named characters and locations are reserved first.
+                        </small>
+                        <div class="inner-lore-grid two-columns">
+                            <label>
+                                <span>Server context profile</span>
+                                <select id="il_context_profile" class="text_pole">
+                                    <option value="compact">Compact</option>
+                                    <option value="balanced">Balanced</option>
+                                    <option value="expansive">Expansive</option>
+                                </select>
+                            </label>
+                            <label>
+                                <span id="il_context_maximum_value">18,000 characters · approximately 4,500 tokens · Balanced</span>
+                                <span class="inner-lore-context-budget-row">
+                                    <button id="il_context_decrease" class="menu_button" type="button" title="Decrease context by 1,000 characters" aria-label="Decrease context">−</button>
+                                    <input id="il_context_maximum" type="range" min="2000" max="100000" step="1000" value="18000" />
+                                    <button id="il_context_increase" class="menu_button" type="button" title="Increase context by 1,000 characters" aria-label="Increase context">+</button>
+                                </span>
+                            </label>
+                        </div>
+                        <small class="inner-lore-hint">Changing a detailed limit below switches the packet to Custom while retaining the selected profile as its base.</small>
+                    </div>
+                    <div class="inner-lore-grid two-columns">
+                        <label>
+                            <span>Persistent facets per character</span>
+                            <input id="il_maximum_thoughts" class="text_pole" type="number" min="4" max="200" step="1" />
+                        </label>
+                        <label>
+                            <span>Durable facet changes per pass</span>
+                            <input id="il_maximum_thought_changes" class="text_pole" type="number" min="1" max="50" step="1" />
+                        </label>
+                        <label>
+                            <span>Story observations before facet promotion</span>
+                            <input id="il_minimum_story_facet_observations" class="text_pole" type="number" min="1" max="5" step="1" />
+                        </label>
+                        <label>
+                            <span>Brain consolidation similarity</span>
+                            <input id="il_brain_consolidation_similarity" class="text_pole" type="number" min="0.75" max="0.99" step="0.01" />
+                        </label>
+                        <label>
+                            <span>Raw thoughts per Current Mind</span>
+                            <input id="il_maximum_scene_thoughts" class="text_pole" type="number" min="0" max="20" step="1" />
+                        </label>
+                        <label>
+                            <span>Active minds injected</span>
+                            <input id="il_maximum_active_brains" class="text_pole" type="number" min="1" max="20" step="1" />
+                        </label>
+                        <label>
+                            <span>Persistent facets per injected mind</span>
+                            <input id="il_maximum_injected_thoughts" class="text_pole" type="number" min="1" max="20" step="1" />
+                        </label>
+                        <label>
+                            <span>Current Mind relevance window (messages)</span>
+                            <input id="il_scene_thought_age" class="text_pole" type="number" min="1" max="40" step="1" />
+                        </label>
+                        <label>
+                            <span>Private-mind character budget</span>
+                            <input id="il_brain_budget" class="text_pole" type="number" min="500" max="50000" step="250" />
+                        </label>
+                        <label>
+                            <span>Lore character budget</span>
+                            <input id="il_lore_budget" class="text_pole" type="number" min="500" max="60000" step="250" />
+                        </label>
+                        <label>
+                            <span>Maximum lore entries injected</span>
+                            <input id="il_maximum_injected_entities" class="text_pole" type="number" min="1" max="30" step="1" />
+                        </label>
+                        <label>
+                            <span>Scene lookback messages</span>
+                            <input id="il_scene_lookback" class="text_pole" type="number" min="2" max="10" step="1" />
+                        </label>
+                        <label>
+                            <span>Current-scene text budget (characters)</span>
+                            <input id="il_scene_budget" class="text_pole" type="number" min="400" max="8000" step="100" />
+                        </label>
+                        <label>
+                            <span>Injection depth</span>
+                            <input id="il_injection_depth" class="text_pole" type="number" min="0" max="100" step="1" />
+                        </label>
+                        <label>
+                            <span>Context delivery</span>
+                            <select id="il_context_delivery_mode" class="text_pole">
+                                <option value="automatic">Automatic system prompt</option>
+                                <option value="macro">Prompt macro only</option>
+                            </select>
+                        </label>
+                        <label>
+                            <span>Preparation timeout (ms)</span>
+                            <input id="il_server_context_timeout" class="text_pole" type="number" min="250" max="5000" step="50" />
+                        </label>
+                    </div>
+                    <small class="inner-lore-hint">
+                        The server prepares one branch-aware SQLite state before macro expansion. Choose “Prompt macro only” to place
+                        <code>{{innerlore_state_context}}</code> in your main prompt. Section macros are
+                        <code>{{innerlore_scene_context}}</code>, <code>{{innerlore_npc_context}}</code>,
+                        <code>{{innerlore_lore_context}}</code>, and <code>{{innerlore_progression_context}}</code>.
+                        Do not add these macros while automatic delivery is selected; macro values are intentionally empty in that mode.
+                    </small>
+                </div>
+            </div>
+
+            <div class="inline-drawer">
+                <div class="inline-drawer-toggle inline-drawer-header">
+                    <b><i class="fa-solid fa-book-open-reader"></i> Lore Entry Editor</b>
+                    <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+                </div>
+                <div class="inline-drawer-content">
+                    <select id="il_entity_select" class="text_pole"></select>
+                    <div id="il_entity_editor" class="inner-lore-editor is-empty">
+                        <div class="inner-lore-grid two-columns">
+                            <label>
+                                <span>Aliases</span>
+                                <input id="il_entity_aliases" class="text_pole" type="text" />
+                            </label>
+                            <label>
+                                <span>Trigger keys</span>
+                                <input id="il_entity_keys" class="text_pole" type="text" />
+                            </label>
+                            <label>
+                                <span>Importance</span>
+                                <input id="il_entity_importance" class="text_pole" type="number" min="0" max="100" step="1" />
+                            </label>
+                            <div class="inner-lore-check-row">
+                                <label class="checkbox_label"><input id="il_entity_enabled" type="checkbox" /> Enabled</label>
+                                <label class="checkbox_label"><input id="il_entity_pinned" type="checkbox" /> Always relevant</label>
+                            </div>
+                        </div>
+                        <label for="il_entity_content">Lore content</label>
+                        <textarea id="il_entity_content" class="text_pole" rows="12"></textarea>
+                        <small class="inner-lore-hint">Saving edited content turns it into a protected manual override. “Use Automatic” resumes generated content.</small>
+                        <div class="inner-lore-actions">
+                            <button id="il_save_entity" class="menu_button"><i class="fa-solid fa-floppy-disk"></i> Save</button>
+                            <button id="il_auto_entity" class="menu_button"><i class="fa-solid fa-wand-magic"></i> Use Automatic</button>
+                            <button id="il_delete_entity" class="menu_button menu_button_danger"><i class="fa-solid fa-trash"></i> Delete</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="inline-drawer">
+                <div class="inline-drawer-toggle inline-drawer-header">
+                    <b><i class="fa-solid fa-head-side-virus"></i> Character Brain Editor</b>
+                    <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+                </div>
+                <div class="inline-drawer-content">
+                    <div class="inner-lore-add-row">
+                        <input id="il_new_brain_name" class="text_pole" type="text" placeholder="Character name" />
+                        <button id="il_add_brain" class="menu_button"><i class="fa-solid fa-plus"></i> Add</button>
+                    </div>
+                    <select id="il_brain_select" class="text_pole"></select>
+                    <div id="il_brain_editor" class="inner-lore-editor is-empty">
+                        <label>
+                            <span>Aliases</span>
+                            <input id="il_brain_aliases" class="text_pole" type="text" />
+                        </label>
+                        <div class="inner-lore-check-row">
+                            <label class="checkbox_label"><input id="il_brain_enabled" type="checkbox" /> Enabled</label>
+                            <label class="checkbox_label"><input id="il_brain_pinned" type="checkbox" /> Always relevant</label>
+                        </div>
+                        <div class="inner-lore-brain-viewbar">
+                            <div class="inner-lore-view-toggle" role="tablist" aria-label="Brain display mode">
+                                <button id="il_brain_view_mind" type="button" role="tab" aria-selected="true">
+                                    <i class="fa-solid fa-heart-pulse"></i> Mind View
+                                </button>
+                                <button id="il_brain_view_raw" type="button" role="tab" aria-selected="false">
+                                    <i class="fa-solid fa-code"></i> Raw JSON
+                                </button>
+                            </div>
+                            <span id="il_brain_dirty_badge" class="inner-lore-dirty-badge displayNone">
+                                <i class="fa-solid fa-pen"></i> Unsaved edits
+                            </span>
+                        </div>
+                        <div id="il_brain_visual" class="inner-lore-brain-visual" aria-live="polite"></div>
+                        <div id="il_brain_raw_pane" class="displayNone">
+                            <label for="il_brain_json">Persistent Self, Voice, Relationships &amp; Current Mind (JSON)</label>
+                            <textarea id="il_brain_json" class="text_pole" rows="18" spellcheck="false"></textarea>
+                        </div>
+                        <small class="inner-lore-hint">
+                            Mind View is read-only; switch to Raw JSON to edit, then press Save Brain.
+                            Persistent fields use stable keys with kind, statement, and confidence. Current Mind is a replaceable transient snapshot; set it to null to clear it.
+                        </small>
+                        <div class="inner-lore-actions">
+                            <button id="il_save_brain" class="menu_button"><i class="fa-solid fa-floppy-disk"></i> Save Brain</button>
+                            <button id="il_delete_brain" class="menu_button menu_button_danger"><i class="fa-solid fa-trash"></i> Delete Brain</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="inline-drawer">
+                <div class="inline-drawer-toggle inline-drawer-header">
+                    <b><i class="fa-solid fa-code"></i> Advanced</b>
+                    <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+                </div>
+                <div class="inline-drawer-content">
+                    <label for="il_custom_instructions">Additional curator instructions</label>
+                    <textarea id="il_custom_instructions" class="text_pole" rows="5" placeholder="Optional scenario-independent preferences..."></textarea>
+                    <label class="checkbox_label" for="il_debug">
+                        <input id="il_debug" type="checkbox" />
+                        <span>Debug logging</span>
+                    </label>
+                    <label for="il_injection_preview">Current injection preview</label>
+                    <textarea id="il_injection_preview" class="text_pole" rows="12" readonly></textarea>
+                    <label for="il_context_diagnostics">Context selection inspector</label>
+                    <textarea id="il_context_diagnostics" class="text_pole" rows="14" readonly></textarea>
+                    <button id="il_refresh_preview" class="menu_button"><i class="fa-solid fa-rotate"></i> Refresh Preview</button>
+                </div>
+            </div>
+
+            <hr class="sysHR" />
+            <small class="inner-lore-hint">
+                Inspired by LewdLeah's MIT-licensed Inner Self and Auto-Cards for AI Dungeon. InnerLore uses an independent SillyTavern architecture: background structured updates, native World Info mirroring, per-chat state, and relevance-bounded injection.
+            </small>
+        </div>
+    </div>
+</div>
