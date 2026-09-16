@@ -16,7 +16,6 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import express from 'express';
 import { DatabaseSync } from 'node:sqlite';
 
 const DEFAULT_RELATIVE_DB = ['data', 'worlds', 'innerlore-storage.db'];
@@ -92,8 +91,6 @@ let db = null;
 export function init(router, args) {
     db = openDatabase(args?.commandLineArgs);
 
-    const worlds = express.Router();
-
     router.get('/v1/health', (request, response) => {
         const worldId = String(request.query.worldId || '');
         if (worldId) {
@@ -104,7 +101,7 @@ export function init(router, args) {
         return sendData(response, { status: 'ok', plugin: info.id, openWorlds: count });
     });
 
-    worlds.post('/', (request, response) => {
+    router.post('/v1/worlds/', (request, response) => {
         const id = String(request.body?.id || '').trim();
         if (!id) return sendError(response, 400, 'A world id is required', 'INVALID_WORLD_ID');
         const existing = db.prepare('SELECT id FROM worlds WHERE id = ?').get(id);
@@ -114,7 +111,7 @@ export function init(router, args) {
         return sendData(response, { id, name: String(request.body?.name || id) });
     });
 
-    worlds.get('/:worldId', (request, response) => {
+    router.get('/v1/worlds/:worldId', (request, response) => {
         const row = db.prepare('SELECT id, name, metadata, created_at, updated_at FROM worlds WHERE id = ?')
             .get(String(request.params.worldId));
         if (!row) return sendError(response, 404, 'World not found', 'WORLD_NOT_FOUND');
@@ -137,13 +134,13 @@ export function init(router, args) {
         snapshotHash: '',
     });
 
-    worlds.get('/:worldId/innerlore/store', (request, response) => {
+    router.get('/v1/worlds/:worldId/innerlore/store', (request, response) => {
         const row = db.prepare('SELECT * FROM stores WHERE world_id = ?').get(String(request.params.worldId));
         if (!row) return sendError(response, 404, 'InnerLore store not found', 'STORE_NOT_FOUND');
         return sendData(response, loadShape(row));
     });
 
-    worlds.put('/:worldId/innerlore/store', (request, response) => {
+    router.put('/v1/worlds/:worldId/innerlore/store', (request, response) => {
         const worldId = String(request.params.worldId);
         const chatId = String(request.body?.chatId || '').trim();
         const store = request.body?.store;
@@ -200,7 +197,7 @@ export function init(router, args) {
         });
     });
 
-    worlds.post('/:worldId/innerlore/fork', (request, response) => {
+    router.post('/v1/worlds/:worldId/innerlore/fork', (request, response) => {
         const sourceId = String(request.params.worldId);
         const targetId = String(request.body?.targetWorldId || '').trim();
         const targetChatId = String(request.body?.targetChatId || '').trim();
@@ -226,7 +223,7 @@ export function init(router, args) {
         return sendData(response, { ...loadShape(row), created: true, forked: true, migrated: false });
     });
 
-    worlds.post('/:worldId/innerlore/rename', (request, response) => {
+    router.post('/v1/worlds/:worldId/innerlore/rename', (request, response) => {
         const worldId = String(request.params.worldId);
         const chatId = String(request.body?.chatId || '').trim();
         if (!chatId) return sendError(response, 400, 'A chat id is required', 'INVALID_CHAT_ID');
@@ -239,7 +236,7 @@ export function init(router, args) {
         return sendData(response, loadShape(updated));
     });
 
-    worlds.delete('/:worldId/innerlore/store', (request, response) => {
+    router.delete('/v1/worlds/:worldId/innerlore/store', (request, response) => {
         const worldId = String(request.params.worldId);
         const chatId = String(request.query.chatId || '').trim();
         if (chatId) {
@@ -267,10 +264,10 @@ export function init(router, args) {
     });
 
     // Context preparation happens client-side; acknowledge and defer.
-    worlds.post('/:worldId/innerlore/context/build', (request, response) => sendData(response, null));
-    worlds.post('/:worldId/innerlore/event-director/context', (request, response) => sendData(response, null));
+    router.post('/v1/worlds/:worldId/innerlore/context/build', (request, response) => sendData(response, null));
+    router.post('/v1/worlds/:worldId/innerlore/event-director/context', (request, response) => sendData(response, null));
 
-    worlds.get('/:worldId/innerlore/context/profiles', (request, response) => {
+    router.get('/v1/worlds/:worldId/innerlore/context/profiles', (request, response) => {
         const rows = db.prepare('SELECT profile_id, name, builtin, revision, config FROM context_profiles WHERE world_id = ?')
             .all(String(request.params.worldId));
         return sendData(response, rows.map(row => ({
@@ -282,7 +279,7 @@ export function init(router, args) {
         })));
     });
 
-    worlds.put('/:worldId/innerlore/context/profiles/:profileId', (request, response) => {
+    router.put('/v1/worlds/:worldId/innerlore/context/profiles/:profileId', (request, response) => {
         const worldId = String(request.params.worldId);
         const profileId = String(request.params.profileId);
         const name = String(request.body?.name || profileId);
@@ -295,7 +292,6 @@ export function init(router, args) {
         return sendData(response, { id: profileId, name });
     });
 
-    router.use('/v1/worlds', express.json({ limit: '64mb' }), worlds);
     console.log(`${info.id}: lean SQLite storage ready (${info.id} v1 routes mounted)`);
 }
 
