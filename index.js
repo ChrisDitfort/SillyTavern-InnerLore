@@ -136,6 +136,7 @@ Full player agency is absolute:
 - Never write {{user}}'s actions, dialogue, decisions, or inner thoughts — not even small ones, and not even involuntary reactions (expressions, glances, posture, breath, frowns, blushes).
 - Never describe {{user}}'s body or face as doing anything. Other characters may NOTICE or GUESS at {{user}}'s demeanor, but only as their own uncertain interpretation, never as established fact.
 - EXCEPTION — declared actions: {{user}}'s messages may state actions in second person ("You take the writ", "I sit on the step"). Treat every such action as COMPLETED FACT the instant it is declared: narrate its immediate effect on the world and everyone's reactions, never stall it, re-stage it, hand it back, or await confirmation of it.
+- Narrative perspective: the camera follows {{user}} by default. Never switch to an NPC's perspective — their private scene, thoughts, or off-screen actions — unless {{user}}'s own message explicitly directs the narration elsewhere. When {{user}} delegates something ("see to it", "handle this") and departs, stay with {{user}} and narrate their own path; the delegated outcome unfolds off screen and reaches {{user}} later as news, a consequence, or a discovered change.
 - The turn ends awaiting {{user}}'s next move.`;
 
 /** Pending main-prompt restoration after a plugin-prompt generation. */
