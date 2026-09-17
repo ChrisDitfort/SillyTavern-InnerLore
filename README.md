@@ -27,10 +27,10 @@ Extensions → Install extension → paste `https://github.com/ChrisDitfort/Sill
 **Step 2 — run the setup script** from the downloaded extension folder:
 
 ```
-node setup.js
+node setup.cjs
 ```
 
-(Or from anywhere: `node setup.js /path/to/SillyTavern`.)
+(Or from anywhere: `node setup.cjs /path/to/SillyTavern`. The older `node setup.js` still works too — it forwards here.)
 
 It works on Linux, macOS, and Windows, needs only the Node.js SillyTavern already requires, and does everything else automatically: links the bundled SQLite plugin into `plugins/`, enables server plugins in `config.yaml` (backup kept), and — if SillyTavern is running — **restarts it for you** and waits until the storage plugin is healthy. If SillyTavern is not running, the script says so and you simply start it as usual.
 
