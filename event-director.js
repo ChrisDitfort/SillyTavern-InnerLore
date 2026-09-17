@@ -1,4 +1,5 @@
 import { canonicalNameKey, clamp, cleanString, contextSimilarity, hashString, uniqueStrings } from './core.js';
+import { appendOutputDiagnostics } from './output-codec.js';
 
 export const EVENT_DIRECTOR_VERSION = 1;
 export const AUTOMATIC_EVENT_ORIGIN = 'automatic_director';
@@ -57,7 +58,8 @@ function normalizeDefinitionInput(value) {
             : 'any',
         actorName: cleanString(source.actorName ?? source.actor_name, 180),
         cancellationCondition: cleanString(source.cancellationCondition ?? source.cancellation_condition, 1_500),
-        activationVisibility: (source.activationVisibility ?? source.activation_visibility) === 'observable'
+        activationVisibility: String(source.activationVisibility ?? source.activation_visibility ?? '')
+            .trim().toLocaleLowerCase() === 'observable'
             ? 'observable'
             : 'hidden',
         revealAfterSeconds: revealSeconds === undefined || revealSeconds === null || revealSeconds === ''
@@ -235,6 +237,14 @@ export function validateEventDirectorPayload(payloadValue, options = {}) {
     }
     const raw = objectValue(payload.proposal);
     if (!Object.keys(raw).length) throw new Error('Automatic Event Director proposal must be an object or null.');
+    if (cleanString(raw.activation_visibility, 40).toLocaleLowerCase() === 'public') {
+        // Providers write "public" to mean the player can see the event
+        // immediately, which is exactly the observable enum. Coercing only in
+        // this direction never hides or reveals anything the model did not
+        // intend; the diagnostic keeps the substitution auditable.
+        raw.activation_visibility = 'observable';
+        appendOutputDiagnostics(payload, [{ code: 'visibility_public_normalized' }]);
+    }
     const definition = normalizeDefinitionInput(raw);
     if (!definition.key || !definition.title || !definition.description || !definition.consequences) {
         throw new Error('Automatic Event Director proposal requires key, title, description, and consequences.');

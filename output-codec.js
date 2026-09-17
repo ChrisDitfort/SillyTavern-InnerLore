@@ -101,7 +101,10 @@ function decodeText(value, lineNumber) {
 function parseScalar(rawValue, lineNumber) {
     const value = rawValue.trim();
     if (!value) throw dslError(lineNumber, 'a field value is empty; omit the field instead.');
-    if (/^TEXT\s/iu.test(value)) return decodeText(value.slice(5), lineNumber);
+    // Only the exact uppercase TEXT prefix marks a forced string; a
+    // case-insensitive match would corrupt natural values that merely begin
+    // with the word, such as "text is a medium".
+    if (/^TEXT\s/u.test(value)) return decodeText(value.slice(5), lineNumber);
     if (/^NULL$/iu.test(value)) return null;
     if (/^(?:TRUE|FALSE)$/iu.test(value)) return /^TRUE$/iu.test(value);
     if (/^EMPTY_LIST$/iu.test(value)) return [];
@@ -191,7 +194,8 @@ function writeScalar(root, rawPath, operator, value, lineNumber) {
         }
         if (parent[finalToken] !== undefined) {
             if (Object.is(parent[finalToken], value)) return { duplicateIgnored: true };
-            throw dslError(lineNumber, `field "${rawPath}" is assigned twice.`);
+            parent[finalToken] = value;
+            return { duplicateOverwritten: true };
         }
         parent[finalToken] = value;
         return { duplicateIgnored: false };
@@ -201,7 +205,8 @@ function writeScalar(root, rawPath, operator, value, lineNumber) {
     }
     if (Object.hasOwn(parent, finalToken)) {
         if (Object.is(parent[finalToken], value)) return { duplicateIgnored: true };
-        throw dslError(lineNumber, `field "${rawPath}" is assigned twice.`);
+        parent[finalToken] = value;
+        return { duplicateOverwritten: true };
     }
     parent[finalToken] = value;
     return { duplicateIgnored: false };
@@ -251,7 +256,7 @@ function pruneEmptyListMaps(value, diagnostics, path = '') {
 function decodedHeaderValue(value, lineNumber) {
     const trimmed = value.trim();
     if (!trimmed) return '';
-    return decodeText(trimmed.replace(/^TEXT\s/iu, ''), lineNumber);
+    return decodeText(trimmed.replace(/^TEXT\s/u, ''), lineNumber);
 }
 
 function openRecord(task, line, result, lineNumber) {
@@ -336,7 +341,18 @@ export function parseInnerLoreDsl(value, requestedTask) {
     if (allLines.length > MAXIMUM_LINES) throw new Error(`InnerLore DSL exceeds ${MAXIMUM_LINES} lines.`);
     const headerPattern = /^INNERLORE\s+(CURATOR|PROGRESSION|EVENT[_-]DIRECTOR)\s+1$/iu;
     const headerIndex = allLines.findIndex(line => headerPattern.test(line.trim()));
-    if (headerIndex < 0) throw new Error(`The model response contained no INNERLORE ${TASKS[task]} 1 header.`);
+    if (headerIndex < 0) {
+        // A version mismatch needs its own message: a repair prompt that only
+        // says "no header" hides the actual cause from the model.
+        const versionPattern = /^INNERLORE\s+(?:CURATOR|PROGRESSION|EVENT[_-]DIRECTOR)\s+v?(\d+)$/iu;
+        for (const line of allLines) {
+            const version = versionPattern.exec(line.trim());
+            if (version) {
+                throw new Error(`The model response declared unsupported InnerLore DSL version ${version[1]}; only version 1 is supported.`);
+            }
+        }
+        throw new Error(`The model response contained no INNERLORE ${TASKS[task]} 1 header.`);
+    }
     const declared = headerPattern.exec(allLines[headerIndex].trim())?.[1]
         ?.toLocaleLowerCase().replace('-', '_');
     if (declared !== task) {
@@ -568,6 +584,13 @@ export function parseInnerLoreDsl(value, requestedTask) {
                 diagnostics.push({
                     code: 'duplicate_scalar_ignored', lineNumber, path: assignment[1],
                 });
+            } else if (writeResult.duplicateOverwritten) {
+                // JSON.parse applies last-wins to duplicate keys, so a
+                // conflicting re-declaration is recorded rather than rejected;
+                // spending a repair call on it would be stricter than JSON.
+                diagnostics.push({
+                    code: 'duplicate_scalar_overwritten', lineNumber, path: assignment[1],
+                });
             }
             lastAppend = operator === '+=' ? { target, path: assignment[1] } : null;
             continue;
@@ -607,15 +630,31 @@ export function parseInnerLoreDsl(value, requestedTask) {
         delete result.__reasonSeen;
     }
     pruneEmptyListMaps(result, diagnostics);
-    if (diagnostics.length) {
-        Object.defineProperty(result, DSL_PARSE_DIAGNOSTICS, {
+    attachDiagnostics(result, diagnostics);
+    return result;
+}
+
+function attachDiagnostics(payload, diagnostics) {
+    if (Array.isArray(diagnostics) && diagnostics.length) {
+        Object.defineProperty(payload, DSL_PARSE_DIAGNOSTICS, {
             value: Object.freeze(diagnostics.map(item => Object.freeze({ ...item }))),
-            configurable: false,
+            // Redefinable so validator-layer normalizations can append entries
+            // after the parse; the frozen value still prevents mutation.
+            configurable: true,
             enumerable: false,
             writable: false,
         });
     }
-    return result;
+    return payload;
+}
+
+/** Append post-parse diagnostics, for example validator-layer normalizations. */
+export function appendOutputDiagnostics(payload, entries) {
+    if (!payload || typeof payload !== 'object' || !Array.isArray(entries)) return payload;
+    const meaningful = entries.filter(item => item && item.code);
+    if (!meaningful.length) return payload;
+    const existing = Array.isArray(payload[DSL_PARSE_DIAGNOSTICS]) ? payload[DSL_PARSE_DIAGNOSTICS] : [];
+    return attachDiagnostics(payload, [...existing, ...meaningful]);
 }
 
 export function outputParseDiagnostics(payload) {
@@ -624,11 +663,92 @@ export function outputParseDiagnostics(payload) {
         : [];
 }
 
+const DSL_HEADER_PATTERN = /^INNERLORE\s+(CURATOR|PROGRESSION|EVENT[_-]DIRECTOR)\s+1$/iu;
+
+/**
+ * Recover the complete-record prefix of a DSL document that failed strict
+ * parsing. A truncated line format is not malformed: every record closed
+ * before the cut is complete, and merge-based consumers can apply that
+ * partial progress instead of discarding everything and paying a repair
+ * call that re-sends the same token budget that caused the truncation.
+ */
+function salvageTruncatedDsl(value, requestedTask, originalError) {
+    const allLines = stripReasoningAndFences(value).split('\n');
+    const headerIndex = allLines.findIndex(line => DSL_HEADER_PATTERN.test(line.trim()));
+    if (headerIndex < 0) throw originalError;
+    const candidates = [
+        // First assume only the DONE marker is missing and nothing was lost.
+        { lines: allLines, code: 'missing_done_salvaged' },
+    ];
+    let cut = -1;
+    for (let index = allLines.length - 1; index > headerIndex; index--) {
+        if (allLines[index].trim() === 'END') {
+            cut = index;
+            break;
+        }
+    }
+    if (cut > headerIndex) {
+        // Otherwise the document was cut mid-record: keep everything through
+        // the last record boundary and drop the partial tail.
+        candidates.push({ lines: allLines.slice(0, cut + 1), code: 'truncated_tail_dropped' });
+    }
+    for (const candidate of candidates) {
+        let salvaged;
+        try {
+            salvaged = parseInnerLoreDsl(`${candidate.lines.join('\n')}\nDONE`, requestedTask);
+        } catch {
+            continue;
+        }
+        return appendOutputDiagnostics(salvaged, [{
+            code: candidate.code,
+            droppedLines: allLines.length - candidate.lines.length,
+            totalLines: allLines.length - headerIndex - 1,
+        }]);
+    }
+    throw originalError;
+}
+
 export function parseInnerLoreOutput(value, options = {}) {
     const format = normalizeOutputFormat(options.format);
-    return format === OUTPUT_FORMAT_DSL
-        ? parseInnerLoreDsl(value, options.task)
-        : extractJsonObject(value);
+    if (format !== OUTPUT_FORMAT_DSL) return extractJsonObject(value);
+    try {
+        return parseInnerLoreDsl(value, options.task);
+    } catch (error) {
+        if (options.salvageTruncated) {
+            try {
+                return salvageTruncatedDsl(value, options.task, error);
+            } catch { /* fall through to the cross-format check */ }
+        }
+        // Providers occasionally answer a DSL request with JSON anyway
+        // (observed during repairs). The domain validators still run on the
+        // result, so accepting the cross-format answer costs nothing.
+        try {
+            return appendOutputDiagnostics(extractJsonObject(value), [{ code: 'cross_format_json_accepted' }]);
+        } catch {
+            throw error;
+        }
+    }
+}
+
+/** Heuristic: did this parse failure look like a length cut rather than garbling? */
+export function isTruncationLikeError(error, rawOutput) {
+    const message = String(error?.message || '');
+    if (/ended before/iu.test(message)) return true;
+    if (error?.name === 'InnerLoreDslError' && Number.isInteger(error?.lineNumber) && rawOutput) {
+        const lines = String(rawOutput).split('\n');
+        return error.lineNumber >= lines.length - 1;
+    }
+    return false;
+}
+
+/** A repair after a length cut needs a larger budget, or it truncates again. */
+export function escalateRepairSettings(settings, error, rawOutput) {
+    if (!isTruncationLikeError(error, rawOutput)) return settings;
+    const base = Math.max(800, Math.min(32_000, Number(settings?.maximumResponseTokens) || 6_000));
+    return {
+        ...settings,
+        maximumResponseTokens: Math.max(base + 1, Math.min(32_000, Math.round(base * 1.5))),
+    };
 }
 
 function encodeText(value) {
@@ -638,7 +758,7 @@ function encodeText(value) {
         .replaceAll('\r', '\\r')
         .replaceAll('\t', '\\t');
     return /^(?:NULL|TRUE|FALSE|EMPTY_LIST|EMPTY_MAP|-?(?:0|[1-9]\d*)(?:\.\d+)?(?:e[+-]?\d+)?)$/iu.test(encoded)
-        || /^TEXT\s/iu.test(encoded)
+        || /^TEXT\s/u.test(encoded)
         ? `TEXT ${encoded}`
         : encoded;
 }
@@ -796,11 +916,12 @@ DONE`;
 function dslFieldReference(task) {
     if (task === 'curator') {
         return `DSL FIELD REFERENCE
-Entity record header: LOCATION|ITEM|CHARACTER|FACTION|ORGANIZATION|CREATURE|EVENT|CONCEPT canonical name
-Entity scalar fields: identity_kind, promote_name, importance, summary, description, current_state, parent_location, status
-Entity text lists using +=: aliases, keys, facts, relationships, history, unresolved, remove_facts, remove_relationships, remove_history, resolve_threads, spatial.delete
-Entity map-list block: ITEM spatial.set
-  fields: key, kind, subject, relation, object, statement, confidence
+Entity record header: LOCATION|ITEM|CHARACTER|FACTION|ORGANIZATION|CREATURE|EVENT|CONCEPT canonical proper name or specific story-established descriptor
+Apply the upstream selection rules and emit one record for every individually significant entity in the newest passage; do not stop after the most prominent one or two.
+Entity scalar fields: identity_kind (descriptor|public_name, characters only), promote_name, importance 0-100, summary (complete short identity if new or meaningfully changed), description (grounded detailed description if new or meaningfully changed), current_state (replaceable present condition or location), parent_location (canonical containing sublocation), status (active|inactive|destroyed|lost|unknown)
+Entity text lists using +=: aliases (alternate trigger), keys (useful exact trigger), facts (new atomic established fact), relationships (new association), history (new durable event involving this entity), unresolved (new open question, promise, threat, task, mystery, or uncertain detail), remove_facts / remove_relationships / remove_history (obsolete exact prior value), resolve_threads (resolved exact prior unresolved item), spatial.delete (conclusively obsolete spatial key)
+Entity map-list block: ITEM spatial.set — keyed spatial invariants
+  fields: key (stable_lower_snake_case), kind (topology|entrance|connection|fixture|containment|placement|orientation|condition|other), subject (canonical place, fixture, opening, or object), relation (shape|entrance_at|door_at|opens|fixed_to|located_at|beneath|inside|contains|connected_to|adjacent_to|oriented_to|part_of|has_condition|other), object (canonical counterpart, position, direction, or value), statement (compact objective spatial assertion), confidence (confirmed|inferred)
 
 Mind record header: MIND canonical character name
 Mind scalar fields: identity_kind, promote_name, active, clear_current_mind
@@ -865,7 +986,7 @@ export function dslOutputContract(requestedTask) {
     const records = task === 'curator'
         ? 'Use LOCATION, ITEM, CHARACTER, FACTION, ORGANIZATION, CREATURE, EVENT, or CONCEPT for an entity record, and MIND for a private-mind record. Put the canonical entity or character name after the record word.'
         : task === 'progression'
-            ? 'Use exactly one TIME record, followed by zero or more GOAL, PROCESS, EVENT, and EVALUATION records. Put each stable key after the record word.'
+            ? 'Use exactly one TIME record and zero or more GOAL, PROCESS, and EVENT records. Put each stable key after the record word. When a DSL_EVALUATION_KEYS block is present, emit its EVALUATION records first, immediately after the header line; otherwise emit EVALUATION records after the other records.'
             : 'Use one PROPOSAL record with its stable key, or the single line NO_PROPOSAL. After it, emit exactly one top-level REASON = text line.';
     return `<INNERLORE_DSL_OUTPUT priority="hard">
 Return InnerLore DSL v1, not JSON. The application parses this DSL into the canonical object shape described later and then runs the same strict local validators.
@@ -884,6 +1005,7 @@ Grammar:
 - Scalars TRUE, FALSE, NULL, numbers, EMPTY_LIST, and EMPTY_MAP are typed. Prefix an otherwise ambiguous string with TEXT and one space.
 - Close every record with END. Close the complete document with DONE.
 - Omit unchanged and optional empty fields. Do not emit braces, brackets as values, commas, quotes around values, Markdown, comments, a preamble, or trailing commentary.
+- This is a line format, not JSON and not a list. Never wrap records in object or member syntax such as "entities += CHARACTER Rowan"; a record word alone on its line begins a record.
 ${task === 'curator' ? '- The example names and record count are illustrative only. Apply the upstream selection rules and emit a separate MIND record for every eligible NPC; do not limit mind output to the example character.' : ''}
 
 Syntax example only; never copy its fictional facts:
@@ -946,14 +1068,22 @@ export function structuredRequestOptions(format, jsonSchema) {
 
 export function appendDslEvaluationKeyContract(messages, format, expectedKeys = []) {
     if (normalizeOutputFormat(format) !== OUTPUT_FORMAT_DSL) return messages;
+    // Record headers accept arbitrary text and the acknowledgement validator
+    // demands every supplied key verbatim, so the contract must repeat keys
+    // exactly as supplied. Filtering them (for example by a conservative
+    // identifier pattern) would guarantee a validation failure for any
+    // editor key containing uppercase letters or spaces.
     const keys = [...new Set((Array.isArray(expectedKeys) ? expectedKeys : [])
         .map(value => String(value || '').trim())
-        .filter(value => /^[a-z0-9][a-z0-9_.:-]{0,199}$/u.test(value)))];
+        .filter(Boolean)
+        .filter(value => !value.includes('\n') && !value.includes('\r'))
+        .map(value => value.slice(0, 300)))];
     const contract = keys.length
         ? `<DSL_EVALUATION_KEYS priority="hard">
-Emit exactly one EVALUATION record for every line below, copying only the text after "EVALUATION " as its header key. Do not shorten a key and do not add an id prefix such as "trigger:".
-${keys.map(key => `EVALUATION ${key}`).join('\n')}
-No other EVALUATION records are allowed.
+Emit exactly ${keys.length} EVALUATION record${keys.length === 1 ? '' : 's'} — one for every line below — as the FIRST record${keys.length === 1 ? '' : 's'} in the document, immediately after the INNERLORE PROGRESSION 1 header line and before the TIME record. Copy only the text after "EVALUATION " as the header key; do not shorten a key and do not add an id prefix such as "trigger:".
+Every EVALUATION record must contain evaluated = TRUE and a reason = short grounded text line before its END.
+EVALUATION ${keys.join('\nEVALUATION ')}
+No other EVALUATION records are allowed. Do not omit any line above and do not stop before the last one.
 </DSL_EVALUATION_KEYS>`
         : '<DSL_EVALUATION_KEYS priority="hard">Emit no EVALUATION records because no triggerable-event definitions were supplied.</DSL_EVALUATION_KEYS>';
     const target = messages.find(message => message?.role === 'system' && typeof message.content === 'string');

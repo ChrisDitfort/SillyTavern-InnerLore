@@ -47,7 +47,7 @@ The concept is inspired by LewdLeah's MIT-licensed [Inner Self](https://github.c
 AI Dungeon's scripts ask the story model to emit maintenance syntax inside the normal generation and then parse it. InnerLore instead:
 
 - runs a separate background model request after a story reply;
-- requests a separately validated maintenance patch, using strict JSON by default or the experimental line-oriented InnerLore DSL v1;
+- requests a separately validated maintenance patch, using the line-oriented InnerLore DSL v1 by default or strict JSON as the compatibility fallback;
 - merges additions locally so an omitted fact cannot disappear;
 - requires explicit resolution/removal operations before established list facts are deleted;
 - commits complete per-chat state to authoritative SQLite, with normalized brain/search tables and a rebuildable LadybugDB graph;
@@ -90,9 +90,13 @@ AI Dungeon's scripts ask the story model to emit maintenance syntax inside the n
 
 ## Background response formats
 
-**Strict JSON** remains the default and is the recommended compatibility mode. **InnerLore DSL v1** is an experimental line-oriented transport intended to reduce braces, commas, quoting, and array-index mistakes in long curator, progression, and Event Director responses. A typical record begins with `LOCATION Ben Tavern`, contains `field = value`, `facts += value`, and nested `ITEM spatial.set` blocks, then closes with `END`; the document closes with `DONE`.
+**InnerLore DSL v1** is the default and recommended mode. It is a line-oriented transport intended to reduce braces, commas, quoting, and array-index mistakes in long curator, progression, and Event Director responses. A typical record begins with `LOCATION Ben Tavern`, contains `field = value`, `facts += value`, and nested `ITEM spatial.set` blocks, then closes with `END`; the document closes with `DONE`. **Strict JSON** remains selectable as the compatibility fallback for providers that cannot follow the DSL contract.
 
-The DSL middleware parses into the exact same canonical objects used by JSON mode. The existing domain validators still reject missing evidence, omitted trigger acknowledgements, unsafe paths, unsupported fields, and invalid canon operations. A bounded set of lossless structural variations is normalized locally and recorded for diagnostics. Provider behaviour varies, so DSL should remain opt-in until it proves reliable with the chosen background model.
+Four paired 30-turn replays (identical transcript, model, and prose; only the transport varied) measured DSL against strict JSON on GLM 5.3: with the EVALUATION-first contract, DSL needed 40% fewer repair calls (6 vs 10 across three clean runs, with zero rejected repairs), ~31% fewer completion tokens, and ~22% less aggregate model time, at equal NPC-mind coverage. Existing installations that explicitly saved `json` keep their choice; the format is switchable any time under **InnerLore → Background analysis response format**.
+
+The DSL middleware parses into the exact same canonical objects used by JSON mode. The existing domain validators still reject missing evidence, omitted trigger acknowledgements, unsafe paths, unsupported fields, and invalid canon operations. A bounded set of lossless structural variations is normalized locally and recorded for diagnostics. When a different background model proves unreliable with DSL, switch that chat or setup to strict JSON.
+
+DSL responses are also recovered instead of discarded whenever recovery cannot invent meaning: a document that is complete except for its final `DONE` marker is accepted as-is, a length-truncated document is salvaged to its complete records with the dropped tail counted in diagnostics, a provider that answers a DSL request in JSON is accepted through the same validators, conflicting duplicate field assignments follow JSON's last-wins semantics, and an Event Director proposal that writes the invalid visibility `public` is coerced to the equivalent `observable` enum. A repair retry still runs for genuinely malformed output, and when the failure looked like a length cut the retry carries a larger response-token budget so it cannot truncate identically. Every salvage, cross-format acceptance, coercion, and normalization is reported in the per-run summary and stored in the chat's `lastRunStats` codec block.
 
 ## Server persistence and queries
 

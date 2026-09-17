@@ -1,8 +1,9 @@
-import { sendInnerLoreRequest } from './llm-client.js?v=7';
+import { sendInnerLoreRequest } from './llm-client.js?v=8';
 import { validateEventDirectorPayload } from './event-director.js';
 import { buildEventDirectorRepairMessages } from './event-director-prompts.js';
 import { EVENT_DIRECTOR_JSON_SCHEMA } from './structured-output.js';
 import {
+    escalateRepairSettings,
     normalizeOutputFormat,
     outputParseDiagnostics,
     parseInnerLoreOutput,
@@ -32,7 +33,9 @@ export async function requestEventDirectorProposal(settings, messages, signal, v
         configured, requestMessages, signal, requestOptions,
     );
     try {
-        const parsed = parseInnerLoreOutput(firstOutput, { format, task: 'event_director' });
+        const parsed = parseInnerLoreOutput(firstOutput, {
+            format, task: 'event_director', salvageTruncated: true,
+        });
         return {
             ...validateEventDirectorPayload(parsed, validationOptions),
             repaired: false,
@@ -42,18 +45,21 @@ export async function requestEventDirectorProposal(settings, messages, signal, v
         };
     } catch (firstError) {
         if (settings.repairMalformedJson === false) throw firstError;
+        const repairSettings = escalateRepairSettings(configured, firstError, firstOutput);
         const repairMessages = buildEventDirectorRepairMessages(firstOutput, {
             sourceMessages: requestMessages,
             validationError: firstError.message || String(firstError),
         });
         const preparedRepairMessages = prepareOutputMessages(repairMessages, { format, task: 'event_director' });
         const repairOutput = await sendInnerLoreRequest(
-            configured,
+            repairSettings,
             preparedRepairMessages,
             signal,
             requestOptions,
         );
-        const parsed = parseInnerLoreOutput(repairOutput, { format, task: 'event_director' });
+        const parsed = parseInnerLoreOutput(repairOutput, {
+            format, task: 'event_director', salvageTruncated: true,
+        });
         return {
             ...validateEventDirectorPayload(parsed, validationOptions),
             repaired: true,

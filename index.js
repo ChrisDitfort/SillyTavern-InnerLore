@@ -48,7 +48,7 @@ import {
     listConnectionProfiles,
     requestJsonPatch,
     testInnerLoreConnection,
-} from './llm-client.js?v=7';
+} from './llm-client.js?v=8';
 import {
     deleteInnerLorebooksForChat,
     openInnerLorebook,
@@ -371,7 +371,7 @@ const defaultSettings = Object.freeze({
     requestTimeoutSeconds: 90,
     requestCircuitBreakerSeconds: 90,
     temperature: 0.15,
-    maintenanceOutputFormat: 'json',
+    maintenanceOutputFormat: 'dsl',
     repairMalformedJson: true,
     autoRebuildOnHistoryChange: true,
     autoRebuildMessageLimit: 120,
@@ -594,7 +594,7 @@ function getSettings() {
     settings.storageRegistry = normalizeStorageRegistry(settings.storageRegistry);
     settings.pendingStorageCleanups = normalizeStorageRegistry(settings.pendingStorageCleanups);
     if (!['automatic', 'macro'].includes(settings.contextDeliveryMode)) settings.contextDeliveryMode = 'automatic';
-    if (!['json', 'dsl'].includes(settings.maintenanceOutputFormat)) settings.maintenanceOutputFormat = 'json';
+    if (!['json', 'dsl'].includes(settings.maintenanceOutputFormat)) settings.maintenanceOutputFormat = 'dsl';
     settings.contextProfileId = cleanString(settings.contextProfileId, 64).toLocaleLowerCase();
     if (!/^[a-z0-9][a-z0-9_-]{0,63}$/u.test(settings.contextProfileId)) settings.contextProfileId = 'balanced';
     if (!['profile', 'custom'].includes(settings.contextBudgetMode)) settings.contextBudgetMode = 'profile';
@@ -1218,6 +1218,7 @@ async function maybeRunAutomaticEventDirector({ force = false } = {}) {
             proposal: progression.eventProposals[added.proposal.id],
             definition,
             repaired: response.repaired,
+            codec: codecStatsFromResponse(response),
             decision,
             expired: initialExpiration.expired,
         };
@@ -2886,6 +2887,7 @@ async function analyzeRange(targetStore, startIndex, endIndex, options = {}) {
             startIndex: progressionStart,
             endIndex: progressionEnd,
             repaired: progressionResponse.repaired,
+            codec: codecStatsFromResponse(progressionResponse),
         };
         targetStore.progression.lastError = '';
     } else if (progressionError) {
@@ -2913,6 +2915,7 @@ async function analyzeRange(targetStore, startIndex, endIndex, options = {}) {
         targetStore.lastProcessedIndex = Math.max(targetStore.lastProcessedIndex, curatorEnd);
     }
     targetStore.lastRunAt = Date.now();
+    const curatorCodecStats = codecStatsFromResponse(response);
     targetStore.lastRunStats = {
         startIndex: Number.isFinite(actualStart) ? actualStart : -1,
         endIndex: actualEnd,
@@ -2920,6 +2923,7 @@ async function analyzeRange(targetStore, startIndex, endIndex, options = {}) {
         mindResult,
         mentionResult,
         repaired: Boolean(response?.repaired),
+        codec: curatorCodecStats,
         curatorError: curatorError ? cleanString(curatorError.message || String(curatorError), 1_000) : '',
         progressionResult: progressionResult?.state?.lastRunStats || null,
         progressionError: progressionError ? cleanString(progressionError.message || String(progressionError), 1_000) : '',
@@ -2943,10 +2947,44 @@ async function analyzeRange(targetStore, startIndex, endIndex, options = {}) {
         mindResult,
         mentionResult,
         repaired: Boolean(response?.repaired),
+        codec: curatorCodecStats,
         progressionResult,
         curatorError,
         progressionError,
         skipped: !response && !progressionResponse,
+    };
+}
+
+function codecStatsFromResponse(response) {
+    if (!response) return null;
+    const diagnostics = Array.isArray(response.parseDiagnostics) ? response.parseDiagnostics : [];
+    const normalizations = {};
+    for (const item of diagnostics) {
+        if (!item?.code) continue;
+        normalizations[item.code] = (normalizations[item.code] || 0) + 1;
+    }
+    return {
+        format: response.outputFormat === 'dsl' ? 'dsl' : 'json',
+        repaired: Boolean(response.repaired),
+        salvaged: diagnostics.some(item => (
+            item.code === 'truncated_tail_dropped' || item.code === 'missing_done_salvaged'
+        )),
+        crossFormat: diagnostics.some(item => item.code === 'cross_format_json_accepted'),
+        normalizations,
+        firstError: cleanString(response.firstError, 500),
+    };
+}
+
+function mergeCodecSignals(accumulator, codec) {
+    if (!codec || typeof codec !== 'object') return accumulator;
+    return {
+        seen: true,
+        format: codec.format === 'dsl' || accumulator.format === 'dsl' ? 'dsl' : 'json',
+        salvaged: accumulator.salvaged || Boolean(codec.salvaged),
+        crossFormat: accumulator.crossFormat || Boolean(codec.crossFormat),
+        repaired: accumulator.repaired || Boolean(codec.repaired),
+        normalizations: accumulator.normalizations
+            + Object.values(codec.normalizations || {}).reduce((sum, value) => sum + value, 0),
     };
 }
 
@@ -2985,7 +3023,21 @@ function summarizeRun(result) {
         : director?.error
             ? `; Event Director deferred (${director.error.message || director.error})`
             : '';
-    return `${entities.created || 0} lore entries created, ${entities.updated || 0} updated; ${minds.created || 0} minds created, ${minds.updated || 0} updated${curatorText}${progressionText}${directorText}${result.repaired ? '; JSON repaired' : ''}.`;
+    const codecTotals = [result.codec, progression?.state?.lastRunStats?.codec, director?.codec]
+        .reduce(mergeCodecSignals, {
+            seen: false, format: 'json', salvaged: false, crossFormat: false, repaired: false, normalizations: 0,
+        });
+    const codecParts = [];
+    if (codecTotals.salvaged) codecParts.push('salvaged a truncated response');
+    if (codecTotals.crossFormat) codecParts.push('accepted a JSON fallback');
+    if (codecTotals.normalizations) {
+        codecParts.push(`${codecTotals.normalizations} local normalization${codecTotals.normalizations === 1 ? '' : 's'}`);
+    }
+    if (codecTotals.repaired) codecParts.push('one repair round');
+    const codecText = codecParts.length
+        ? `; ${codecTotals.format === 'dsl' ? 'DSL' : 'JSON'}: ${codecParts.join(', ')}`
+        : '';
+    return `${entities.created || 0} lore entries created, ${entities.updated || 0} updated; ${minds.created || 0} minds created, ${minds.updated || 0} updated${curatorText}${progressionText}${directorText}${codecText}.`;
 }
 
 function pendingAnalysisState(store = getChatStore()) {
@@ -5089,8 +5141,12 @@ function initializeServerStateAfterAppReady(ctx) {
 
 // Dual-mode entry: this file is the browser extension AND, when SillyTavern's
 // plugin loader imports it from plugins/, the server plugin. Browser startup
-// must not run under Node, and Node must not touch browser globals.
-const RUNNING_IN_BROWSER = typeof window !== 'undefined';
+// must not run under Node, and Node must not touch browser globals. The
+// Node-side loader defines neither `window` nor a `SillyTavern` global (the
+// bundled storage plugin uses only node: modules), while every browser-like
+// environment — real or the extension's Node test mocks — defines at least
+// one of them.
+const RUNNING_IN_BROWSER = typeof window !== 'undefined' || typeof SillyTavern !== 'undefined';
 
 if (RUNNING_IN_BROWSER) (async function init() {
     try {

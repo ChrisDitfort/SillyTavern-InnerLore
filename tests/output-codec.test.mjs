@@ -3,7 +3,9 @@ import test from 'node:test';
 
 import {
     appendDslEvaluationKeyContract,
+    appendOutputDiagnostics,
     dslOutputContract,
+    escalateRepairSettings,
     normalizeOutputFormat,
     outputParseDiagnostics,
     parseInnerLoreDsl,
@@ -299,7 +301,7 @@ DONE`, 'curator');
     ]);
 });
 
-test('DSL ignores only idempotent duplicate scalar assignments', () => {
+test('DSL ignores idempotent duplicates and applies last-wins to conflicting ones', () => {
     const parsed = parseInnerLoreDsl(`INNERLORE CURATOR 1
 LOCATION Ben Tavern
 type = location
@@ -312,15 +314,19 @@ DONE`, 'curator');
     assert.deepEqual(outputParseDiagnostics(parsed).map(item => item.code), [
         'duplicate_scalar_ignored', 'duplicate_scalar_ignored',
     ]);
-    assert.throws(
-        () => parseInnerLoreDsl(`INNERLORE CURATOR 1
+
+    // JSON.parse keeps the last duplicate key; the DSL layer matches that
+    // semantics instead of spending a repair call on a harmless conflict.
+    const overwritten = parseInnerLoreDsl(`INNERLORE CURATOR 1
 LOCATION Ben Tavern
 importance = 70
 importance = 71
 END
-DONE`, 'curator'),
-        /assigned twice/u,
-    );
+DONE`, 'curator');
+    assert.equal(overwritten.entities[0].importance, 71);
+    assert.deepEqual(outputParseDiagnostics(overwritten).map(item => item.code), [
+        'duplicate_scalar_overwritten',
+    ]);
 });
 
 test('DSL rejects incomplete, unsafe, duplicate, and sparse assignments', () => {
@@ -366,5 +372,166 @@ test('output selection retains JSON compatibility and gives DSL an explicit tran
 
     appendDslEvaluationKeyContract(messages, 'dsl', ['range_clear_bell', 'marshal_writ']);
     assert.match(messages[0].content, /EVALUATION range_clear_bell/u);
-    assert.match(messages[0].content, /Do not shorten a key/u);
+    assert.match(messages[0].content, /do not shorten a key/iu);
+});
+
+test('only an exact uppercase TEXT prefix forces a string scalar', () => {
+    const parsed = parseInnerLoreDsl(`INNERLORE CURATOR 1
+EVENT text is a medium
+summary = Text message arrived
+facts += text begins plainly
+facts += TEXT remains forced
+END
+DONE`, 'curator');
+
+    assert.equal(parsed.entities[0].name, 'text is a medium');
+    assert.equal(parsed.entities[0].summary, 'Text message arrived');
+    assert.deepEqual(parsed.entities[0].facts, ['text begins plainly', 'remains forced']);
+
+    const encoded = stringifyInnerLoreDsl({
+        entities: [{ type: 'event', name: 'TEXT is quoted', facts: ['text stays plain'] }],
+        minds: [],
+    }, 'curator');
+    const restored = parseInnerLoreDsl(encoded, 'curator');
+    assert.equal(restored.entities[0].name, 'TEXT is quoted');
+    assert.deepEqual(restored.entities[0].facts, ['text stays plain']);
+});
+
+test('parseInnerLoreOutput salvages truncated and DONE-less DSL documents', () => {
+    // Complete records with only the DONE marker missing: nothing is dropped
+    // and no repair call is needed.
+    const missingDone = parseInnerLoreOutput(
+        'INNERLORE CURATOR 1\nLOCATION Ben Tavern\nimportance = 70\nEND',
+        { format: 'dsl', task: 'curator', salvageTruncated: true },
+    );
+    assert.equal(missingDone.entities[0].name, 'Ben Tavern');
+    assert.deepEqual(outputParseDiagnostics(missingDone), [{
+        code: 'missing_done_salvaged', droppedLines: 0, totalLines: 3,
+    }]);
+
+    // A cut that lands mid-token drops only the incomplete tail record; every
+    // record closed before the cut survives.
+    const truncated = parseInnerLoreOutput(
+        'INNERLORE CURATOR 1\nLOCATION Ben Tavern\nimportance = 70\nEND\nMIND Freesia\nactive = TRUE\ncurrent_mind.interpretation The inspect',
+        { format: 'dsl', task: 'curator', salvageTruncated: true },
+    );
+    assert.equal(truncated.entities.length, 1);
+    assert.equal(truncated.minds.length, 0);
+    assert.deepEqual(outputParseDiagnostics(truncated), [{
+        code: 'truncated_tail_dropped', droppedLines: 3, totalLines: 6,
+    }]);
+
+    // Nothing salvageable: the original error propagates so repair runs.
+    assert.throws(
+        () => parseInnerLoreOutput(
+            'INNERLORE CURATOR 1\nLOCATION Ben Tavern\nimportance broken',
+            { format: 'dsl', task: 'curator', salvageTruncated: true },
+        ),
+        /expected a field assignment or END/u,
+    );
+
+    // Strict parsing without the salvage flag keeps rejecting missing DONE.
+    assert.throws(
+        () => parseInnerLoreOutput(
+            'INNERLORE CURATOR 1\nLOCATION Ben Tavern\nEND',
+            { format: 'dsl', task: 'curator' },
+        ),
+        /DONE marker/u,
+    );
+});
+
+test('a DSL-mode request answered in JSON is accepted with a diagnostic', () => {
+    const parsed = parseInnerLoreOutput('{"entities":[],"minds":[]}', { format: 'dsl', task: 'curator' });
+    assert.deepEqual(parsed, { entities: [], minds: [] });
+    assert.deepEqual(outputParseDiagnostics(parsed), [{ code: 'cross_format_json_accepted' }]);
+});
+
+test('appendOutputDiagnostics extends parse diagnostics after validation', () => {
+    const parsed = parseInnerLoreOutput(
+        'INNERLORE CURATOR 1\nLOCATION Ben Tavern\nimportance = 70\nimportance = 71\nEND\nDONE',
+        { format: 'dsl', task: 'curator' },
+    );
+    appendOutputDiagnostics(parsed, [{ code: 'validator_coercion' }]);
+    assert.deepEqual(outputParseDiagnostics(parsed).map(item => item.code), [
+        'duplicate_scalar_overwritten', 'validator_coercion',
+    ]);
+});
+
+test('a versioned header mismatch reports the unsupported version', () => {
+    assert.throws(
+        () => parseInnerLoreDsl('INNERLORE CURATOR 2\nDONE', 'curator'),
+        /unsupported InnerLore DSL version 2/u,
+    );
+});
+
+test('the evaluation key contract repeats editor keys verbatim', () => {    const messages = [{ role: 'system', content: 'Reference' }];
+    appendDslEvaluationKeyContract(messages, 'dsl', ['Bell Test!', 'UPPER_key', 'lower.key:plain']);
+    assert.match(messages[0].content, /EVALUATION Bell Test!/u);
+    assert.match(messages[0].content, /EVALUATION UPPER_key/u);
+    assert.match(messages[0].content, /EVALUATION lower\.key:plain/u);
+    // Count, first-placement, and per-record requirements target the observed
+    // failure modes: omitted acknowledgements and evaluations without reason.
+    assert.match(messages[0].content, /exactly 3 EVALUATION records/u);
+    assert.match(messages[0].content, /as the FIRST records in the document/u);
+    assert.match(messages[0].content, /before the TIME record/u);
+    assert.match(messages[0].content, /must contain evaluated = TRUE and a reason =/u);
+
+    const singular = [{ role: 'system', content: 'Reference' }];
+    appendDslEvaluationKeyContract(singular, 'dsl', ['one_key']);
+    assert.match(singular[0].content, /exactly 1 EVALUATION record —/u);
+});
+
+test('progression accepts EVALUATION records before the TIME record', () => {
+    const parsed = parseInnerLoreDsl(`INNERLORE PROGRESSION 1
+EVALUATION alarm
+evaluated = TRUE
+reason = No configured condition matched.
+END
+TIME
+elapsed.minimum_seconds = 0
+elapsed.estimated_seconds = 0
+elapsed.maximum_seconds = 0
+confidence = 1
+END
+DONE`, 'progression');
+    assert.equal(parsed.event_evaluations[0].key, 'alarm');
+    assert.equal(parsed.event_evaluations[0].evaluated, true);
+    assert.deepEqual(outputParseDiagnostics(parsed), []);
+});
+
+test('truncation-shaped errors escalate the repair token budget', () => {
+    const steady = { maximumResponseTokens: 2_000 };
+    const jsonCut = new Error('The model response ended before its JSON object was complete.');
+    assert.equal(escalateRepairSettings(steady, jsonCut, '').maximumResponseTokens, 3_000);
+
+    const dslCut = new Error('InnerLore DSL line 9: expected a field assignment or END.');
+    dslCut.name = 'InnerLoreDslError';
+    dslCut.lineNumber = 9;
+    assert.equal(escalateRepairSettings(steady, dslCut, 'a\nb\nc\nd\ne\nf\ng\nh\ni').maximumResponseTokens, 3_000);
+
+    const early = new Error('InnerLore DSL line 1: expected a field assignment or END.');
+    early.name = 'InnerLoreDslError';
+    early.lineNumber = 1;
+    assert.equal(escalateRepairSettings(steady, early, 'a\nb\nc').maximumResponseTokens, 2_000);
+});
+
+test('the document record cap still rejects oversized output', () => {
+    const lines = ['INNERLORE CURATOR 1'];
+    for (let index = 0; index <= 1_000; index++) lines.push(`LOCATION Cap ${index}`, 'END');
+    assert.throws(() => parseInnerLoreDsl(lines.join('\n'), 'curator'), /exceeds 1000 records/u);
+});
+
+test('the curator field reference carries entity coverage and per-field semantics', () => {
+    const [reference] = prepareOutputMessages([
+        { role: 'system', content: 'Rules.\nOUTPUT SCHEMA\n{"entities":[]}' },
+    ], { format: 'dsl', task: 'curator' });
+    const contract = reference.content;
+    // The JSON schema documents when each field applies; the DSL reference
+    // must carry the same semantics plus an explicit completeness rule, or
+    // terser DSL patches under-report entities.
+    assert.match(contract, /every individually significant entity/u);
+    assert.match(contract, /do not stop after the most prominent one or two/u);
+    assert.match(contract, /summary \(complete short identity if new or meaningfully changed\)/u);
+    assert.match(contract, /importance 0-100/u);
+    assert.match(contract, /unresolved \(new open question, promise, threat, task, mystery, or uncertain detail\)/u);
 });

@@ -2,6 +2,8 @@ import { cleanString } from './core.js';
 import { buildRepairMessages } from './prompts.js';
 import { CURATOR_JSON_SCHEMA } from './structured-output.js';
 import {
+    OUTPUT_FORMAT_DSL,
+    escalateRepairSettings,
     normalizeOutputFormat,
     outputParseDiagnostics,
     parseInnerLoreOutput,
@@ -357,7 +359,9 @@ export async function requestJsonPatch(settings, messages, signal) {
     const requestOptions = structuredRequestOptions(format, CURATOR_JSON_SCHEMA);
     const firstOutput = await sendInnerLoreRequest(settings, requestMessages, signal, requestOptions);
     try {
-        const payload = parseInnerLoreOutput(firstOutput, { format, task: 'curator' });
+        const payload = parseInnerLoreOutput(firstOutput, {
+            format, task: 'curator', salvageTruncated: true,
+        });
         return {
             payload,
             repaired: false,
@@ -367,11 +371,14 @@ export async function requestJsonPatch(settings, messages, signal) {
         };
     } catch (firstError) {
         if (settings.repairMalformedJson === false) throw firstError;
+        const repairSettings = escalateRepairSettings(settings, firstError, firstOutput);
         const repairMessages = buildRepairMessages(firstOutput);
         repairMessages[0].content += ` The local parser error was: ${cleanString(firstError?.message, 1_000)}`;
         const preparedRepairMessages = prepareOutputMessages(repairMessages, { format, task: 'curator' });
-        const repairedOutput = await sendInnerLoreRequest(settings, preparedRepairMessages, signal, requestOptions);
-        const payload = parseInnerLoreOutput(repairedOutput, { format, task: 'curator' });
+        const repairedOutput = await sendInnerLoreRequest(repairSettings, preparedRepairMessages, signal, requestOptions);
+        const payload = parseInnerLoreOutput(repairedOutput, {
+            format, task: 'curator', salvageTruncated: true,
+        });
         return {
             payload,
             repaired: true,
@@ -397,7 +404,9 @@ export async function testInnerLoreConnection(settings) {
     );
     const parsed = parseInnerLoreOutput(output, { format, task: 'curator' });
     if (!Array.isArray(parsed.entities) || !Array.isArray(parsed.minds)) {
-        throw new Error('The connection responded, but did not follow the required InnerLore JSON schema.');
+        throw new Error(format === OUTPUT_FORMAT_DSL
+            ? 'The connection responded, but did not follow the required InnerLore DSL v1 format.'
+            : 'The connection responded, but did not follow the required InnerLore JSON schema.');
     }
     return cleanString(output, 500);
 }

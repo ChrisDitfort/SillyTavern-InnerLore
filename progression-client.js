@@ -1,9 +1,10 @@
 import { canonicalNameKey } from './core.js';
-import { sendInnerLoreRequest } from './llm-client.js?v=7';
+import { sendInnerLoreRequest } from './llm-client.js?v=8';
 import { buildProgressionRepairMessages } from './progression-prompts.js';
 import { PROGRESSION_JSON_SCHEMA } from './structured-output.js';
 import {
     appendDslEvaluationKeyContract,
+    escalateRepairSettings,
     normalizeOutputFormat,
     outputParseDiagnostics,
     parseInnerLoreOutput,
@@ -181,7 +182,9 @@ export async function requestProgressionPatch(settings, messages, signal, option
     const requestOptions = structuredRequestOptions(format, PROGRESSION_JSON_SCHEMA);
     const firstOutput = await sendInnerLoreRequest(requestSettings, requestMessages, signal, requestOptions);
     try {
-        const parsed = parseInnerLoreOutput(firstOutput, { format, task: 'progression' });
+        const parsed = parseInnerLoreOutput(firstOutput, {
+            format, task: 'progression', salvageTruncated: true,
+        });
         return {
             payload: validateProgressionPayload(parsed, validationOptions),
             repaired: false,
@@ -191,6 +194,7 @@ export async function requestProgressionPatch(settings, messages, signal, option
         };
     } catch (firstError) {
         if (settings.repairMalformedJson === false) throw firstError;
+        const repairSettings = escalateRepairSettings(requestSettings, firstError, firstOutput);
         const repairMessages = buildProgressionRepairMessages(firstOutput, {
             ...validationOptions,
             sourceMessages: requestMessages,
@@ -198,12 +202,14 @@ export async function requestProgressionPatch(settings, messages, signal, option
         repairMessages.at(-1).content += ` The local parser or validator error was: ${String(firstError?.message || firstError).slice(0, 1_000)}`;
         const preparedRepairMessages = prepareOutputMessages(repairMessages, { format, task: 'progression' });
         const repairOutput = await sendInnerLoreRequest(
-            requestSettings,
+            repairSettings,
             preparedRepairMessages,
             signal,
             requestOptions,
         );
-        const parsed = parseInnerLoreOutput(repairOutput, { format, task: 'progression' });
+        const parsed = parseInnerLoreOutput(repairOutput, {
+            format, task: 'progression', salvageTruncated: true,
+        });
         return {
             payload: validateProgressionPayload(parsed, validationOptions),
             repaired: true,

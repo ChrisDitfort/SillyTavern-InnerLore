@@ -175,12 +175,17 @@
 
                     <label for="il_maintenance_output_format">Background analysis response format</label>
                     <select id="il_maintenance_output_format" class="text_pole">
-                        <option value="json">Strict JSON (established)</option>
-                        <option value="dsl">InnerLore DSL v1 (experimental)</option>
+                        <option value="dsl">InnerLore DSL v1 (recommended)</option>
+                        <option value="json">Strict JSON (compatibility fallback)</option>
                     </select>
                     <small class="inner-lore-hint">
                         DSL uses readable records such as <code>LOCATION Ben Tavern … END</code>, then converts them
                         locally into the same validated objects as JSON. It does not bypass canon or safety checks.
+                        In four paired 30-turn runs it needed ~30% fewer completion tokens, ran ~20% faster, and
+                        used fewer repairs than strict JSON. Truncated DSL responses are salvaged to their complete
+                        records, a JSON answer is accepted when a provider ignores the format, and every local
+                        normalization is reported in the run summary. Switch to Strict JSON if a provider cannot
+                        follow the DSL contract.
                     </small>
 
                     <label class="checkbox_label" for="il_repair_json">

@@ -62,7 +62,6 @@ import {
 } from '../trigger-events.js';
 
 const extensionRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const sillyTavernRoot = path.resolve(extensionRoot, '../../../..');
 const storageRoot = '/home/chris/airpg-storage';
 const playerName = 'Rowan';
 const storyName = 'Your useless squire';
@@ -83,6 +82,12 @@ function argumentsMap(argv) {
 
 const cli = argumentsMap(process.argv.slice(2));
 const targetTurns = Math.max(1, Math.min(100, Number(cli.turns) || 100));
+// Node realpath's the entry script, which breaks the ../../.. derivation when
+// the extension is symlinked into SillyTavern from a separate repository.
+// --st-root overrides it explicitly for that dev-deploy layout.
+const sillyTavernRoot = cli['st-root']
+    ? path.resolve(String(cli['st-root']))
+    : path.resolve(extensionRoot, '../../../..');
 const runId = String(cli['run-id'] || `squire-${targetTurns}-turn-${runDate}`).replace(/[^a-z0-9._-]+/giu, '-');
 const resultRoot = path.resolve(String(cli['output-dir'] || path.join(storageRoot, 'benchmark-results', runId)));
 const requestedProfiles = String(cli.profiles || '').split(',').map(item => item.trim()).filter(Boolean);
@@ -1488,6 +1493,29 @@ async function runCampaign(spec) {
     }
 
     function recordCodecNormalizations(label, task, attempt, payload) {
+        // Per-response record counts attribute coverage regressions: they show
+        // what the model actually emitted before merge filtering or repair
+        // replacement changed the committed state.
+        const recordCounts = task === 'curator'
+            ? { entities: payload?.entities?.length ?? 0, minds: payload?.minds?.length ?? 0 }
+            : task === 'progression'
+                ? {
+                    goals: payload?.goals?.length ?? 0,
+                    processes: payload?.processes?.length ?? 0,
+                    events: payload?.events?.length ?? 0,
+                    eventEvaluations: payload?.event_evaluations?.length ?? 0,
+                }
+                : { proposal: payload?.proposal ? 1 : 0 };
+        campaign.codecDiagnostics.push({
+            label,
+            task,
+            outputFormat: maintenanceOutputFormat,
+            attempt,
+            severity: 'parsed',
+            code: 'record_counts',
+            recordCounts,
+            recordedAt: new Date().toISOString(),
+        });
         for (const diagnostic of outputParseDiagnostics(payload)) {
             campaign.codecDiagnostics.push({
                 label,
@@ -1495,6 +1523,7 @@ async function runCampaign(spec) {
                 outputFormat: maintenanceOutputFormat,
                 attempt,
                 severity: 'normalized',
+                recordCounts,
                 ...diagnostic,
                 recordedAt: new Date().toISOString(),
             });
@@ -1675,7 +1704,7 @@ async function runCampaign(spec) {
         for (let repairAttempt = 0; repairAttempt <= maximumRepairs; repairAttempt++) {
             try {
                 const payload = parseInnerLoreOutput(response.content, {
-                    format: maintenanceOutputFormat, task: 'curator',
+                    format: maintenanceOutputFormat, task: 'curator', salvageTruncated: true,
                 });
                 recordCodecNormalizations(label, 'curator', repairAttempt, payload);
                 if (!Array.isArray(payload?.entities) || !Array.isArray(payload?.minds)) throw new Error('Curator arrays are missing.');
@@ -1789,7 +1818,7 @@ async function runCampaign(spec) {
         for (let repairAttempt = 0; repairAttempt <= maximumRepairs; repairAttempt++) {
             try {
                 const parsed = parseInnerLoreOutput(response.content, {
-                    format: maintenanceOutputFormat, task: 'progression',
+                    format: maintenanceOutputFormat, task: 'progression', salvageTruncated: true,
                 });
                 recordCodecNormalizations(label, 'progression', repairAttempt, parsed);
                 return {
@@ -1888,7 +1917,7 @@ async function runCampaign(spec) {
         for (let repairAttempt = 0; repairAttempt <= 1; repairAttempt++) {
             try {
                 const parsed = parseInnerLoreOutput(response.content, {
-                    format: maintenanceOutputFormat, task: 'event_director',
+                    format: maintenanceOutputFormat, task: 'event_director', salvageTruncated: true,
                 });
                 recordCodecNormalizations(`turn-${turnNumber}`, 'event_director', repairAttempt, parsed);
                 return {
