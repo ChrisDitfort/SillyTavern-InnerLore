@@ -265,7 +265,96 @@ export function init(router, args) {
 
     // Context preparation happens client-side; acknowledge and defer.
     router.post('/v1/worlds/:worldId/innerlore/context/build', (request, response) => sendData(response, null));
-    router.post('/v1/worlds/:worldId/innerlore/event-director/context', (request, response) => sendData(response, null));
+    router.post('/v1/worlds/:worldId/innerlore/event-director/context', (request, response) => {
+        const worldId = String(request.params.worldId);
+        const row = db.prepare('SELECT chat_id, snapshot, revision FROM stores WHERE world_id = ?').get(worldId);
+        if (!row) return sendError(response, 404, 'InnerLore store not found', 'STORE_NOT_FOUND');
+        if (request.body?.expectedRevision !== undefined && request.body.expectedRevision !== row.revision) {
+            return sendError(response, 409, 'InnerLore Event Director requested from a stale store revision', 'REVISION_CONFLICT');
+        }
+        const store = parseJsonSafe(row.snapshot) || {};
+        const entities = Array.isArray(store.entities)
+            ? store.entities
+            : Object.values(store.entities || {});
+        const progression = store.progression || {};
+        const definitions = Object.values(progression.eventDefinitions || {});
+        const proposals = Object.values(progression.eventProposals || {})
+            .sort((left, right) => (right.updatedAt || 0) - (left.updatedAt || 0));
+        const sources = [];
+        for (const entity of entities) {
+            if (!entity?.id || entity.enabled === false) continue;
+            sources.push({
+                id: `lore:${entity.id}`,
+                recordId: entity.id,
+                kind: 'lore',
+                name: String(entity.name || entity.id),
+                summary: String(entity.summary || entity.currentState || ''),
+                unresolved: Array.isArray(entity.unresolved) ? entity.unresolved : [],
+                revision: Number(entity.revision) || row.revision,
+                messageIndex: Number.isInteger(entity.lastSeenMessage) ? entity.lastSeenMessage : -1,
+                graphNodeId: `entity:${entity.id}`,
+                generated: false,
+            });
+        }
+        for (const [prefix, collection] of [
+            ['goal', progression.goals],
+            ['process', progression.processes],
+            ['event', progression.events],
+        ]) {
+            for (const record of Object.values(collection || {})) {
+                const key = record?.key ?? record?.id;
+                if (!key) continue;
+                sources.push({
+                    id: `${prefix}:${key}`,
+                    recordId: String(key),
+                    kind: prefix,
+                    name: String(record.title || record.name || key),
+                    status: String(record.status || ''),
+                    owner: String(record.owner || record.subjectName || ''),
+                    description: String(record.description || '').slice(0, 600),
+                    generated: prefix === 'event' && (record.generated === true || record.origin === 'automatic_director'),
+                });
+            }
+        }
+        if (request.body?.includePrivateMinds === true) {
+            for (const brain of Object.values(store.brains || {})) {
+                const current = brain.currentMind;
+                const statement = [current?.perception, current?.interpretation, current?.intention]
+                    .filter(Boolean).join(' ');
+                if (!brain?.id || !statement.trim()) continue;
+                sources.push({
+                    id: `npc_motive:${brain.id}`,
+                    recordId: brain.id,
+                    kind: 'npc_motive',
+                    name: String(brain.name || brain.id),
+                    statement: statement.slice(0, 600),
+                    graphNodeId: `brain:${brain.id}`,
+                    generated: false,
+                    private: true,
+                });
+            }
+        }
+        return sendData(response, {
+            schema: 'innerlore.event-director-context.v1',
+            snapshot: {
+                worldId,
+                chatId: row.chat_id,
+                storeRevision: row.revision,
+                lastProcessedIndex: Number.isInteger(store.lastProcessedIndex) ? store.lastProcessedIndex : -1,
+                clock: progression.clock || {},
+            },
+            branch: {
+                id: String(request.body?.branchId || 'main'),
+                headFingerprint: String(request.body?.headFingerprint || ''),
+            },
+            sources,
+            availableSourceIds: sources.map(source => source.id),
+            existingDefinitions: definitions,
+            recentProposals: proposals.slice(0, 12),
+            relations: [],
+            diagnostics: { sqliteAuthoritative: true, relationCount: 0 },
+        });
+    });
 
     router.get('/v1/worlds/:worldId/innerlore/context/profiles', (request, response) => {
         const rows = db.prepare('SELECT profile_id, name, builtin, revision, config FROM context_profiles WHERE world_id = ?')

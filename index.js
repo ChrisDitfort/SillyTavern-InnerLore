@@ -1227,7 +1227,10 @@ async function maybeRunAutomaticEventDirector({ force = false } = {}) {
             runtime.controller?.signal,
             {
                 state: progression,
-                sources: directorContext.sources,
+                // A backend without director-context support returns null;
+                // an empty catalog then cleanly yields no proposal instead of
+                // crashing the director pass.
+                sources: Array.isArray(directorContext?.sources) ? directorContext.sources : [],
                 playerName: context().name1,
                 minimumConfidence: settings.automaticEventDirectorMinimumConfidence,
                 includePrivateMinds: settings.automaticEventDirectorIncludePrivateMinds,
