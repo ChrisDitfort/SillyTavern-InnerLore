@@ -59,6 +59,7 @@ import {
     buildAnalysisMessages,
     formatCharacterCard,
     formatTranscript,
+    insufficientResponseCap,
     planNarratorPromptDelivery,
 } from './prompts.js';
 import { compileTriggerEventDeliveryPreview } from './event-delivery.js?v=2';
@@ -150,6 +151,28 @@ PERSPECTIVE CONTRACT (overrides precedent):
 
 /** Pending main-prompt restoration after a plugin-prompt generation. */
 let narratorPromptRestore = null;
+
+/** Advisory: a response cap too small for the narration length guarantees
+ *  severed or empty replies and eventual quarantine; say so once per load. */
+async function warnOnInsufficientResponseCap() {
+    if (runtime.responseCapWarned) return;
+    try {
+        const oaiModule = await import('/scripts/openai.js');
+        const shortfall = insufficientResponseCap(
+            oaiModule.oai_settings?.openai_max_tokens,
+            getSettings().narrationLength,
+        );
+        if (!shortfall) return;
+        runtime.responseCapWarned = true;
+        const detail = `The active preset limits responses to ${shortfall.cap} tokens, but ${getSettings().narrationLength} narration needs roughly ${shortfall.required}. Replies will be cut off or empty; raise the preset's Response Length.`;
+        console.warn(`${LOG_PREFIX} ${detail}`);
+        setStatus('error', 'Response cap too low', detail);
+        toastr.warning(detail, DISPLAY_NAME, { timeOut: 12_000 });
+    } catch {
+        // Advisory only; never interfere with the story turn.
+    }
+}
+
 async function scriptModule() {
     return import('/script.js');
 }
@@ -4961,6 +4984,7 @@ function registerEvents() {
         } catch (swapError) {
             console.error(LOG_PREFIX, 'Narrator prompt swap failed; continuing with the SillyTavern prompt:', swapError);
         }
+        if (!isDryRun && storyGeneration) await warnOnInsufficientResponseCap();
         if (!isDryRun && storyGeneration) {
             showNarratorPill('Narrating');
             trackNarrationStreamingStart();

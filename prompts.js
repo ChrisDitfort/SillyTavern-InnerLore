@@ -526,3 +526,22 @@ export function planNarratorPromptDelivery(orderList) {
     if (index >= 0 && items[index].enabled !== false) return null;
     return { existed: index >= 0, index };
 }
+
+const NARRATION_LENGTH_MINIMUM_TOKENS = Object.freeze({
+    brief: 200,
+    standard: 600,
+    long: 1_200,
+});
+
+/**
+ * A response cap below the narration length's token need cannot produce a
+ * complete reply: the model is cut off or returns empty, recovery regenerates
+ * under the same cap, and the turn ends quarantined. Returns the shortfall
+ * description when the cap is unusable, or null when it is fine.
+ */
+export function insufficientResponseCap(responseCapTokens, narrationLength) {
+    const required = NARRATION_LENGTH_MINIMUM_TOKENS[narrationLength];
+    const cap = Number(responseCapTokens);
+    if (!required || !Number.isFinite(cap) || cap <= 0) return null;
+    return cap < required ? { cap, required } : null;
+}

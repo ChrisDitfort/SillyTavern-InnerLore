@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { planNarratorPromptDelivery } from '../prompts.js';
+import { insufficientResponseCap, planNarratorPromptDelivery } from '../prompts.js';
 
 test('a delivered main prompt needs no order change', () => {
     assert.equal(planNarratorPromptDelivery(null), null);
@@ -64,4 +64,19 @@ test('swap and restore keep the temporary order change symmetrical', () => {
         else order[index] = restore.item;
         assert.deepEqual(order, original);
     }
+});
+
+test('a response cap below the narration length need is reported', () => {
+    // The exact Xialong Story Mode situation: 100-token cap under a
+    // standard-length narrator directive produced only quarantined replies.
+    assert.deepEqual(insufficientResponseCap(100, 'standard'), { cap: 100, required: 600 });
+    assert.deepEqual(insufficientResponseCap(200, 'long'), { cap: 200, required: 1200 });
+    assert.deepEqual(insufficientResponseCap(150, 'brief'), { cap: 150, required: 200 });
+    assert.equal(insufficientResponseCap(600, 'standard'), null);
+    assert.equal(insufficientResponseCap(1500, 'long'), null);
+    // Unknown or non-numeric caps are not this guard's business.
+    assert.equal(insufficientResponseCap(undefined, 'standard'), null);
+    assert.equal(insufficientResponseCap(0, 'standard'), null);
+    assert.equal(insufficientResponseCap(-5, 'standard'), null);
+    assert.equal(insufficientResponseCap(100, 'mystery'), null);
 });
