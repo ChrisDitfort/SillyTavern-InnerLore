@@ -508,3 +508,21 @@ export function buildRepairMessages(rawOutput) {
         },
     ];
 }
+
+/**
+ * Decide whether the narrator prompt, which is swapped into the prompt
+ * manager's `main` entry, is actually delivered by the active prompt order.
+ * Novelist-style presets deliberately omit or disable `main` ("continue this
+ * manuscript; write all characters") — in that case swapping the entry's
+ * content silently sends no contract at all, and story-tuned models will
+ * happily narrate the player's actions and inner life. Returns null when
+ * `main` is delivered as-is, or a plan describing the temporary order change
+ * needed to deliver it.
+ */
+export function planNarratorPromptDelivery(orderList) {
+    const items = Array.isArray(orderList) ? orderList : null;
+    if (!items) return null;
+    const index = items.findIndex(item => item?.identifier === 'main');
+    if (index >= 0 && items[index].enabled !== false) return null;
+    return { existed: index >= 0, index };
+}

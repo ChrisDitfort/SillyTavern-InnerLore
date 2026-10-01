@@ -55,7 +55,12 @@ import {
     removeLoreRecord,
     syncLorebook as syncNativeLorebook,
 } from './lorebook.js';
-import { buildAnalysisMessages, formatCharacterCard, formatTranscript } from './prompts.js';
+import {
+    buildAnalysisMessages,
+    formatCharacterCard,
+    formatTranscript,
+    planNarratorPromptDelivery,
+} from './prompts.js';
 import { compileTriggerEventDeliveryPreview } from './event-delivery.js?v=2';
 import { requestEventDirectorProposal } from './event-director-client.js';
 import { buildEventDirectorMessages } from './event-director-prompts.js';
@@ -162,30 +167,61 @@ const NARRATION_LENGTH_DIRECTIVES = Object.freeze({
     long: 'Narration length: write a long, immersive reply of roughly 500-800 words — several paragraphs, layered detail, room for the scene to breathe.',
 });
 
+/** The prompt order the manager will actually use for this character. */
+async function findActivePromptOrder() {
+    const oaiModule = await import('/scripts/openai.js');
+    const orders = oaiModule.oai_settings?.prompt_order;
+    if (!Array.isArray(orders) || !orders.length) return null;
+    const characterId = Number(context()?.characterId ?? -1);
+    const order = orders.find(item => item.character_id === characterId)
+        || orders.find(item => item.character_id === 100001)
+        || null;
+    return Array.isArray(order?.order) ? order.order : null;
+}
+
 async function applyNarratorPromptSwap(shouldApply) {
     const settings = getSettings();
-    if (narratorPromptRestore) {
-        const { entry, content } = narratorPromptRestore;
-        narratorPromptRestore = null;
-        if (entry) entry.content = content;
-    }
+    if (narratorPromptRestore) restoreNarratorPromptSwap();
     if (!shouldApply) return;
     if (!settings.enabled || !settings.narratorPromptEnabled) return;
     const template = cleanString(settings.narratorPromptTemplate, 20_000);
     if (!template.trim()) return;
     const entry = await findMainPromptEntry();
-    if (entry) {
-        narratorPromptRestore = { entry, content: entry.content };
-        const lengthDirective = NARRATION_LENGTH_DIRECTIVES[settings.narrationLength];
-        entry.content = lengthDirective ? `${template}\n\n${lengthDirective}` : template;
+    if (!entry) return;
+    const orderList = await findActivePromptOrder();
+    const deliveryPlan = planNarratorPromptDelivery(orderList);
+    narratorPromptRestore = { entry, content: entry.content, orderList, orderRestore: null };
+    const lengthDirective = NARRATION_LENGTH_DIRECTIVES[settings.narrationLength];
+    entry.content = lengthDirective ? `${template}\n\n${lengthDirective}` : template;
+    if (deliveryPlan && orderList) {
+        if (deliveryPlan.existed) {
+            // Present but disabled: enable it in place for this generation.
+            narratorPromptRestore.orderRestore = {
+                index: deliveryPlan.index,
+                item: { ...orderList[deliveryPlan.index] },
+            };
+            orderList[deliveryPlan.index] = { identifier: 'main', enabled: true };
+        } else {
+            // Absent from the order entirely: front-load a temporary entry.
+            narratorPromptRestore.orderRestore = { index: -1, item: null };
+            orderList.unshift({ identifier: 'main', enabled: true });
+        }
     }
 }
 
 function restoreNarratorPromptSwap() {
     if (!narratorPromptRestore) return;
-    const { entry, content } = narratorPromptRestore;
+    const { entry, content, orderList, orderRestore } = narratorPromptRestore;
     narratorPromptRestore = null;
     if (entry) entry.content = content;
+    if (Array.isArray(orderList) && orderRestore) {
+        const index = orderList.findIndex(item => item?.identifier === 'main');
+        if (orderRestore.index === -1) {
+            if (index >= 0) orderList.splice(index, 1);
+        } else if (index >= 0) {
+            orderList[index] = orderRestore.item;
+        }
+    }
 }
 
 /**
