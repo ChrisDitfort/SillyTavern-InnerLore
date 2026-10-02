@@ -56,3 +56,42 @@ test('sentient-companion rule companion: distinct people stay distinct', () => {
     // operations, so they must collapse; Elara stays separate.
     assert.deepEqual(names, ['Elara', 'Theron']);
 });
+
+test('pre-existing forks heal deterministically on the next merge pass', () => {
+    const store = createEmptyStore('mind-dedup-chat');
+    // Simulate the live failure: three minds for one father, two for one
+    // mother, created by article variants and an unlinked proper name.
+    mergeMindOperations(store, [
+        { character: 'the father', current_mind: { perception: 'first' } },
+    ], { messageIndex: 10 });
+    store.brains.father = structuredClone(store.brains['the father']);
+    store.brains.father.name = 'Father';
+    store.brains.father.id = 'father';
+    store.brains.father.aliases = ['Theron'];
+    store.brains.father.identityKind = 'public_name';
+    store.brains.theron = structuredClone(store.brains['the father']);
+    store.brains.theron.name = 'Theron';
+    store.brains.theron.id = 'theron';
+
+    // An unrelated pass triggers consolidation inside mergeMindOperations.
+    const result = mergeMindOperations(store, [
+        { character: 'Elara', current_mind: { perception: 'unrelated' } },
+    ], { messageIndex: 12 });
+
+    const fatherBrains = Object.values(store.brains).filter(brain => /father|theron/iu.test(brain.name + JSON.stringify(brain.aliases)));
+    assert.equal(fatherBrains.length, 1, `expected one father mind, got ${fatherBrains.map(b => b.name).join(', ')}`);
+    assert.equal(fatherBrains[0].name, 'Father');
+    assert.ok(fatherBrains[0].aliases.some(alias => /theron/iu.test(alias)));
+    assert.ok(result.consolidatedEntries >= 2);
+    assert.ok(result.changedIds.includes('father'));
+});
+
+test('unrelated people are never consolidated', () => {
+    const store = createEmptyStore('mind-dedup-chat');
+    mergeMindOperations(store, [
+        { character: 'Elara', current_mind: { perception: 'a' } },
+        { character: 'Snowdrop', current_mind: { perception: 'b' } },
+        { character: 'The City Clerk', current_mind: { perception: 'c' } },
+    ], { messageIndex: 10 });
+    assert.equal(Object.keys(store.brains).length, 3);
+});

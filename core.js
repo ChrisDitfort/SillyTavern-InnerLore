@@ -1805,6 +1805,80 @@ function findBrain(store, operation) {
     return [canonicalNameKey(name), null];
 }
 
+/**
+ * Deterministically merge forked minds: the same person tracked under
+ * article variants ("the father" / "Father") or cross-linked by aliases (one
+ * brain named "Theron" while another already lists "Theron" as an alias).
+ * Model naming drift then self-heals instead of accumulating duplicate
+ * minds. Returns the merges performed.
+ */
+export function consolidateMinds(store) {
+    const merges = [];
+    if (!store?.brains || typeof store.brains !== 'object') return merges;
+    const facetCount = brain => Object.keys(brain?.persistentSelf?.facets || {}).length
+        + Object.keys(brain?.persistentSelf?.voice || {}).length
+        + Object.keys(brain?.persistentSelf?.relationships || {}).length;
+    const namesOf = brain => new Set([
+        brainNameKey(brain.name),
+        ...(brain.aliases || []).map(brainNameKey),
+    ].filter(Boolean));
+    const absorbInto = (keeper, dropped) => {
+        keeper.aliases = uniqueStrings([
+            ...(keeper.aliases || []),
+            dropped.name,
+            ...(dropped.aliases || []),
+        ], 20).filter(alias => brainNameKey(alias) !== brainNameKey(keeper.name));
+        if (keeper.identityKind !== 'public_name' && dropped.identityKind === 'public_name') {
+            keeper.identityKind = 'public_name';
+        }
+        keeper.persistentSelf = keeper.persistentSelf || { facets: {}, voice: {}, relationships: {} };
+        for (const section of ['facets', 'voice', 'relationships']) {
+            keeper.persistentSelf[section] = keeper.persistentSelf[section] || {};
+            for (const [key, value] of Object.entries(dropped.persistentSelf?.[section] || {})) {
+                if (!Object.hasOwn(keeper.persistentSelf[section], key)) keeper.persistentSelf[section][key] = value;
+            }
+        }
+        keeper.durableCandidates = {
+            ...(dropped.durableCandidates || {}),
+            ...(keeper.durableCandidates || {}),
+        };
+        const droppedMindNewer = (dropped.updatedAt || 0) > (keeper.updatedAt || 0);
+        if (droppedMindNewer && dropped.currentMind) keeper.currentMind = dropped.currentMind;
+        keeper.firstSeenMessage = Math.min(keeper.firstSeenMessage ?? 0, dropped.firstSeenMessage ?? 0);
+        keeper.lastSeenMessage = Math.max(keeper.lastSeenMessage ?? 0, dropped.lastSeenMessage ?? 0);
+        keeper.revision = (keeper.revision || 0) + 1;
+        keeper.updatedAt = Date.now();
+    };
+    // Repeat until stable: one merge can link the survivor to further forks.
+    for (;;) {
+        const brains = Object.values(store.brains);
+        let mergedPair = null;
+        scan:
+        for (let index = 0; index < brains.length; index++) {
+            for (let other = index + 1; other < brains.length; other++) {
+                const left = brains[index];
+                const right = brains[other];
+                if (!store.brains[left.id] || !store.brains[right.id]) continue;
+                const linked = [...namesOf(left)].some(name => namesOf(right).has(name));
+                if (!linked) continue;
+                // Prefer the publicly named mind, then the richer one, then
+                // the most recently updated; all describe the same person.
+                const score = brain => (brain.identityKind === 'public_name' ? 200 : 0)
+                    + facetCount(brain) * 10 + Math.min(brain.updatedAt || 0, 1e12);
+                const keeper = score(left) >= score(right) ? left : right;
+                const dropped = keeper === left ? right : left;
+                absorbInto(keeper, dropped);
+                delete store.brains[dropped.id];
+                mergedPair = { kept: keeper.name, removed: dropped.name };
+                break scan;
+            }
+        }
+        if (!mergedPair) break;
+        merges.push(mergedPair);
+    }
+    return merges;
+}
+
 function promoteBrainIdentity(store, previousName, publicName, aliases = []) {
     const [oldId, brain] = findBrain(store, { character: previousName });
     if (!brain || canonicalNameKey(brain.name) === canonicalNameKey(publicName)) return;
@@ -2409,6 +2483,17 @@ export function mergeMindOperations(store, operations, options = {}) {
     }
 
     store.updatedAt = Date.now();
+    // Provider naming drift can still fork minds between passes (a proper
+    // name emitted with no alias link); heal deterministically here so
+    // duplicates cannot accumulate.
+    const mindMerges = consolidateMinds(store);
+    if (mindMerges.length) {
+        result.consolidatedEntries += mindMerges.length;
+        for (const merge of mindMerges) {
+            const survivorId = canonicalNameKey(merge.kept);
+            if (!result.changedIds.includes(survivorId)) result.changedIds.push(survivorId);
+        }
+    }
     return result;
 }
 

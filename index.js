@@ -28,7 +28,7 @@ import {
     snapshotMessageRange,
     summaryceptionRecallText,
     uniqueStrings,
-} from './core.js?v=41';
+} from './core.js?v=42';
 import { compileContext } from './context-compiler.js?v=4';
 import {
     applyContextProfileToSettings,
@@ -48,7 +48,7 @@ import {
     listConnectionProfiles,
     requestJsonPatch,
     testInnerLoreConnection,
-} from './llm-client.js?v=9';
+} from './llm-client.js?v=10';
 import {
     deleteInnerLorebooksForChat,
     openInnerLorebook,
@@ -61,7 +61,7 @@ import {
     formatTranscript,
     insufficientResponseCap,
     planNarratorPromptDelivery,
-} from './prompts.js?v=3';
+} from './prompts.js?v=4';
 import { compileTriggerEventDeliveryPreview } from './event-delivery.js?v=2';
 import { requestEventDirectorProposal } from './event-director-client.js';
 import { buildEventDirectorMessages } from './event-director-prompts.js';
