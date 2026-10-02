@@ -117,3 +117,45 @@ test('relational descriptors merge into the plain-form mind, never each other', 
     ], { messageIndex: 10 });
     assert.equal(Object.keys(other.brains).length, 2, 'distinct possessive minds must stay distinct');
 });
+
+test('minds anchor through the entity layer even without shared aliases', () => {
+    const store = createEmptyStore('mind-dedup-chat');
+    // The entity layer resolved this person canonically as Theron (alias
+    // Father); the provider emitted minds under both names with no shared
+    // alias between the brains themselves.
+    store.entities = {
+        'character:theron': { id: 'character:theron', type: 'character', name: 'Theron', aliases: ['Father'] },
+    };
+    mergeMindOperations(store, [
+        { character: 'Theron', current_mind: { perception: 'named form' } },
+    ], { messageIndex: 10 });
+    // Bypass findBrain to simulate an already-forked state.
+    store.brains.father = {
+        ...structuredClone(store.brains.theron),
+        id: 'father', name: 'Father', aliases: [],
+        currentMind: { perception: 'descriptor form' },
+    };
+    const result = mergeMindOperations(store, [
+        { character: 'Elara', current_mind: { perception: 'unrelated' } },
+    ], { messageIndex: 12 });
+    const fatherBrains = Object.values(store.brains).filter(brain => /theron|father/iu.test(brain.name));
+    assert.equal(fatherBrains.length, 1, 'entity anchor must collapse Father into Theron');
+    assert.equal(fatherBrains[0].name, 'Theron');
+    assert.ok(result.consolidatedEntries >= 1);
+});
+
+test('an operation naming an entity alias lands on the canonical mind', () => {
+    const store = createEmptyStore('mind-dedup-chat');
+    store.entities = {
+        'character:theron': { id: 'character:theron', type: 'character', name: 'Theron', aliases: ['Father'] },
+    };
+    mergeMindOperations(store, [
+        { character: 'Theron', current_mind: { perception: 'first' } },
+    ], { messageIndex: 10 });
+    // A later pass says only "Father" — the entity anchor resolves it.
+    mergeMindOperations(store, [
+        { character: 'Father', current_mind: { perception: 'second' } },
+    ], { messageIndex: 12 });
+    assert.equal(Object.keys(store.brains).length, 1);
+    assert.equal(Object.values(store.brains)[0].currentMind.perception, 'second');
+});

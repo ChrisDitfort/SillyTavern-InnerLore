@@ -1835,12 +1835,33 @@ function findBrain(store, operation) {
         primary: new Set(candidates.map(brainNameKey)),
         relational: new Set(candidates.flatMap(relationalNameKeys)),
     };
+    // Anchor through the entity layer, whose canonical reconciliation is far
+    // more stable than provider naming: "Father" resolves to entity Theron,
+    // so the mind lands on Theron's brain instead of forking.
+    for (const [entityName, entityKeys] of entityAnchorIndex(store)) {
+        if (candidates.some(candidate => entityKeys.has(brainNameKey(candidate)))) {
+            for (const key of entityKeys) wanted.primary.add(key);
+        }
+    }
     wanted.plain = wanted.relational.size === 0;
     for (const [id, brain] of Object.entries(store.brains)) {
         if (brainKeysLinked(wanted, brainMatchKeys(brain))) return [id, brain];
     }
     const name = normalizeName(operation.character || operation.name);
     return [canonicalNameKey(name), null];
+}
+
+/** Map each entity's name and aliases to their canonical entity name. */
+function entityAnchorIndex(store) {
+    const entities = Array.isArray(store?.entities)
+        ? store.entities
+        : Object.values(store?.entities || {});
+    const index = [];
+    for (const entity of entities) {
+        if (!entity?.name || entity.type === 'location' || entity.type === 'item') continue;
+        index.push([entity.name, new Set([entity.name, ...(entity.aliases || [])].map(brainNameKey))]);
+    }
+    return index;
 }
 
 /**
@@ -1853,6 +1874,16 @@ function findBrain(store, operation) {
 export function consolidateMinds(store) {
     const merges = [];
     if (!store?.brains || typeof store.brains !== 'object') return merges;
+    // Two minds that anchor to the same canonical entity are the same person,
+    // whatever the provider called them in different passes.
+    const anchors = entityAnchorIndex(store);
+    const anchoredName = brain => {
+        const keys = [brainNameKey(brain.name), ...relationalNameKeys(brain.name)];
+        for (const [entityName, entityKeys] of anchors) {
+            if (keys.some(key => entityKeys.has(key))) return entityName;
+        }
+        return null;
+    };
     const facetCount = brain => Object.keys(brain?.persistentSelf?.facets || {}).length
         + Object.keys(brain?.persistentSelf?.voice || {}).length
         + Object.keys(brain?.persistentSelf?.relationships || {}).length;
@@ -1894,7 +1925,8 @@ export function consolidateMinds(store) {
                 const left = brains[index];
                 const right = brains[other];
                 if (!store.brains[left.id] || !store.brains[right.id]) continue;
-                const linked = brainKeysLinked(namesOf(left), namesOf(right));
+                const linked = brainKeysLinked(namesOf(left), namesOf(right))
+                    || (anchoredName(left) !== null && anchoredName(left) === anchoredName(right));
                 if (!linked) continue;
                 // Prefer the publicly named mind, then the richer one, then
                 // the most recently updated; all describe the same person.

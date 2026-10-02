@@ -28,7 +28,7 @@ import {
     snapshotMessageRange,
     summaryceptionRecallText,
     uniqueStrings,
-} from './core.js?v=43';
+} from './core.js?v=44';
 import { compileContext } from './context-compiler.js?v=4';
 import {
     applyContextProfileToSettings,
@@ -48,7 +48,7 @@ import {
     listConnectionProfiles,
     requestJsonPatch,
     testInnerLoreConnection,
-} from './llm-client.js?v=11';
+} from './llm-client.js?v=12';
 import {
     deleteInnerLorebooksForChat,
     openInnerLorebook,
@@ -61,7 +61,7 @@ import {
     formatTranscript,
     insufficientResponseCap,
     planNarratorPromptDelivery,
-} from './prompts.js?v=5';
+} from './prompts.js?v=6';
 import { compileTriggerEventDeliveryPreview } from './event-delivery.js?v=2';
 import { requestEventDirectorProposal } from './event-director-client.js';
 import { buildEventDirectorMessages } from './event-director-prompts.js';
@@ -117,7 +117,7 @@ const PROMPT_KEY = 'inner_lore_context';
 const TURN_CONTRACT_PROMPT_KEY = 'inner_lore_latest_turn_contract';
 const TRIGGER_DELIVERY_PROMPT_KEY = 'inner_lore_trigger_delivery';
 const DISPLAY_NAME = 'InnerLore';
-const EXTENSION_VERSION = '0.13.9';
+const EXTENSION_VERSION = '0.14.0';
 const LOG_PREFIX = '[InnerLore]';
 
 /**
@@ -1900,6 +1900,8 @@ function setInputValue(id, value) {
 }
 
 function applySettingsToUI() {
+    const versionLabel = document.getElementById('il_version_label');
+    if (versionLabel) versionLabel.textContent = `v${EXTENSION_VERSION}`;
     const settings = getSettings();
     const fields = {
         il_enabled: settings.enabled,

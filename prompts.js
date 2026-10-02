@@ -214,15 +214,26 @@ export function buildAnalysisMessages(options) {
     // (typically sentient companions the curator kept classifying as
     // objects). Handing the model the exact names closes the gap instead of
     // hoping the generic rules trigger.
+    const claimedMindNames = () => {
+        const claimed = new Set(existingBrains.map(brain => canonicalNameKey(brain.character || '')));
+        return name => claimed.has(canonicalNameKey(name));
+    };
+    const isClaimed = claimedMindNames();
     const charactersWithoutMinds = existingEntities
         .filter(entity => entity.type === 'character')
-        .filter(entity => {
-            const claimed = new Set(existingBrains.map(brain => canonicalNameKey(brain.character || '')));
-            return !claimed.has(canonicalNameKey(entity.name))
-                && !(entity.aliases || []).some(alias => claimed.has(canonicalNameKey(alias)));
-        })
+        .filter(entity => !isClaimed(entity.name) && !(entity.aliases || []).some(alias => isClaimed(alias)))
         .map(entity => entity.name)
         .slice(0, 8);
+    // Companion-like beings misfiled as items: the typing rule and the mind
+    // gap are corrected together, by name.
+    const companionsMistypedAsItems = existingEntities
+        .filter(entity => entity.type === 'item' || entity.type === 'creature')
+        .filter(entity => /companion|familiar|sentient|construct|spirit|golem|summoned/iu.test(
+            `${entity.summary || ''} ${(entity.facts || []).join(' ')}`,
+        ))
+        .filter(entity => !isClaimed(entity.name) && !(entity.aliases || []).some(alias => isClaimed(alias)))
+        .map(entity => entity.name)
+        .slice(0, 4);
     const cardContext = cleanString(options.characterCard, 20_000);
     const customInstructions = cleanString(settings.customInstructions, 4_000);
     const recentExpressionText = cleanString(options.recentExpressionText, 4_000);
@@ -487,6 +498,7 @@ Automatic lore updates enabled: ${settings.autoLoreEnabled !== false}
 Additional user instructions: ${customInstructions || '(none)'}
 Player character (exclude from private minds): ${cleanString(options.playerName, 160) || '(unknown)'}
 Characters tracked in lore but missing a private mind (create the mind of any of these that meaningfully participates in PASSAGE, per the sentience rule): ${charactersWithoutMinds.length ? charactersWithoutMinds.join(', ') : '(none)'}
+Beings currently misfiled as items or creatures but described as sentient companions (if PASSAGE shows them participating: fix the entity type to "character" AND create their mind): ${companionsMistypedAsItems.length ? companionsMistypedAsItems.join(', ') : '(none)'}
 </RUN_CONFIGURATION>
 
 ${foundationOnlyInstructions}
