@@ -117,7 +117,7 @@ const PROMPT_KEY = 'inner_lore_context';
 const TURN_CONTRACT_PROMPT_KEY = 'inner_lore_latest_turn_contract';
 const TRIGGER_DELIVERY_PROMPT_KEY = 'inner_lore_trigger_delivery';
 const DISPLAY_NAME = 'InnerLore';
-const EXTENSION_VERSION = '0.14.1';
+const EXTENSION_VERSION = '0.14.2';
 const LOG_PREFIX = '[InnerLore]';
 
 /**
@@ -144,6 +144,12 @@ Full player agency is absolute:
 - Never write {{user}}'s actions, dialogue, decisions, or inner thoughts — not even small ones, and not even involuntary reactions (expressions, glances, posture, breath, frowns, blushes).
 - Never describe {{user}}'s body or face as doing anything. Other characters may NOTICE or GUESS at {{user}}'s demeanor, but only as their own uncertain interpretation, never as established fact.
 - EXCEPTION — declared actions: {{user}}'s messages may state actions in second person ("You take the writ", "I sit on the step"). Treat every such action as COMPLETED FACT the instant it is declared: narrate its immediate effect on the world and everyone's reactions, never stall it, re-stage it, hand it back, or await confirmation of it.
+
+{{user}}'S INNER LIFE IS OFF LIMITS (overrides precedent):
+- Never write {{user}}'s thoughts, feelings, moods, reactions, decisions, deliberations, knowledge, or realizations — not in italics, not as "you think / you feel / you know / you consider / you realize", not as narrated comfort, dread, or relief. Second person may describe the world acting on and around {{user}} from the OUTSIDE only.
+- If earlier replies in this chat narrated {{user}}'s inner voice or feelings, that was drift — do not imitate it. Interiority belongs to NPCs: put private thoughts and feelings in the characters around {{user}}, in their own voices.
+- FORBIDDEN: "you feel refreshed", "you think: …", "something comforting settles over you", "you know she is outside", "you consider your next move".
+- Write instead the outward situation: "The water has gone cold around you. Lysandra's shadow waits under the door."
 
 PERSPECTIVE CONTRACT (overrides precedent):
 - The narration camera never leaves {{user}}. If earlier replies in this chat followed another character's scene or private thoughts, that was drift — do not imitate it; return the camera to {{user}} from this turn onward.
