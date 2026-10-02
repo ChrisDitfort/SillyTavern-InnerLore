@@ -1783,10 +1783,22 @@ export function mergeEntityOperations(store, operations, options = {}) {
     return result;
 }
 
+/**
+ * Article-insensitive name key for private-mind matching. Providers freely
+ * alternate between "the father", "father", and revealed proper names for the
+ * same person; exact canonical matching would fork one NPC into several
+ * minds. Articles carry no identity, so they are ignored here. Entity ids
+ * keep using canonicalNameKey and are unaffected.
+ */
+function brainNameKey(value) {
+    return canonicalNameKey(value).replace(/^(?:the|a|an)\s+/u, '');
+}
+
 function findBrain(store, operation) {
-    const wanted = uniqueStrings([operation.character, operation.name, ...(operation.aliases || [])]).map(canonicalNameKey);
+    const wanted = uniqueStrings([operation.character, operation.name, ...(operation.aliases || [])])
+        .map(brainNameKey);
     for (const [id, brain] of Object.entries(store.brains)) {
-        const known = uniqueStrings([brain.name, ...(brain.aliases || [])]).map(canonicalNameKey);
+        const known = uniqueStrings([brain.name, ...(brain.aliases || [])]).map(brainNameKey);
         if (wanted.some(name => known.includes(name))) return [id, brain];
     }
     const name = normalizeName(operation.character || operation.name);
