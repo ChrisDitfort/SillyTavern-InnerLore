@@ -48,7 +48,7 @@ import {
     listConnectionProfiles,
     requestJsonPatch,
     testInnerLoreConnection,
-} from './llm-client.js?v=12';
+} from './llm-client.js?v=13';
 import {
     deleteInnerLorebooksForChat,
     openInnerLorebook,
@@ -61,7 +61,7 @@ import {
     formatTranscript,
     insufficientResponseCap,
     planNarratorPromptDelivery,
-} from './prompts.js?v=6';
+} from './prompts.js?v=7';
 import { compileTriggerEventDeliveryPreview } from './event-delivery.js?v=2';
 import { requestEventDirectorProposal } from './event-director-client.js';
 import { buildEventDirectorMessages } from './event-director-prompts.js';
@@ -117,7 +117,7 @@ const PROMPT_KEY = 'inner_lore_context';
 const TURN_CONTRACT_PROMPT_KEY = 'inner_lore_latest_turn_contract';
 const TRIGGER_DELIVERY_PROMPT_KEY = 'inner_lore_trigger_delivery';
 const DISPLAY_NAME = 'InnerLore';
-const EXTENSION_VERSION = '0.14.0';
+const EXTENSION_VERSION = '0.14.1';
 const LOG_PREFIX = '[InnerLore]';
 
 /**
@@ -134,6 +134,7 @@ The current InnerLore game state below is background truth. Weave it in naturall
 - Locations, items, factions, and lore must stay consistent with the provided records. Never contradict established facts, and never grant anyone knowledge they could not have.
 - Off-screen developments surface only when {{user}} could plausibly learn of them.
 - If the game state and the newest story turns disagree, THE NEWEST STORY TURNS WIN. The state may lag behind what just happened; never re-enact or undo completed events to match an older state.
+- Never propose, schedule, or set up something the established history shows already happened — a meal already eaten, an introduction or explanation already made, a meeting already held. Before having any character suggest an arrangement, check that the chat has not already completed it; if it has, treat it as done and continue from its consequences.
 
 [INNERLORE GAME STATE — private narrator background; never quote or mention it verbatim]
 {{innerlore_state_context}}
