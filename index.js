@@ -28,7 +28,7 @@ import {
     snapshotMessageRange,
     summaryceptionRecallText,
     uniqueStrings,
-} from './core.js?v=42';
+} from './core.js?v=43';
 import { compileContext } from './context-compiler.js?v=4';
 import {
     applyContextProfileToSettings,
@@ -48,7 +48,7 @@ import {
     listConnectionProfiles,
     requestJsonPatch,
     testInnerLoreConnection,
-} from './llm-client.js?v=10';
+} from './llm-client.js?v=11';
 import {
     deleteInnerLorebooksForChat,
     openInnerLorebook,
@@ -61,7 +61,7 @@ import {
     formatTranscript,
     insufficientResponseCap,
     planNarratorPromptDelivery,
-} from './prompts.js?v=4';
+} from './prompts.js?v=5';
 import { compileTriggerEventDeliveryPreview } from './event-delivery.js?v=2';
 import { requestEventDirectorProposal } from './event-director-client.js';
 import { buildEventDirectorMessages } from './event-director-prompts.js';
@@ -117,6 +117,7 @@ const PROMPT_KEY = 'inner_lore_context';
 const TURN_CONTRACT_PROMPT_KEY = 'inner_lore_latest_turn_contract';
 const TRIGGER_DELIVERY_PROMPT_KEY = 'inner_lore_trigger_delivery';
 const DISPLAY_NAME = 'InnerLore';
+const EXTENSION_VERSION = '0.13.9';
 const LOG_PREFIX = '[InnerLore]';
 
 /**
@@ -5185,7 +5186,7 @@ async function initializeServerState() {
     } else if (!expressionFoundationReady(getChatStore())) {
         scheduleExpressionFoundationWarmup(250);
     }
-    console.log(`${LOG_PREFIX} v0.9.0 loaded with prepared SQLite narrative state, prompt macros, and verified trigger-event delivery.`);
+    console.log(`${LOG_PREFIX} v${EXTENSION_VERSION} loaded with prepared SQLite narrative state, prompt macros, and verified trigger-event delivery.`);
 }
 
 function initializeServerStateAfterAppReady(ctx) {

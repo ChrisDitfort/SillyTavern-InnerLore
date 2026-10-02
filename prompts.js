@@ -1,4 +1,5 @@
 import {
+    canonicalNameKey,
     cleanString,
     ENTITY_TYPES,
     extractDeclaredLocationNames,
@@ -209,6 +210,19 @@ export function buildAnalysisMessages(options) {
         .filter(item => item.missing.length);
     const entityKeyring = buildEntityKeyring(store);
     const brainKeyring = buildBrainKeyring(store);
+    // Characters already tracked as lore but still lacking a private mind
+    // (typically sentient companions the curator kept classifying as
+    // objects). Handing the model the exact names closes the gap instead of
+    // hoping the generic rules trigger.
+    const charactersWithoutMinds = existingEntities
+        .filter(entity => entity.type === 'character')
+        .filter(entity => {
+            const claimed = new Set(existingBrains.map(brain => canonicalNameKey(brain.character || '')));
+            return !claimed.has(canonicalNameKey(entity.name))
+                && !(entity.aliases || []).some(alias => claimed.has(canonicalNameKey(alias)));
+        })
+        .map(entity => entity.name)
+        .slice(0, 8);
     const cardContext = cleanString(options.characterCard, 20_000);
     const customInstructions = cleanString(settings.customInstructions, 4_000);
     const recentExpressionText = cleanString(options.recentExpressionText, 4_000);
@@ -472,6 +486,7 @@ Inner-self updates enabled: ${settings.innerSelfEnabled !== false}
 Automatic lore updates enabled: ${settings.autoLoreEnabled !== false}
 Additional user instructions: ${customInstructions || '(none)'}
 Player character (exclude from private minds): ${cleanString(options.playerName, 160) || '(unknown)'}
+Characters tracked in lore but missing a private mind (create the mind of any of these that meaningfully participates in PASSAGE, per the sentience rule): ${charactersWithoutMinds.length ? charactersWithoutMinds.join(', ') : '(none)'}
 </RUN_CONFIGURATION>
 
 ${foundationOnlyInstructions}

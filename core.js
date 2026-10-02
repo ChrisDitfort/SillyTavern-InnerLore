@@ -1794,12 +1794,50 @@ function brainNameKey(value) {
     return canonicalNameKey(value).replace(/^(?:the|a|an)\s+/u, '');
 }
 
+/**
+ * Relational descriptors ("Elara's father") refer to the same person as the
+ * plain form ("father") when a plain-form mind exists. canonicalNameKey
+ * renders the possessive as a bare " s " token, so the pattern is
+ * unambiguous. Two different possessive forms ("John's father" vs "Mary's
+ * father") never match each other directly — only through a plain form.
+ */
+function relationalNameKeys(value) {
+    const key = brainNameKey(value);
+    // Lazy first group: the greedy form fails to backtrack past the
+    // possessive " s " token in V8.
+    const match = /^([\p{L}\p{N}]+(?:\s[\p{L}\p{N}]+)*?)\s+s\s+(.+)$/u.exec(key);
+    if (!match) return [];
+    return [match[2]];
+}
+
+function brainMatchKeys(brain) {
+    const primary = new Set([brainNameKey(brain.name)]);
+    const relational = new Set(relationalNameKeys(brain.name));
+    for (const alias of brain.aliases || []) {
+        const aliasRelational = relationalNameKeys(alias);
+        (aliasRelational.length ? relational : primary).add(brainNameKey(alias));
+    }
+    return { primary, relational, plain: relational.size === 0 };
+}
+
+function brainKeysLinked(left, right) {
+    for (const key of left.primary) if (right.primary.has(key)) return true;
+    // A bare relational form ("Elara's father") links to a plain-form mind
+    // ("Father"); two possessive forms never merge with each other directly.
+    if (right.plain) for (const key of left.relational) if (right.primary.has(key)) return true;
+    if (left.plain) for (const key of right.relational) if (left.primary.has(key)) return true;
+    return false;
+}
+
 function findBrain(store, operation) {
-    const wanted = uniqueStrings([operation.character, operation.name, ...(operation.aliases || [])])
-        .map(brainNameKey);
+    const candidates = uniqueStrings([operation.character, operation.name, ...(operation.aliases || [])]);
+    const wanted = {
+        primary: new Set(candidates.map(brainNameKey)),
+        relational: new Set(candidates.flatMap(relationalNameKeys)),
+    };
+    wanted.plain = wanted.relational.size === 0;
     for (const [id, brain] of Object.entries(store.brains)) {
-        const known = uniqueStrings([brain.name, ...(brain.aliases || [])]).map(brainNameKey);
-        if (wanted.some(name => known.includes(name))) return [id, brain];
+        if (brainKeysLinked(wanted, brainMatchKeys(brain))) return [id, brain];
     }
     const name = normalizeName(operation.character || operation.name);
     return [canonicalNameKey(name), null];
@@ -1818,10 +1856,7 @@ export function consolidateMinds(store) {
     const facetCount = brain => Object.keys(brain?.persistentSelf?.facets || {}).length
         + Object.keys(brain?.persistentSelf?.voice || {}).length
         + Object.keys(brain?.persistentSelf?.relationships || {}).length;
-    const namesOf = brain => new Set([
-        brainNameKey(brain.name),
-        ...(brain.aliases || []).map(brainNameKey),
-    ].filter(Boolean));
+    const namesOf = brain => brainMatchKeys(brain);
     const absorbInto = (keeper, dropped) => {
         keeper.aliases = uniqueStrings([
             ...(keeper.aliases || []),
@@ -1859,7 +1894,7 @@ export function consolidateMinds(store) {
                 const left = brains[index];
                 const right = brains[other];
                 if (!store.brains[left.id] || !store.brains[right.id]) continue;
-                const linked = [...namesOf(left)].some(name => namesOf(right).has(name));
+                const linked = brainKeysLinked(namesOf(left), namesOf(right));
                 if (!linked) continue;
                 // Prefer the publicly named mind, then the richer one, then
                 // the most recently updated; all describe the same person.

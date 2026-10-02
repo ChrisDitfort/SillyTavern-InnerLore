@@ -95,3 +95,25 @@ test('unrelated people are never consolidated', () => {
     ], { messageIndex: 10 });
     assert.equal(Object.keys(store.brains).length, 3);
 });
+
+test('relational descriptors merge into the plain-form mind, never each other', () => {
+    const store = createEmptyStore('mind-dedup-chat');
+    mergeMindOperations(store, [
+        { character: 'Father', current_mind: { perception: 'plain form' } },
+    ], { messageIndex: 10 });
+    // The model later says "Elara's Father" for the same person.
+    mergeMindOperations(store, [
+        { character: "Elara's Father", current_mind: { perception: 'possessive form' } },
+    ], { messageIndex: 12 });
+    const fatherBrains = Object.values(store.brains).filter(brain => /father/iu.test(brain.name));
+    assert.equal(fatherBrains.length, 1, `"Elara's Father" must update the existing Father mind`);
+    assert.ok(fatherBrains[0].aliases.some(alias => /elara.s father/iu.test(alias)));
+
+    // Two DIFFERENT possessive forms are not merged with each other.
+    const other = createEmptyStore('mind-dedup-chat');
+    mergeMindOperations(other, [
+        { character: "John's father", current_mind: { perception: 'a' } },
+        { character: "Mary's father", current_mind: { perception: 'b' } },
+    ], { messageIndex: 10 });
+    assert.equal(Object.keys(other.brains).length, 2, 'distinct possessive minds must stay distinct');
+});
