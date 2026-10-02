@@ -48,7 +48,7 @@ import {
     listConnectionProfiles,
     requestJsonPatch,
     testInnerLoreConnection,
-} from './llm-client.js?v=8';
+} from './llm-client.js?v=9';
 import {
     deleteInnerLorebooksForChat,
     openInnerLorebook,
@@ -61,7 +61,7 @@ import {
     formatTranscript,
     insufficientResponseCap,
     planNarratorPromptDelivery,
-} from './prompts.js';
+} from './prompts.js?v=2';
 import { compileTriggerEventDeliveryPreview } from './event-delivery.js?v=2';
 import { requestEventDirectorProposal } from './event-director-client.js';
 import { buildEventDirectorMessages } from './event-director-prompts.js';

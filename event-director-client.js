@@ -1,4 +1,4 @@
-import { sendInnerLoreRequest } from './llm-client.js?v=8';
+import { sendInnerLoreRequest } from './llm-client.js?v=9';
 import { validateEventDirectorPayload } from './event-director.js';
 import { buildEventDirectorRepairMessages } from './event-director-prompts.js';
 import { EVENT_DIRECTOR_JSON_SCHEMA } from './structured-output.js';

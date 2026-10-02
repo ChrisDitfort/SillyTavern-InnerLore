@@ -3,10 +3,10 @@
     "loading_order": 60,
     "requires": [],
     "optional": [],
-    "js": "index.js?v=55",
+    "js": "index.js?v=56",
     "css": "style.css",
     "author": "ChrisDitfort",
-    "version": "0.13.5",
+    "version": "0.13.6",
     "auto_update": true,
     "home_page": "https://github.com/ChrisDitfort/SillyTavern-InnerLore"
 }
