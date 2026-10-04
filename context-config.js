@@ -142,6 +142,76 @@ export function setCustomContextMaximum(settings, maximumCharacters) {
     return nextMaximum;
 }
 
+/**
+ * Derived budget mode: the packet is sized from what actually remains of the
+ * model context after fixed prompt costs, then split by configurable shares.
+ *
+ * Fixed costs subtracted first: the narrator prompt instructions with the
+ * state macro empty, the user persona, the character card
+ * (description/personality/scenario), and the opening message. Everything
+ * left ("gross") is split by percentage across response, history, scene,
+ * minds, lore, and progression - history and response are shares of the same
+ * pie, not separate reservations. History rides inside the state macro, so a
+ * derived split delivers the complete packet (state + history) on every
+ * story generation while the response share guarantees reply room.
+ */
+export const DERIVED_SHARE_DEFAULTS = Object.freeze({
+    response: 10,
+    history: 40,
+    scene: 5,
+    minds: 20,
+    lore: 15,
+    progression: 10,
+});
+
+const SHARE_KEYS = ['response', 'history', 'scene', 'minds', 'lore', 'progression'];
+
+export function deriveContextBudgets(inputs = {}, settings = {}) {
+    const contextLimitTokens = Math.max(0, Math.round(Number(inputs?.contextLimitTokens) || 0));
+    const staticPromptCharacters = Math.max(0, Number(inputs?.staticPromptCharacters) || 0);
+    if (contextLimitTokens < 2_000) return null;
+    const staticTokens = Math.ceil(staticPromptCharacters / 4);
+    // World Info, author notes, and other prompt inserts are not part of the
+    // measured fixed costs; shave a configurable margin off the top before
+    // the shares are computed so they always have room.
+    const marginPercent = clamp(Number(settings.derivedSafetyMarginPercent ?? 10), 0, 50);
+    const grossTokens = Math.floor((contextLimitTokens - staticTokens) * (100 - marginPercent) / 100);
+    if (grossTokens < 1_000) return null;
+
+    const supplied = settings.derivedSectionShares && typeof settings.derivedSectionShares === 'object'
+        ? settings.derivedSectionShares
+        : {};
+    const raw = {};
+    let rawTotal = 0;
+    for (const key of SHARE_KEYS) {
+        raw[key] = clamp(Number(supplied[key] ?? DERIVED_SHARE_DEFAULTS[key]), 0, 100);
+        rawTotal += raw[key];
+    }
+    if (rawTotal <= 0) {
+        for (const key of SHARE_KEYS) raw[key] = DERIVED_SHARE_DEFAULTS[key];
+        rawTotal = 100;
+    }
+    const shareTokens = {};
+    for (const key of SHARE_KEYS) shareTokens[key] = Math.floor(grossTokens * raw[key] / rawTotal);
+
+    const sections = {
+        scene: shareTokens.scene * 4,
+        minds: shareTokens.minds * 4,
+        lore: shareTokens.lore * 4,
+        progression: shareTokens.progression * 4,
+    };
+    return {
+        contextLimitTokens,
+        staticTokens,
+        grossTokens,
+        responseTokens: shareTokens.response,
+        historyCharacters: shareTokens.history * 4,
+        maximumCharacters: sections.scene + sections.minds + sections.lore + sections.progression,
+        sections,
+        shares: raw,
+    };
+}
+
 export function contextProfileOverrides(settings) {
     const sceneEnabled = settings.sceneContextEnabled !== false;
     const mindsEnabled = settings.innerSelfEnabled !== false;
@@ -155,6 +225,44 @@ export function contextProfileOverrides(settings) {
             progression: { enabled: progressionEnabled },
         },
     };
+    // Derived budgets are the extension's always-on behavior: whenever the
+    // fixed prompt costs have been measured, they own the packet. The legacy
+    // profile/custom paths remain only as a load-time fallback before the
+    // first measurement exists.
+    if (settings.derivedContext) {
+        const derived = settings.derivedContext;
+        const sceneCharacters = sceneEnabled ? Math.max(0, Math.round(derived.sections.scene)) : 0;
+        const mindCharacters = mindsEnabled ? Math.max(0, Math.round(derived.sections.minds)) : 0;
+        const loreCharacters = loreEnabled ? Math.max(0, Math.round(derived.sections.lore)) : 0;
+        const progressionCharacters = progressionEnabled ? Math.max(0, Math.round(derived.sections.progression)) : 0;
+        return {
+            maximumCharacters: Math.max(2_000, Math.round(derived.maximumCharacters)),
+            graphDepth: integer(settings.contextGraphDepth, 1, 0, 1),
+            derived: true,
+            targetReservation: { enabled: true, maximumItems: Math.max(8, integer(settings.maximumInjectedEntities, 8, 1, 30)) },
+            sections: {
+                scene: { enabled: sceneCharacters > 0, maximumItems: 1, maximumCharacters: sceneCharacters },
+                minds: {
+                    enabled: mindCharacters > 0,
+                    maximumItems: Math.max(1, integer(settings.maximumActiveBrains, 12, 1, 20)
+                        * integer(settings.maximumInjectedThoughtsPerBrain, 6, 1, 20)),
+                    maximumParents: integer(settings.maximumActiveBrains, 12, 1, 20),
+                    maximumItemsPerParent: integer(settings.maximumInjectedThoughtsPerBrain, 6, 1, 20),
+                    maximumCharacters: mindCharacters,
+                },
+                lore: {
+                    enabled: loreCharacters > 0,
+                    maximumItems: integer(settings.maximumInjectedEntities, 8, 1, 30),
+                    maximumCharacters: loreCharacters,
+                },
+                progression: {
+                    enabled: progressionCharacters > 0,
+                    maximumItems: integer(settings.progressionMaximumInjectedEntries, 8, 1, 30),
+                    maximumCharacters: progressionCharacters,
+                },
+            },
+        };
+    }
     if (settings.contextBudgetMode !== 'custom') return enabledOnly;
     const sceneCharacters = sceneEnabled ? integer(settings.sceneInjectionBudget, 1_200, 0, 8_000) : 0;
     const mindCharacters = mindsEnabled ? integer(settings.brainInjectionBudget, 6_000, 0, 50_000) : 0;

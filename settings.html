@@ -97,22 +97,14 @@
                         <code>{{innerlore_state_context}}</code> full game state (scene, private minds, lore, progression)
                     </div>
                     <div class="inner-lore-fieldset">
-                        <b><i class="fa-solid fa-database"></i> SQLite Chat History in Macro</b>
-                        <label class="checkbox_label" for="il_history_in_macro">
-                            <input id="il_history_in_macro" type="checkbox" checked />
-                            <span>Deliver chat history from SQLite inside the state macro</span>
-                        </label>
+                        <b><i class="fa-solid fa-database"></i> Chat History in the Context Packet</b>
                         <small class="inner-lore-hint">
-                            Off (recommended): SillyTavern renders the conversation as real chat turns — the most
-                            reliable structure for narration. The SQLite transcript stays synchronized either way.
-                            Turning this on moves history into the state macro and bypasses SillyTavern's own
-                            rendering, which weakens action narration.
+                            Always on: history rides inside the state macro as part of the curated context
+                            packet, sized by the history share of the derived budget. SillyTavern's own rendered
+                            turns are bypassed for story generations, so history ships exactly once — no
+                            double-up, no wasted tokens.
                         </small>
                         <div class="inner-lore-grid two-columns">
-                            <label>
-                                <span>History character budget</span>
-                                <input id="il_history_budget" class="text_pole" type="number" min="500" max="40000" step="500" />
-                            </label>
                             <label>
                                 <span>Maximum turns kept</span>
                                 <input id="il_history_max_turns" class="text_pole" type="number" min="2" max="200" step="1" />
@@ -549,22 +541,25 @@
                         <div class="inner-lore-grid two-columns">
                             <label>
                                 <span>Server context profile</span>
-                                <select id="il_context_profile" class="text_pole">
-                                    <option value="compact">Compact</option>
-                                    <option value="balanced">Balanced</option>
-                                    <option value="expansive">Expansive</option>
-                                </select>
-                            </label>
                             <label>
-                                <span id="il_context_maximum_value">18,000 characters · approximately 4,500 tokens · Balanced</span>
+                                <span>Derived shares (%) — response / history / scene / minds / lore / progression</span>
                                 <span class="inner-lore-context-budget-row">
-                                    <button id="il_context_decrease" class="menu_button" type="button" title="Decrease context by 1,000 characters" aria-label="Decrease context">−</button>
-                                    <input id="il_context_maximum" type="range" min="2000" max="100000" step="1000" value="18000" />
-                                    <button id="il_context_increase" class="menu_button" type="button" title="Increase context by 1,000 characters" aria-label="Increase context">+</button>
+                                    <input id="il_derived_share_response" class="text_pole" type="number" min="0" max="100" step="1" />
+                                    <input id="il_derived_share_history" class="text_pole" type="number" min="0" max="100" step="1" />
+                                    <input id="il_derived_share_scene" class="text_pole" type="number" min="0" max="100" step="1" />
+                                    <input id="il_derived_share_minds" class="text_pole" type="number" min="0" max="100" step="1" />
+                                    <input id="il_derived_share_lore" class="text_pole" type="number" min="0" max="100" step="1" />
+                                    <input id="il_derived_share_progression" class="text_pole" type="number" min="0" max="100" step="1" />
                                 </span>
                             </label>
+                            <label>
+                                <span>Derived safety margin for World Info etc. (%)</span>
+                                <input id="il_derived_margin" class="text_pole" type="number" min="0" max="50" step="1" />
+                            </label>
+                            <label>
+                                <span id="il_context_maximum_value">Derived context budget (always on) — measured on the next story generation</span>
+                            </label>
                         </div>
-                        <small class="inner-lore-hint">Changing a detailed limit below switches the packet to Custom while retaining the selected profile as its base.</small>
                     </div>
                     <div class="inner-lore-grid two-columns">
                         <label>

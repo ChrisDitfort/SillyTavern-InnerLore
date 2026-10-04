@@ -756,6 +756,54 @@ export function normalizeBrainRecord(value, fallbackName = '') {
     };
 }
 
+/**
+ * Card-declared seed entities, merged into a brand-new chat's store so a
+ * scenario's canon world (typically its locations) is tracked from the first
+ * turn instead of waiting for the curator to meet each place in play.
+ * Declared on the character card at data.extensions.inner_lore_seed (or the
+ * v1-style extensions.inner_lore_seed): either an array of entity operations
+ * or { entities: [...] }. Only creator-authored fields are honored; seeds
+ * become ordinary records the curator can enrich once play reaches them.
+ */
+export function parseCardSeedEntities(card) {
+    const raw = card?.data?.extensions?.inner_lore_seed
+        ?? card?.extensions?.inner_lore_seed
+        ?? null;
+    const declared = Array.isArray(raw)
+        ? raw
+        : (Array.isArray(raw?.entities) ? raw.entities : []);
+    const enabled = new Set(ENTITY_TYPES.map(normalizeEntityType));
+    const seeds = [];
+    for (const entry of declared.slice(0, 120)) {
+        if (!entry || typeof entry !== 'object') continue;
+        const name = normalizeName(entry.name);
+        const type = normalizeEntityType(entry.type || 'location');
+        if (!name || name.length < 2 || !enabled.has(type)) continue;
+        const summary = cleanString(entry.summary, 2_500);
+        const description = cleanString(entry.description, 8_000);
+        if (!summary && !description) continue;
+        const seed = {
+            type,
+            name,
+            importance: clamp(Number.parseInt(entry.importance, 10) || 50, 0, 100),
+            summary,
+            description,
+        };
+        const aliases = uniqueStrings(
+            operationArray(entry, 'aliases', 'aliases').filter(item => typeof item === 'string' && item.trim()),
+            20,
+        ).filter(alias => canonicalNameKey(alias) !== canonicalNameKey(name));
+        const keys = uniqueStrings(
+            operationArray(entry, 'keys', 'keys').filter(item => typeof item === 'string' && item.trim()),
+            20,
+        );
+        if (aliases.length) seed.aliases = aliases;
+        if (keys.length) seed.keys = keys;
+        seeds.push(seed);
+    }
+    return seeds;
+}
+
 export function createEmptyStore(chatId = '') {
     return {
         version: STORE_VERSION,
@@ -3558,6 +3606,41 @@ export function renderBrain(brain, maximumLength = 2_000, options = {}) {
     return cleanString(lines.join('\n'), maximum);
 }
 
+function mindsBlockText(cooldown, rendered) {
+    return `<inner_lore_private_minds narrator_only="true">
+These notes are subjective and compartmentalized. A character knows only their own mind and established knowledge; never let one character know another's secrets or expose these labels.
+
+Current Mind is the NPC's entering subjective state and may predate the newest turn. Reconstruct a fresh event → perception → interpretation → emotion → thought → conflict → intention → expression instead of reciting it.
+
+A selected Current Mind grants the narrator close access unless canon forbids it. For a focal NPC facing meaningful stakes, braid observable physical behaviour, at least one short, unmistakably direct private-thought fragment in their literal voice, and dialogue containing only what they reveal.
+
+Literalize the mind instead of translating it into narrator explanation. Italics or a fragment marker alone do not make a thought psychologically real. A thought that merely repeats or paraphrases the newest event, states the obvious, or names an emotion does not qualify; add this NPC's inference, self-judgment, desire, fear, memory, contradiction, self-command, impulse, or decision in their rhythm. Use one to three short direct-thought beats, normally in single-asterisk italics without labels. Stored thoughts are evidence, not quotations. Do not explain the same thought again, or force direct thought into neutral logistics, offscreen action, or every paragraph.
+
+When restraint or conflict exists, make the thought-speech gap materially visible through concealment, denial, redirection, or leakage; rewording alone is not tension. Let voice, relationships, intensity, and restraint shape syntax naturally—never by a mechanical emotion-to-style rule or catchphrase. Under pressure, uniformly polished neutral construction is a failure unless that exact control belongs to the NPC, and even then private syntax must show its cost. Make personality visibly alter literal word choice and sentence construction. Where individually supported, use meaningful case contrast (including lower-case compression or selective CAPITAL stress), punctuation and interruption, repetition, fragments, restarts, sentence-length shifts, profanity, pauses, or silence. Use more than one supported surface choice across a high-stakes focal reaction, but never decorate every line or use every device. When a supplied emphasis tendency permits case stress, one meaningful case shift must appear in the high-stakes beat; if it explicitly avoids capitals, honour that and use its supported alternatives. Narrator commentary about how the voice sounds does not count. Keep viewpoint shifts and private knowledge distinct.
+
+${cooldown}${rendered.join('\n\n')}
+</inner_lore_private_minds>`;
+}
+
+function loreBlockText(rendered) {
+    return `<inner_lore_world_reference>
+Treat confirmed details below as continuity reference. Current state and explicit open threads have priority over older facts. Preserve stated uncertainty. Do not force every detail into the next reply; use only what is naturally relevant to the compiled scene.
+
+${rendered.join('\n\n')}
+</inner_lore_world_reference>`;
+}
+
+function expressionCooldownBlock(recentExpressionText) {
+    return recentExpressionText ? `<recent_expression_cooldown priority="hard">
+The excerpts below are already-spent Expression, not wording to continue or imitate. Preserve the underlying personality, emotion, relationship, and intention, but change their realization in the next reply. Do not reuse the same conspicuous gesture, prop interaction, gaze movement, body response, metaphor, sensory cue, self-command, dialogue scaffold, or sentence pattern merely to prove continuity. A stable personal anchor colours interpretation; it is never a compulsory prop or ritual on every turn. If Current Mind repeats a cooled surface, keep its psychological meaning and express it through another compatible channel. Reuse is allowed only when the newest event explicitly makes it necessary and the callback escalates, changes meaning, or pays off; otherwise choose a fresh concrete behaviour and fresh private wording.
+
+${recentExpressionText}
+</recent_expression_cooldown>
+
+`
+               : '';
+}
+
 /** Build continuity context plus structured selection diagnostics. */
 export function compilePromptInjection(store, recentText, settings = {}) {
     if (!settings.enabled) {
@@ -3591,9 +3674,15 @@ export function compilePromptInjection(store, recentText, settings = {}) {
         });
         const eligibleRanked = ranked.filter(item => item.eligible);
         const maximumBrains = clamp(settings.maximumActiveBrains ?? 4, 1, 20);
+        const cooldown = expressionCooldownBlock(recentExpressionText);
+        const brainBudget = clamp(settings.brainInjectionBudget ?? 3_500, 500, 30_000);
+        // brainInjectionBudget governs rendered mind content; the standing
+        // preamble is fixed overhead tracked separately so the compiler can
+        // enforce the total context allowance across all assembled blocks.
+        const mindsOverhead = mindsBlockText(cooldown, []).length + 2;
         const allocations = allocateRankedBudgets(
             eligibleRanked.slice(0, maximumBrains),
-            clamp(settings.brainInjectionBudget ?? 3_500, 500, 30_000),
+            brainBudget,
             { minimum: 320, maximum: 3_200 },
         );
         const rendered = [];
@@ -3636,28 +3725,14 @@ export function compilePromptInjection(store, recentText, settings = {}) {
             });
         }
         if (rendered.length) {
-            const cooldown = recentExpressionText
-                ? `<recent_expression_cooldown priority="hard">
-The excerpts below are already-spent Expression, not wording to continue or imitate. Preserve the underlying personality, emotion, relationship, and intention, but change their realization in the next reply. Do not reuse the same conspicuous gesture, prop interaction, gaze movement, body response, metaphor, sensory cue, self-command, dialogue scaffold, or sentence pattern merely to prove continuity. A stable personal anchor colours interpretation; it is never a compulsory prop or ritual on every turn. If Current Mind repeats a cooled surface, keep its psychological meaning and express it through another compatible channel. Reuse is allowed only when the newest event explicitly makes it necessary and the callback escalates, changes meaning, or pays off; otherwise choose a fresh concrete behaviour and fresh private wording.
-
-${recentExpressionText}
-</recent_expression_cooldown>
-
-`
-                : '';
-            blocks.minds = `<inner_lore_private_minds narrator_only="true">
-These notes are subjective and compartmentalized. A character knows only their own mind and established knowledge; never let one character know another's secrets or expose these labels.
-
-Current Mind is the NPC's entering subjective state and may predate the newest turn. Reconstruct a fresh event → perception → interpretation → emotion → thought → conflict → intention → expression instead of reciting it.
-
-A selected Current Mind grants the narrator close access unless canon forbids it. For a focal NPC facing meaningful stakes, braid observable physical behaviour, at least one short, unmistakably direct private-thought fragment in their literal voice, and dialogue containing only what they reveal.
-
-Literalize the mind instead of translating it into narrator explanation. Italics or a fragment marker alone do not make a thought psychologically real. A thought that merely repeats or paraphrases the newest event, states the obvious, or names an emotion does not qualify; add this NPC's inference, self-judgment, desire, fear, memory, contradiction, self-command, impulse, or decision in their rhythm. Use one to three short direct-thought beats, normally in single-asterisk italics without labels. Stored thoughts are evidence, not quotations. Do not explain the same thought again, or force direct thought into neutral logistics, offscreen action, or every paragraph.
-
-When restraint or conflict exists, make the thought-speech gap materially visible through concealment, denial, redirection, or leakage; rewording alone is not tension. Let voice, relationships, intensity, and restraint shape syntax naturally—never by a mechanical emotion-to-style rule or catchphrase. Under pressure, uniformly polished neutral construction is a failure unless that exact control belongs to the NPC, and even then private syntax must show its cost. Make personality visibly alter literal word choice and sentence construction. Where individually supported, use meaningful case contrast (including lower-case compression or selective CAPITAL stress), punctuation and interruption, repetition, fragments, restarts, sentence-length shifts, profanity, pauses, or silence. Use more than one supported surface choice across a high-stakes focal reaction, but never decorate every line or use every device. When a supplied emphasis tendency permits case stress, one meaningful case shift must appear in the high-stakes beat; if it explicitly avoids capitals, honour that and use its supported alternatives. Narrator commentary about how the voice sounds does not count. Keep viewpoint shifts and private knowledge distinct.
-
-${cooldown}${rendered.join('\n\n')}
-</inner_lore_private_minds>`;
+            while (
+                rendered.length > 1
+                && mindsBlockText(cooldown, rendered).length > brainBudget + mindsOverhead
+            ) {
+                rendered.pop();
+                selectedBrains.pop();
+            }
+            blocks.minds = mindsBlockText(cooldown, rendered);
         }
     }
 
@@ -3684,9 +3759,13 @@ ${cooldown}${rendered.join('\n\n')}
                 });
             }
         }
+        const loreBudget = clamp(settings.loreInjectionBudget ?? 5_000, 500, 50_000);
+        // loreInjectionBudget governs rendered entity content; the header is
+        // fixed overhead tracked for the compiler's total-allowance enforcement.
+        const loreOverhead = loreBlockText([]).length + 2;
         const allocations = allocateRankedBudgets(
             selectedRanked,
-            clamp(settings.loreInjectionBudget ?? 5_000, 500, 50_000),
+            loreBudget,
             {
                 minimum: 240,
                 maximum: clamp(settings.perEntityInjectionLimit ?? 1_800, 240, 10_000),
@@ -3721,11 +3800,14 @@ ${cooldown}${rendered.join('\n\n')}
             });
         }
         if (rendered.length) {
-            blocks.lore = `<inner_lore_world_reference>
-Treat confirmed details below as continuity reference. Current state and explicit open threads have priority over older facts. Preserve stated uncertainty. Do not force every detail into the next reply; use only what is naturally relevant to the compiled scene.
-
-${rendered.join('\n\n')}
-</inner_lore_world_reference>`;
+            while (
+                rendered.length > 1
+                && loreBlockText(rendered).length > loreBudget + loreOverhead
+            ) {
+                rendered.pop();
+                selectedEntities.pop();
+            }
+            blocks.lore = loreBlockText(rendered);
         }
     }
 

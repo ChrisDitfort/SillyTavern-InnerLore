@@ -6,6 +6,7 @@
  */
 
 import { cleanString, compilePromptInjection } from './core.js';
+import { contextProfileOverrides } from './context-config.js';
 import { collectRecentStoryExpressions } from './expression-cooldown.js';
 import { compileProgressionInjection } from './progression.js';
 import { deriveSceneState, renderSceneState } from './scene.js?v=4';
@@ -94,33 +95,61 @@ export function compileContext(options = {}) {
         playerName: options.playerName,
         lookbackMessages: settings.sceneLookbackMessages ?? 4,
     });
-    const progression = compileProgressionInjection(options.store.progression, options.recentText, {
-        ...settings,
-        scene,
-        latestText: scene.latestText,
-    });
     const recentExpressionText = collectRecentStoryExpressions(options.messages, {
         endIndex: options.currentIndex,
         maximumReplies: settings.expressionCooldownReplies ?? 3,
         maximumCharacters: settings.expressionCooldownBudget ?? 1_600,
     });
-    const continuity = compilePromptInjection(options.store, options.recentText, {
-        ...settings,
-        scene,
-        latestText: scene.latestText,
-        externalConcepts: progression.concepts,
-        recentExpressionText,
-    });
-    const sceneText = settings.sceneContextEnabled === false
-        ? ''
-        : renderSceneState(scene, settings.sceneInjectionBudget ?? 1_200);
-    const blocks = {
-        scene: sceneText,
-        minds: continuity.blocks.minds,
-        lore: continuity.blocks.lore,
-        progression: progression.text,
-    };
-    const text = cleanString(Object.values(blocks).filter(Boolean).join('\n\n'), 120_000);
+    // The effective allowance (derived mode, custom budgets, or profile) is a
+    // hard cap on the assembled packet. Sections that overflow it are
+    // recompiled with proportionally shrunken budgets - at most twice - and
+    // progression is dropped as the last resort so the delivered packet can
+    // never exceed what the context actually has room for.
+    const totalBudget = Math.max(0, Math.round(contextProfileOverrides(settings).maximumCharacters || 0));
+    let attemptSettings = settings;
+    let continuity = null;
+    let progression = null;
+    let sceneText = '';
+    let blocks = { scene: '', minds: '', lore: '', progression: '' };
+    let text = '';
+    for (let attempt = 0; ; attempt++) {
+        progression = compileProgressionInjection(options.store.progression, options.recentText, {
+            ...attemptSettings,
+            scene,
+            latestText: scene.latestText,
+        });
+        continuity = compilePromptInjection(options.store, options.recentText, {
+            ...attemptSettings,
+            scene,
+            latestText: scene.latestText,
+            externalConcepts: progression.concepts,
+            recentExpressionText,
+        });
+        sceneText = attemptSettings.sceneContextEnabled === false
+            ? ''
+            : renderSceneState(scene, attemptSettings.sceneInjectionBudget ?? 1_200);
+        blocks = {
+            scene: sceneText,
+            minds: continuity.blocks.minds,
+            lore: continuity.blocks.lore,
+            progression: progression.text,
+        };
+        text = cleanString(Object.values(blocks).filter(Boolean).join('\n\n'), 120_000);
+        if (!totalBudget || text.length <= totalBudget || attempt >= 2) break;
+        const factor = Math.max(0.2, (totalBudget / Math.max(1, text.length)));
+        const scaled = (value, floor) => Math.max(floor, Math.floor((Number(value) || floor) * factor));
+        attemptSettings = {
+            ...attemptSettings,
+            sceneInjectionBudget: scaled(attemptSettings.sceneInjectionBudget ?? 1_200, 400),
+            brainInjectionBudget: scaled(attemptSettings.brainInjectionBudget ?? 6_000, 320),
+            loreInjectionBudget: scaled(attemptSettings.loreInjectionBudget ?? 6_500, 240),
+            progressionInjectionBudget: scaled(attemptSettings.progressionInjectionBudget ?? 3_000, 240),
+        };
+    }
+    if (totalBudget && text.length > totalBudget && blocks.progression) {
+        blocks.progression = '';
+        text = cleanString(Object.values(blocks).filter(Boolean).join('\n\n'), 120_000);
+    }
     const expressionBrain = continuity.selectedBrains.find(brain => (
         brain.caseStressPermitted && brain.pressuredCurrentMind && brain.expressionAnchor
     )) || continuity.selectedBrains.find(brain => (

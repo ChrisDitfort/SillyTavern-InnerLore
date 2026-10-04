@@ -21,6 +21,7 @@ import {
     messageFingerprint,
     normalizeBrainRecord,
     normalizeStore,
+    parseCardSeedEntities,
     recordCheckpoint,
     refreshMentionRecency,
     renderLoreContent,
@@ -28,16 +29,18 @@ import {
     snapshotMessageRange,
     summaryceptionRecallText,
     uniqueStrings,
-} from './core.js?v=44';
-import { compileContext } from './context-compiler.js?v=4';
+} from './core.js?v=46';
+import { compileContext } from './context-compiler.js?v=5';
 import {
     applyContextProfileToSettings,
+    deriveContextBudgets,
     approximateContextTokens,
     BUILTIN_CONTEXT_PROFILES,
     CONTEXT_CONFIGURATION_VERSION,
     contextConfigurationFingerprint,
     contextProfileById,
     contextProfileOverrides,
+    DERIVED_SHARE_DEFAULTS,
     markContextConfigurationCustom,
     setCustomContextMaximum,
 } from './context-config.js';
@@ -163,11 +166,13 @@ let narratorPromptRestore = null;
 /** Advisory: a response cap too small for the narration length guarantees
  *  severed or empty replies and eventual quarantine; say so once per load. */
 async function warnOnInsufficientResponseCap() {
-    if (runtime.responseCapWarned) return;
     try {
         const oaiModule = await import('/scripts/openai.js');
+        const capTokens = Number(oaiModule.oai_settings?.openai_max_tokens) || 0;
+        if (capTokens) runtime.responseCapTokens = capTokens;
+        if (runtime.responseCapWarned) return;
         const shortfall = insufficientResponseCap(
-            oaiModule.oai_settings?.openai_max_tokens,
+            capTokens,
             getSettings().narrationLength,
         );
         if (!shortfall) return;
@@ -425,7 +430,9 @@ const defaultSettings = Object.freeze({
     injectionDepth: 1,
     contextDeliveryMode: 'automatic',
     contextProfileId: 'balanced',
-    contextBudgetMode: 'profile',
+    contextBudgetMode: 'derived',
+    derivedSafetyMarginPercent: 10,
+    derivedSectionShares: null,
     contextMaximumCharacters: 18_000,
     contextGraphDepth: 1,
     contextSizingVersion: CONTEXT_CONFIGURATION_VERSION,
@@ -669,7 +676,9 @@ function getSettings() {
     if (!['json', 'dsl'].includes(settings.maintenanceOutputFormat)) settings.maintenanceOutputFormat = 'dsl';
     settings.contextProfileId = cleanString(settings.contextProfileId, 64).toLocaleLowerCase();
     if (!/^[a-z0-9][a-z0-9_-]{0,63}$/u.test(settings.contextProfileId)) settings.contextProfileId = 'balanced';
-    if (!['profile', 'custom'].includes(settings.contextBudgetMode)) settings.contextBudgetMode = 'profile';
+    // Derived budgets are the always-on behavior; the mode is pinned and the
+    // legacy profile/custom values survive only as the pre-measurement fallback.
+    settings.contextBudgetMode = 'derived';
     settings.contextMaximumCharacters = Math.min(100_000, Math.max(
         2_000,
         Number(settings.contextMaximumCharacters) || 18_000,
@@ -989,6 +998,7 @@ function createInitialChatStore(chatId, legacyValue = null) {
         store.progression = createProgressionState();
         store.progression.lastProcessedIndex = store.lastProcessedIndex;
         store.chatId = chatId;
+        seedNewStoreFromCard(store);
     } else if (store.chatId && store.chatId !== chatId) {
         // Legacy metadata is cloned by SillyTavern when a chat is branched.
         // Apply the same branch quarantine before its first SQLite commit.
@@ -1493,8 +1503,12 @@ function registerContextMacros() {
             // The full-state macro also carries the SQLite-backed narrative
             // history so story context arrives from one plugin-owned source.
             if (macroName === 'innerlore_state_context' && settings.enabled && value) {
-                if (settings.historyInMacroEnabled !== false) {
-                    const history = buildHistorySection(settings);
+                const derived = runtime.derivedContext;
+                if (derived) {
+                    const historySettings = derived
+                        ? { ...settings, historyBudgetCharacters: Math.min(40_000, Math.max(500, derived.historyCharacters)) }
+                        : settings;
+                    const history = buildHistorySection(historySettings);
                     if (history) value = `${value}\n${history}`;
                 }
             }
@@ -1616,6 +1630,27 @@ function updateInjection({ isContinue = false } = {}) {
     if (settings.enabled && promptStore && (!store?.needsRebuild || historyFallback)) {
         const recentText = recentStoryText(Math.max(settings.loreRecencyMessages, settings.brainRecencyMessages));
         identityPlaceholders = findUnresolvedIdentityPlaceholders(promptStore.entities, recentText);
+        const derivedSettings = { ...settings };
+        {
+            const cardFields = ctx.getCharacterCardFields?.() || {};
+            const narratorTemplate = settings.narratorPromptEnabled === false
+                ? ''
+                : String(settings.narratorPromptTemplate || '');
+            const staticPromptCharacters = narratorTemplate.replaceAll('{{innerlore_state_context}}', '').length
+                + cleanString(cardFields.description, 200_000).length
+                + cleanString(cardFields.personality, 200_000).length
+                + cleanString(cardFields.scenario, 200_000).length
+                + cleanString(cardFields.firstMessage, 200_000).length
+                + cleanString(ctx.personaDescription, 200_000).length;
+            const inputs = {
+                contextLimitTokens: Number(ctx.maxContext) || 0,
+                responseCapTokens: Number(runtime.responseCapTokens) || 0,
+                staticPromptCharacters,
+            };
+            runtime.derivedContext = deriveContextBudgets(inputs, settings);
+            runtime.derivedContextInputs = inputs;
+            derivedSettings.derivedContext = runtime.derivedContext;
+        }
         compilation = compileContext({
             store: promptStore,
             messages: ctx.chat,
@@ -1623,7 +1658,7 @@ function updateInjection({ isContinue = false } = {}) {
             playerName: ctx.name1,
             currentIndex: ctx.chat.length - 1,
             settings: {
-                ...settings,
+                ...derivedSettings,
                 currentIndex: ctx.chat.length - 1,
                 recalledText: summaryceptionRecallText(ctx.chatMetadata),
                 ...(historyFallback ? { worldProgressionEnabled: false } : {}),
@@ -1848,15 +1883,16 @@ function populateContextProfiles() {
 
 function updateContextBudgetUI() {
     const settings = getSettings();
-    const input = document.getElementById('il_context_maximum');
     const value = document.getElementById('il_context_maximum_value');
-    const custom = settings.contextBudgetMode === 'custom';
-    if (input) {
-        input.value = settings.contextMaximumCharacters;
-        input.setAttribute('aria-valuetext', `${settings.contextMaximumCharacters} characters`);
-    }
+    const context = runtime.derivedContext;
+    const shares = settings.derivedSectionShares || DERIVED_SHARE_DEFAULTS;
+    const shareText = `response ${shares.response}% · history ${shares.history}% · scene ${shares.scene}% · minds ${shares.minds}% · lore ${shares.lore}% · progression ${shares.progression}%`;
     if (value) {
-        value.textContent = `${Number(settings.contextMaximumCharacters).toLocaleString()} characters · approximately ${approximateContextTokens(settings.contextMaximumCharacters).toLocaleString()} tokens${custom ? ' · Custom' : ` · ${settings.contextProfileId}`}`;
+        value.textContent = context
+            ? `Derived (always on) · packet ${Number(context.maximumCharacters).toLocaleString()} ch (~${approximateContextTokens(context.maximumCharacters).toLocaleString()} tok)`
+                + ` · history ${Number(context.historyCharacters).toLocaleString()} ch · response ${Number(context.responseTokens).toLocaleString()} tok`
+                + ` · fixed costs ${Number(context.staticTokens).toLocaleString()} tok · shares of ${Number(context.grossTokens).toLocaleString()} tok`
+            : `Derived (always on) · ${shareText} · waiting for the next story generation to measure fixed costs`;
     }
 }
 
@@ -1984,6 +2020,14 @@ function applySettingsToUI() {
         il_history_in_macro: settings.historyInMacroEnabled,
         il_history_budget: settings.historyBudgetCharacters,
         il_history_max_turns: settings.historyMaxTurns,
+        il_context_budget_mode: settings.contextBudgetMode,
+        il_derived_margin: settings.derivedSafetyMarginPercent,
+        il_derived_share_response: (settings.derivedSectionShares || {}).response,
+        il_derived_share_history: (settings.derivedSectionShares || {}).history,
+        il_derived_share_scene: (settings.derivedSectionShares || {}).scene,
+        il_derived_share_minds: (settings.derivedSectionShares || {}).minds,
+        il_derived_share_lore: (settings.derivedSectionShares || {}).lore,
+        il_derived_share_progression: (settings.derivedSectionShares || {}).progression,
         il_narration_length: settings.narrationLength,
         il_debug: settings.debug,
     };
@@ -2727,6 +2771,36 @@ function getCardContext() {
         log('Could not read character-card fields:', error);
         return '';
     }
+}
+
+function getCardSeedEntities() {
+    try {
+        const ctx = context();
+        const card = ctx.characters?.[ctx.characterId];
+        return parseCardSeedEntities(card);
+    } catch (error) {
+        log('Could not read card seed entities:', error);
+        return [];
+    }
+}
+
+// A card may declare canon entities (typically its locations) so a chat with
+// no existing InnerLore world starts with the scenario's map already tracked.
+// Seeds are ordinary records: the curator enriches them as play actually
+// reaches each place, and entity types disabled in settings are respected.
+function seedNewStoreFromCard(store) {
+    const seeds = getCardSeedEntities();
+    if (!seeds.length) return 0;
+    const settings = getSettings();
+    const result = mergeEntityOperations(store, seeds, {
+        enabledTypes: settings.enabledEntityTypes,
+        minimumImportance: 0,
+        maximumOperations: Math.max(1, seeds.length),
+        messageIndex: -1,
+    });
+    const seeded = Number(result.created) || 0;
+    if (seeded) log(`Seeded ${seeded} card-declared entit${seeded === 1 ? 'y' : 'ies'} into the new chat world.`);
+    return seeded;
 }
 
 async function analyzeRange(targetStore, startIndex, endIndex, options = {}) {
@@ -4571,6 +4645,25 @@ function bindUIEvents() {
         saveSettings();
         if (event.target.checked) syncNarrativeLog();
     });
+    // Budget mode is pinned to Derived and cannot be switched off; only the
+    // share percentages and safety margin are configurable.
+    const derivedShareKeys = ['response', 'history', 'scene', 'minds', 'lore', 'progression'];
+    for (const key of derivedShareKeys) {
+        document.getElementById(`il_derived_share_${key}`)?.addEventListener('change', event => {
+            const settings = getSettings();
+            const shares = { ...(settings.derivedSectionShares || DERIVED_SHARE_DEFAULTS) };
+            shares[key] = Math.max(0, Math.min(100, Number(event.target.value) || 0));
+            settings.derivedSectionShares = shares;
+            saveSettings();
+            updateContextBudgetUI();
+        });
+    }
+    document.getElementById('il_derived_margin')?.addEventListener('change', event => {
+        const settings = getSettings();
+        settings.derivedSafetyMarginPercent = Math.max(0, Math.min(50, Number(event.target.value) || 0));
+        saveSettings();
+        updateContextBudgetUI();
+    });
     document.getElementById('il_history_budget')?.addEventListener('change', event => {
         getSettings().historyBudgetCharacters = Math.max(500, Math.min(40_000, Number(event.target.value) || 6_000));
         saveSettings();
@@ -5057,6 +5150,37 @@ function registerEvents() {
             const stopped = context().stopGeneration?.();
             if (!stopped) {
                 console.error(LOG_PREFIX, 'SillyTavern did not expose an active generation controller for the blocked story request.');
+            }
+        });
+    }
+    if (events.CHAT_COMPLETION_PROMPT_READY) {
+        // Derived mode (and explicit history-in-macro) delivers the curated
+        // packet - including history - from the state macro, so SillyTavern's
+        // own rendered conversation turns must not also ship: history is
+        // delivered exactly once and no tokens are doubled up. System-role
+        // prompt entries and the live player turn always stay.
+        eventSource.on(events.CHAT_COMPLETION_PROMPT_READY, prompt => {
+            const settings = getSettings();
+            if (!settings.enabled || !runtime.activeStoryGenerationId) return;
+            if (!runtime.derivedContext) return;
+            const messages = Array.isArray(prompt?.messages) ? prompt.messages : null;
+            if (!messages || messages.length < 2) return;
+            let firstAssistant = -1;
+            let lastUser = -1;
+            for (let i = 0; i < messages.length; i++) {
+                const role = messages[i]?.role;
+                const content = String(messages[i]?.content ?? '').trim();
+                if (role === 'assistant' && firstAssistant === -1 && content) firstAssistant = i;
+                if (role === 'user' && content) lastUser = i;
+            }
+            const bypass = messages.filter((message, index) => (
+                message?.role === 'system'
+                || index === lastUser
+                || (firstAssistant > -1 && index < firstAssistant && message?.role === 'user')
+            ));
+            if (bypass.length !== messages.length) {
+                log(`History bypass: delivering history once via the state macro (${messages.length - bypass.length} rendered turns removed from this request).`);
+                prompt.messages = bypass;
             }
         });
     }

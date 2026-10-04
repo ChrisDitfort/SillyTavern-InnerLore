@@ -118,6 +118,35 @@ The book contains ordinary editable World Info entries. InnerLore does not assig
 
 Use **Open Lorebook** to inspect entries in SillyTavern's native editor. If entry content is edited there, InnerLore detects the changed content during its next synchronization and protects it as a manual override. The extension's **Lore Entry Editor** can also save or release overrides directly.
 
+## Derived context budget (always on)
+
+The context engine sizes every story generation's curated packet from the real context, not fixed numbers. Fixed costs are measured first - the narrator prompt instructions with the state macro empty, the user persona, the character card, and the opening message - and subtracted from the model's context limit together with a configurable safety margin (default 10%, room for World Info and prompt inserts). Everything left is the gross, split by configurable shares across **response, history, scene, minds, lore, and progression** (defaults 10/40/5/20/15/10). History and response are shares of the same pie, not separate reservations.
+
+History rides inside the state macro as part of the packet, and SillyTavern's own rendered conversation turns are bypassed for story generations (system prompt entries and the live player turn always remain), so history ships exactly once - no double-up, no wasted tokens. Every story generation - send, continue, swipe, regenerate - receives the complete packet, and the compiled packet can never exceed its derived allowance: sections that overflow are recompiled with proportionally shrunken budgets, with progression dropped only as a last resort.
+
+There is no off switch; only the shares, the safety margin, and the history turn cap are configurable, from the InnerLore panel's context section.
+
+## Card-declared seed entities
+
+A character card can pre-populate a brand-new chat's world with canon entities — its locations, most usefully — instead of waiting for the curator to meet each place in play. Declare them on the card at `data.extensions.inner_lore_seed` (or `extensions.inner_lore_seed` for v1-style cards) as either an array or `{ "entities": [...] }`:
+
+```json
+{
+  "entities": [
+    {
+      "type": "location",
+      "name": "Vigil Cross",
+      "aliases": ["the ley crossing"],
+      "importance": 80,
+      "summary": "A free city at the crossing of two great ley lines.",
+      "description": "Warden walls hold a fragile peace between emissaries of every court."
+    }
+  ]
+}
+```
+
+Seeds are applied once, when a chat with no existing InnerLore world gets its store created — new chats and first loads. Existing chats, branches, and legacy stores are never retro-seeded. Seeds become ordinary entity records: the curator enriches them as play actually reaches each place, and entity types disabled in settings are respected. Entries without a summary or description are ignored, and at most 120 seeds are honored per card.
+
 ## Private minds
 
 Each NPC brain separates durable identity from the present reaction:
