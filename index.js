@@ -46,13 +46,10 @@ import {
 } from './context-config.js';
 import { collectRecentStoryExpressions } from './expression-cooldown.js';
 import {
-    backgroundActiveRecently,
     backgroundInFlightCount,
     chooseDefaultProfileId,
-    getConcurrencyMode,
     isTransientRequestError,
     listConnectionProfiles,
-    markConcurrencyRejection,
     requestJsonPatch,
     waitForBackgroundIdle,
     testInnerLoreConnection,
@@ -126,7 +123,7 @@ const PROMPT_KEY = 'inner_lore_context';
 const TURN_CONTRACT_PROMPT_KEY = 'inner_lore_latest_turn_contract';
 const TRIGGER_DELIVERY_PROMPT_KEY = 'inner_lore_trigger_delivery';
 const DISPLAY_NAME = 'InnerLore';
-const EXTENSION_VERSION = '0.17.1';
+const EXTENSION_VERSION = '0.17.2';
 const LOG_PREFIX = '[InnerLore]';
 
 /**
@@ -5203,9 +5200,6 @@ function registerEvents() {
         const cutoffReason = getSettings().enabled && getSettings().autoRecoverIncomplete && !stoppedByUser
             ? generatedProseIssue(message.mes)
             : '';
-        if (cutoffReason === 'empty output' && backgroundActiveRecently()) {
-            markConcurrencyRejection();
-        }
         if (cutoffReason) {
             recoverIncompleteReply(messageIndex, cutoffReason);
             return;
@@ -5259,7 +5253,6 @@ function registerEvents() {
         runtime.activeStoryGenerationId = !isDryRun && storyGeneration
             ? `story:${Date.now().toString(36)}:${(++runtime.storyGenerationSerial).toString(36)}`
             : '';
-        runtime.storyGenerationStartedAt = runtime.activeStoryGenerationId ? Date.now() : 0;
         if (!isDryRun && storyGeneration) {
             // Phase 1 architecture: never block the story on InnerLore
             // preparation. Previously this handler awaited a full history
@@ -5324,10 +5317,10 @@ function registerEvents() {
         eventSource.on(events.CHAT_COMPLETION_PROMPT_READY, async prompt => {
             const settings = getSettings();
             if (!settings.enabled || !runtime.activeStoryGenerationId) return;
-            if (getConcurrencyMode() === 'serialized' && backgroundInFlightCount() > 0) {
-                // Story-first ordering on single-concurrency providers: let the
-                // in-flight background request drain, keep the user informed,
-                // then this story request leaves - no failed attempt, no retry.
+            if (backgroundInFlightCount() > 0) {
+                // Story and background never overlap: let the in-flight
+                // background request finish, keep the user informed, then this
+                // story request leaves - no failed attempt, no retry.
                 showNarratorPill('Narrating - background work finishing first');
                 try {
                     await waitForBackgroundIdle();
@@ -5532,15 +5525,9 @@ function initializeServerStateAfterAppReady(ctx) {
     // any active story generation to finish instead of racing it into a
     // provider-side "concurrent generation is locked" rejection.
     setStoryIdleGate(async signal => {
-        // Serialized sessions hold strict story-first ordering. Concurrent
-        // sessions still guard the launch window: a story request that has
-        // started but not yet left the client keeps background work waiting
-        // briefly, so single-request providers never see the story raced off
-        // the provider by its own background pass.
-        const LAUNCH_WINDOW_MS = 15_000;
+        // Story and background never overlap: background requests wait for any
+        // active story generation to finish before leaving.
         while (runtime.activeStoryGenerationId && !signal?.aborted) {
-            if (getConcurrencyMode() !== 'serialized'
-                && Date.now() - (runtime.storyGenerationStartedAt || 0) > LAUNCH_WINDOW_MS) break;
             await new Promise(resolve => setTimeout(resolve, 1_000));
         }
     });
