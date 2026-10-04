@@ -789,3 +789,73 @@ button.il-mv-card-toggle {
     .il-when-row { grid-template-columns: 1fr 1fr; }
     .il-when-row i { display: none; }
 }
+
+/* Cast cards: player + scene NPC strip, top-left of the screen. */
+#il_cast_bar {
+    position: fixed;
+    top: 6px;
+    left: 52px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    z-index: 30000;
+    max-width: min(46vw, 620px);
+    pointer-events: none;
+}
+
+.il-cast-card {
+    pointer-events: auto;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 8px;
+    border-radius: 9px;
+    border: 1px solid #5a5a66;
+    background: rgba(22, 22, 28, 0.88);
+    color: #d8d8e0;
+    font-size: 0.85em;
+    line-height: 1;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+    backdrop-filter: blur(3px);
+}
+
+.il-cast-card.il-cast-user { border-color: #8fb7e8; color: #cfe3f7; }
+
+.il-cast-icon, .il-cast-user .il-cast-icon { display: inline-flex; }
+.il-cast-card svg { width: 16px; height: 16px; display: block; }
+
+.il-cast-eye {
+    margin-left: 2px;
+    padding: 2px;
+    display: inline-flex;
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: #9c8eee;
+    opacity: 0.75;
+}
+
+.il-cast-eye:hover { opacity: 1; color: #bbaeff; }
+
+.il-mind-bubble {
+    margin: 10px 0;
+    padding: 8px 12px;
+    border: 1px dashed #9c8eee;
+    border-radius: 10px;
+    background: rgba(70, 58, 120, 0.14);
+    font-size: 0.92em;
+    color: #cfcfe8;
+}
+
+.il-mind-bubble .il-mind-title {
+    font-size: 0.85em;
+    letter-spacing: 0.03em;
+    color: #9c8eee;
+    margin-bottom: 6px;
+}
+
+.il-mind-bubble .il-mind-body { white-space: pre-wrap; }
+
+@media (max-width: 700px) {
+    #il_cast_bar { left: 48px; max-width: 70vw; }
+}

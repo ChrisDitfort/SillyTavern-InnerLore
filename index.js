@@ -126,7 +126,7 @@ const PROMPT_KEY = 'inner_lore_context';
 const TURN_CONTRACT_PROMPT_KEY = 'inner_lore_latest_turn_contract';
 const TRIGGER_DELIVERY_PROMPT_KEY = 'inner_lore_trigger_delivery';
 const DISPLAY_NAME = 'InnerLore';
-const EXTENSION_VERSION = '0.16.2';
+const EXTENSION_VERSION = '0.17.0';
 const LOG_PREFIX = '[InnerLore]';
 
 /**
@@ -203,6 +203,8 @@ async function findMainPromptEntry() {
     return prompts.find(prompt => prompt?.identifier === 'main') || null;
 }
 
+const NPC_STATION_DIRECTIVE = 'NPC voice: characters never lecture world lore, cosmology, or power-taxonomy uninvited. Each answers from their own station - a merchant sells and appraises, a scholar explains, a guard suspects - volunteering at most one detail their own life would naturally carry, and declining, deflecting, or charging for the rest. Trade terms stay inside a specialist\'s own shop-talk, never a guided tour of the ladder.';
+
 const NARRATION_FRESHNESS_DIRECTIVE = 'Narration freshness: never reuse a distinctive image, descriptor, phrase, or closing construction that appeared in the earlier replies. Vary sentence architecture between replies - length, opening shape, and especially the final line. Two consecutive replies must never end with the same shaped closer (for example "just another ..."), and a sensory detail already given (a smell, a texture, a complexion) is spent: reference it only when the scene truly returns to it, and then with new wording.';
 
 const NARRATION_LENGTH_DIRECTIVES = Object.freeze({
@@ -236,7 +238,7 @@ async function applyNarratorPromptSwap(shouldApply) {
     const deliveryPlan = planNarratorPromptDelivery(orderList);
     narratorPromptRestore = { entry, content: entry.content, orderList, orderRestore: null };
     const lengthDirective = NARRATION_LENGTH_DIRECTIVES[settings.narrationLength];
-    const directives = [lengthDirective, NARRATION_FRESHNESS_DIRECTIVE].filter(Boolean).join('\n\n');
+    const directives = [lengthDirective, NARRATION_FRESHNESS_DIRECTIVE, NPC_STATION_DIRECTIVE].filter(Boolean).join('\n\n');
     entry.content = directives ? `${template}\n\n${directives}` : template;
     if (deliveryPlan && orderList) {
         if (deliveryPlan.existed) {
@@ -1500,6 +1502,145 @@ async function prepareServerContext({ force = false } = {}) {
     return promise;
 }
 
+
+/**
+ * Cast cards: a small strip at the top-left of the screen showing the player
+ * and the current scene's NPCs with an SVG icon each. Every NPC card carries
+ * an eye button that renders that NPC's private InnerLore mind into the chat
+ * area as an ephemeral, styled bubble - a player-side view only; it is never
+ * saved to the chat and never enters the model's context.
+ */
+const CAST_SVG = {
+    person: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 3.6-7 8-7s8 3 8 7"/></svg>',
+    user: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 3.6-7 8-7s8 3 8 7"/><path d="M17 3l4 4M21 3l-4 4"/></svg>',
+    eye: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/></svg>',
+};
+
+function castBarElement() {
+    let bar = document.getElementById('il_cast_bar');
+    if (!bar) {
+        bar = document.createElement('div');
+        bar.id = 'il_cast_bar';
+        bar.className = 'displayNone';
+        document.body.appendChild(bar);
+    }
+    return bar;
+}
+
+function mindBubbleText(brain) {
+    const lines = [];
+    const mind = brain?.currentMind;
+    if (mind) {
+        if (mind.perception) lines.push(`Perception: ${mind.perception}`);
+        if (mind.interpretation) lines.push(`Interpretation: ${mind.interpretation}`);
+        const emotions = (mind.emotions || []).map(e => `${e.name}${e.intensity ? ` (${e.intensity})` : ''}`);
+        if (emotions.length) lines.push(`Emotions: ${emotions.join(', ')}`);
+        if (mind.attention) lines.push(`Attention: ${mind.attention}`);
+        if (mind.expectation) lines.push(`Expectation: ${mind.expectation}`);
+        if (mind.immediateGoal) lines.push(`Immediate goal: ${mind.immediateGoal}`);
+        for (const thought of (mind.innerThoughts || []).slice(0, 3)) lines.push(`*${thought}*`);
+    } else {
+        lines.push('(no fresh current mind - the curator has not observed this NPC since the latest scene)');
+    }
+    const facets = Object.values(brain?.persistentSelf?.facets || {}).slice(0, 6);
+    const voice = Object.values(brain?.persistentSelf?.voice || {}).slice(0, 2);
+    if (facets.length || voice.length) {
+        lines.push('');
+        lines.push('Persistent self:');
+        for (const facet of facets) lines.push(`- [${facet.kind}] ${facet.statement}`);
+        for (const anchor of voice) lines.push(`- (voice: ${anchor.kind}) ${anchor.statement}`);
+    }
+    return lines.join('\n');
+}
+
+function renderMindInChat(name) {
+    const store = getChatStore();
+    const brain = store?.brains?.[canonicalNameKey(name)];
+    const chat = document.getElementById('chat');
+    if (!chat) return;
+    const bubble = document.createElement('div');
+    bubble.className = 'mes il-mind-bubble';
+    const title = document.createElement('div');
+    title.className = 'il-mind-title';
+    title.textContent = `InnerLore - private mind of ${name} (player view only, never sent to the model)`;
+    const body = document.createElement('div');
+    body.className = 'il-mind-body';
+    body.textContent = brain ? mindBubbleText(brain) : `(no InnerLore mind is tracked for ${name} yet)`;
+    bubble.append(title, body);
+    chat.appendChild(bubble);
+    bubble.scrollIntoView({ behavior: 'smooth', block: 'end' });
+}
+
+function updateCastCards() {
+    const bar = castBarElement();
+    bar.innerHTML = '';
+    const ctx = context();
+    const userName = cleanString(ctx.name1, 100) || 'You';
+    const userKey = canonicalNameKey(userName);
+    // Scene participants are the primary source; NPCs whose private minds
+    // were selected for the current compilation are equally "in the scene"
+    // (the scene compiler can miss engaged characters whose entity records
+    // lack fresh location anchors).
+    const seen = new Set([userKey]);
+    const participants = [];
+    const pushParticipant = name => {
+        const key = canonicalNameKey(name || '');
+        if (!name || !key || seen.has(key)) return;
+        seen.add(key);
+        participants.push({ name });
+    };
+    for (const item of (runtime.lastCompilation?.scene?.participants || [])) pushParticipant(item?.name);
+    for (const brain of (runtime.lastCompilation?.selectedBrains || [])) pushParticipant(brain?.name);
+    // Recently-seen character entities: the narrator often refers to engaged
+    // NPCs by descriptor ("the technician") rather than canonical name, so
+    // mention matching alone can miss them - the curator's lastSeenMessage
+    // watermark is the reliable presence signal.
+    const chatLength = Array.isArray(context().chat) ? context().chat.length : 0;
+    const store = getChatStore();
+    if (store) {
+        const recent = [];
+        for (const entity of Object.values(store.entities || {})) {
+            if (entity?.type !== 'character' || entity.enabled === false) continue;
+            const lastSeen = Number(entity.lastSeenMessage);
+            if (Number.isInteger(lastSeen) && chatLength - lastSeen <= 6 && lastSeen >= 0) {
+                recent.push({ name: entity.name, lastSeen });
+            }
+        }
+        recent.sort((a, b) => b.lastSeen - a.lastSeen);
+        for (const item of recent) pushParticipant(item.name);
+    }
+    participants.splice(8);
+    if (!getSettings().enabled || !currentChatId()) {
+        bar.classList.add('displayNone');
+        return;
+    }
+    const userCard = document.createElement('div');
+    userCard.className = 'il-cast-card il-cast-user';
+    userCard.title = 'You';
+    userCard.innerHTML = `${CAST_SVG.user}<span></span>`;
+    userCard.querySelector('span').textContent = userName;
+    bar.appendChild(userCard);
+    for (const participant of participants) {
+        const card = document.createElement('div');
+        card.className = 'il-cast-card';
+        card.title = `NPC - click the eye to view ${participant.name}'s private mind`;
+        const icon = document.createElement('span');
+        icon.className = 'il-cast-icon';
+        icon.innerHTML = CAST_SVG.person;
+        const label = document.createElement('span');
+        label.textContent = participant.name;
+        const eye = document.createElement('button');
+        eye.type = 'button';
+        eye.className = 'il-cast-eye';
+        eye.setAttribute('aria-label', `View ${participant.name} mind`);
+        eye.innerHTML = CAST_SVG.eye;
+        eye.addEventListener('click', () => renderMindInChat(participant.name));
+        card.append(icon, label, eye);
+        bar.appendChild(card);
+    }
+    bar.classList.remove('displayNone');
+}
+
 function registerContextMacros() {
     const register = context().registerMacro;
     if (typeof register !== 'function') {
@@ -1720,6 +1861,7 @@ function updateInjection({ isContinue = false } = {}) {
         // makes it harder for long context to wash out private state and canon.
         ctx.setExtensionPrompt(PROMPT_KEY, injection, 1, Number(settings.injectionDepth) || 0, false, 0);
         runtime.lastInjection = injection;
+        updateCastCards();
         log('Prompt injection updated:', injection.length, 'characters');
     }
     // A continue extends an already-written reply. The latest-turn contract is
@@ -5241,6 +5383,7 @@ function registerEvents() {
         });
     }
     eventSource.on(events.CHAT_CHANGED, async () => {
+        updateCastCards();
         restoreNarratorPromptSwap();
         syncNarrativeLog();
         runtime.controller?.abort();
@@ -5275,6 +5418,11 @@ function registerEvents() {
         }
         setStatus('idle', 'Idle', currentChatId() ? 'Ready for the next story reply.' : 'Waiting for a chat.');
         updateUI();
+        // Prime the compiled packet (and the cast cards' scene participants)
+        // before the first generation of the session, so the world state is
+        // visible and injected from the moment a saved chat opens.
+        if (getSettings().enabled && getChatStore()) updateInjection({});
+        updateCastCards();
         void prepareServerContext();
         if (scheduleRequestedRecoveryOnLoad()) {
             // Recovery queues one complete analysis pass after stitching.
