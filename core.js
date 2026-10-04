@@ -1542,6 +1542,50 @@ function mergeCanonicalEntityPair(primary, duplicate) {
 }
 
 /** Collapse compatible physical identities that share one exact canonical name. */
+/**
+ * Anchor misnamed minds to their character entity. The greeting foundation
+ * pass runs before the curator has named any entity, so it can create a brain
+ * from the story's short name ("Elka Draven") while the curator later names
+ * the entity from its full introduction ("Warden-Captain Elka Draven"). A
+ * brain whose two-plus-word name is the exact tail of a character entity's
+ * name belongs to that entity: migrate it to the canonical name, merging into
+ * an existing canonical brain where one exists.
+ */
+export function reconcileAnchoredBrains(store) {
+    const brains = store?.brains;
+    if (!brains) return { anchored: 0 };
+    const characters = [];
+    for (const entity of Object.values(store.entities || {})) {
+        if (normalizeEntityType(entity?.type) !== 'character') continue;
+        const key = canonicalNameKey(entity.name);
+        if (key) characters.push({ key, name: entity.name });
+    }
+    let anchored = 0;
+    for (const [brainKey, brain] of Object.entries({ ...brains })) {
+        if (!brain || !brainKey || brainKey.split(' ').length < 2) continue;
+        if (Object.values(store.entities || {}).some(entity => canonicalNameKey(entity?.name) === brainKey)) continue;
+        const host = characters.find(character => character.key.endsWith(' ' + brainKey));
+        if (!host) continue;
+        const target = brains[host.key];
+        if (target) {
+            for (const section of ['facets', 'voice', 'relationships']) {
+                const source = brain.persistentSelf?.[section] || {};
+                const destination = target.persistentSelf[section] = target.persistentSelf[section] || {};
+                for (const [entryKey, entry] of Object.entries(source)) {
+                    if (!(entryKey in destination)) destination[entryKey] = entry;
+                }
+            }
+            if (!target.currentMind && brain.currentMind) target.currentMind = brain.currentMind;
+            target.lastSeenMessage = Math.max(target.lastSeenMessage || 0, brain.lastSeenMessage || 0);
+        } else {
+            brains[host.key] = { ...brain, id: host.key, name: host.name };
+        }
+        delete brains[brainKey];
+        anchored++;
+    }
+    return { anchored };
+}
+
 export function reconcileCanonicalEntities(store) {
     const groups = new Map();
     for (const [id, record] of Object.entries(store?.entities || {})) {
@@ -1636,6 +1680,7 @@ export function mergeEntityOperations(store, operations, options = {}) {
     const maximumOperations = clamp(options.maximumOperations ?? 12, 1, 50);
     const messageIndex = Number.isInteger(options.messageIndex) ? options.messageIndex : -1;
     const initialReconciliation = reconcileCanonicalEntities(store);
+    const anchoredBrains = reconcileAnchoredBrains(store);
     const allOperations = Array.isArray(operations) ? operations : [];
     const prioritizedOperations = allOperations
         .map((operation, originalIndex) => {
@@ -1662,6 +1707,7 @@ export function mergeEntityOperations(store, operations, options = {}) {
         skipped: truncated,
         truncated,
         reconciled: initialReconciliation.reconciled,
+        mindsAnchored: anchoredBrains.anchored,
         changedIds: [...initialReconciliation.changedIds],
         removedIds: [...initialReconciliation.removedIds],
     };
