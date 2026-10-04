@@ -91,6 +91,81 @@ export function extractResponseText(raw) {
     return '';
 }
 
+/**
+ * Story/background concurrency manager.
+ *
+ * Default mode is concurrent: background requests leave immediately and may
+ * overlap a story generation. The first provider-side concurrency rejection
+ * (a "concurrent generation is locked"-style failure) flips the session to
+ * serialized: background requests wait for any active story generation, the
+ * story request itself waits for in-flight background work to drain before it
+ * leaves (see waitForBackgroundIdle, awaited from the prompt-ready hook), and
+ * queued work is ordered story-first. The mode is code-level state - no
+ * settings, no visible retries.
+ */
+const CONCURRENCY_REJECTION_PATTERN = /(concurrent|locked|already generating|busy)/i;
+const serializationState = {
+    mode: 'concurrent',
+    backgroundInFlight: 0,
+    lastBackgroundFinishedAt: 0,
+};
+
+let waitForStoryIdle = null;
+
+export function setStoryIdleGate(gate) {
+    waitForStoryIdle = typeof gate === 'function' ? gate : null;
+}
+
+export function getConcurrencyMode() {
+    return serializationState.mode;
+}
+
+export function backgroundInFlightCount() {
+    return serializationState.backgroundInFlight;
+}
+
+export function backgroundActiveRecently() {
+    return serializationState.backgroundInFlight > 0
+        || Date.now() - serializationState.lastBackgroundFinishedAt < 15_000;
+}
+
+export function markConcurrencyRejection() {
+    if (serializationState.mode !== 'serialized') {
+        serializationState.mode = 'serialized';
+        console.warn('[InnerLore] Provider rejected concurrent generation; serializing story and background requests for this session.');
+    }
+}
+
+export async function waitForBackgroundIdle(timeoutMs = 180_000) {
+    const deadline = Date.now() + Math.max(1_000, timeoutMs);
+    while (serializationState.backgroundInFlight > 0 && Date.now() < deadline) {
+        await new Promise(resolve => setTimeout(resolve, 500));
+    }
+}
+
+function isConcurrencyRejection(error) {
+    return CONCURRENCY_REJECTION_PATTERN.test(String(error?.message || ''))
+        || Number(error?.status) === 429;
+}
+
+async function withBackgroundSlot(task, signal) {
+    // Serialized sessions hold the story-first ordering: a background request
+    // waits for any active story generation before leaving.
+    if (serializationState.mode === 'serialized' && waitForStoryIdle) {
+        await waitForStoryIdle(signal);
+    }
+    serializationState.backgroundInFlight++;
+    try {
+        return await task();
+    } catch (error) {
+        if (isConcurrencyRejection(error)) markConcurrencyRejection();
+        throw error;
+    } finally {
+        serializationState.backgroundInFlight--;
+        serializationState.lastBackgroundFinishedAt = Date.now();
+    }
+}
+
 async function sendViaProfile(settings, messages, signal, options = {}) {
     const ctx = context();
     const service = ctx.ConnectionManagerRequestService;
@@ -104,7 +179,7 @@ async function sendViaProfile(settings, messages, signal, options = {}) {
     }
 
     const maximumTokens = Math.max(800, Math.min(32_000, Number(settings.maximumResponseTokens) || 6_000));
-    const raw = await service.sendRequest(
+    const raw = await withBackgroundSlot(() => service.sendRequest(
         profileId,
         messages,
         maximumTokens,
@@ -128,7 +203,7 @@ async function sendViaProfile(settings, messages, signal, options = {}) {
             include_reasoning: false,
             ...(options.jsonSchema ? { json_schema: options.jsonSchema } : {}),
         },
-    );
+    ), signal);
     if (typeof raw === 'function') {
         // Streaming response: an async generator whose chunks carry the
         // accumulated text. Only the final chunk's values are meaningful here.
@@ -139,6 +214,10 @@ async function sendViaProfile(settings, messages, signal, options = {}) {
             if (typeof chunk?.state?.reasoning === 'string' && chunk.state.reasoning) reasoning = chunk.state.reasoning;
         }
         const streamed = text.trim() ? text : reasoning;
+        if (CONCURRENCY_REJECTION_PATTERN.test(text)) {
+            markConcurrencyRejection();
+            throw new Error('Provider rejected concurrent generation (locked).');
+        }
         if (!streamed.trim()) throw new Error('The selected connection profile returned no visible text.');
         return streamed;
     }
@@ -164,15 +243,15 @@ async function sendViaActiveConnection(settings, messages, signal, options = {})
 
     let raw;
     if (generateRaw.length <= 1) {
-        raw = await generateRaw({
+        raw = await withBackgroundSlot(() => generateRaw({
             prompt,
             systemPrompt,
             responseLength: maximumTokens,
             signal,
             ...(options.jsonSchema ? { jsonSchema: options.jsonSchema } : {}),
-        });
+        }), signal);
     } else {
-        raw = await generateRaw(prompt, systemPrompt);
+        raw = await withBackgroundSlot(() => generateRaw(prompt, systemPrompt), signal);
     }
     const text = extractResponseText(raw);
     if (!text.trim()) throw new Error('The active SillyTavern connection returned no visible text.');

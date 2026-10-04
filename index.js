@@ -46,12 +46,18 @@ import {
 } from './context-config.js';
 import { collectRecentStoryExpressions } from './expression-cooldown.js';
 import {
+    backgroundActiveRecently,
+    backgroundInFlightCount,
     chooseDefaultProfileId,
+    getConcurrencyMode,
     isTransientRequestError,
     listConnectionProfiles,
+    markConcurrencyRejection,
     requestJsonPatch,
+    waitForBackgroundIdle,
     testInnerLoreConnection,
-} from './llm-client.js?v=13';
+    setStoryIdleGate,
+} from './llm-client.js?v=14';
 import {
     deleteInnerLorebooksForChat,
     openInnerLorebook,
@@ -120,7 +126,7 @@ const PROMPT_KEY = 'inner_lore_context';
 const TURN_CONTRACT_PROMPT_KEY = 'inner_lore_latest_turn_contract';
 const TRIGGER_DELIVERY_PROMPT_KEY = 'inner_lore_trigger_delivery';
 const DISPLAY_NAME = 'InnerLore';
-const EXTENSION_VERSION = '0.16.0';
+const EXTENSION_VERSION = '0.16.1';
 const LOG_PREFIX = '[InnerLore]';
 
 /**
@@ -1064,8 +1070,15 @@ async function loadChatStore() {
         chatId,
     } : null;
     // A mismatched metadata pointer signals a real SillyTavern branch and must
-    // win over the registry so the server can fork the source world.
-    const pointer = metadataPointer?.chatId && metadataPointer.chatId !== chatId
+    // win over the registry so the server can fork the source world. But
+    // SillyTavern also clones chat metadata onto a brand-new chat started from
+    // an open one: a greeting-only chat with an inherited pointer is a fresh
+    // start, not a branch, and must create (and card-seed) its own world.
+    const greetingOnlyChat = Array.isArray(ctx.chat)
+        && ctx.chat.length === 1
+        && !ctx.chat[0]?.is_user
+        && !ctx.chat[0]?.is_system;
+    const pointer = !greetingOnlyChat && metadataPointer?.chatId && metadataPointer.chatId !== chatId
         ? metadataPointer
         : (registryPointer || metadataPointer);
     const legacyStore = isLegacyInnerLoreStore(metadataValue) ? metadataValue : null;
@@ -5045,6 +5058,9 @@ function registerEvents() {
         const cutoffReason = getSettings().enabled && getSettings().autoRecoverIncomplete && !stoppedByUser
             ? generatedProseIssue(message.mes)
             : '';
+        if (cutoffReason === 'empty output' && backgroundActiveRecently()) {
+            markConcurrencyRejection();
+        }
         if (cutoffReason) {
             recoverIncompleteReply(messageIndex, cutoffReason);
             return;
@@ -5159,11 +5175,26 @@ function registerEvents() {
         // own rendered conversation turns must not also ship: history is
         // delivered exactly once and no tokens are doubled up. System-role
         // prompt entries and the live player turn always stay.
-        eventSource.on(events.CHAT_COMPLETION_PROMPT_READY, prompt => {
+        eventSource.on(events.CHAT_COMPLETION_PROMPT_READY, async prompt => {
             const settings = getSettings();
             if (!settings.enabled || !runtime.activeStoryGenerationId) return;
+            if (getConcurrencyMode() === 'serialized' && backgroundInFlightCount() > 0) {
+                // Story-first ordering on single-concurrency providers: let the
+                // in-flight background request drain, keep the user informed,
+                // then this story request leaves - no failed attempt, no retry.
+                showNarratorPill('Narrating - background work finishing first');
+                try {
+                    await waitForBackgroundIdle();
+                } finally {
+                    showNarratorPill('Narrating');
+                }
+            }
             if (!runtime.derivedContext) return;
-            const messages = Array.isArray(prompt?.messages) ? prompt.messages : null;
+            // SillyTavern 1.18 passes { chat }; older builds passed { messages }.
+            // The array must be mutated in place - reassignment is ignored.
+            const messages = Array.isArray(prompt?.chat)
+                ? prompt.chat
+                : (Array.isArray(prompt?.messages) ? prompt.messages : null);
             if (!messages || messages.length < 2) return;
             let firstAssistant = -1;
             let lastUser = -1;
@@ -5173,15 +5204,20 @@ function registerEvents() {
                 if (role === 'assistant' && firstAssistant === -1 && content) firstAssistant = i;
                 if (role === 'user' && content) lastUser = i;
             }
-            const bypass = messages.filter((message, index) => (
-                message?.role === 'system'
-                || index === lastUser
-                || (firstAssistant > -1 && index < firstAssistant && message?.role === 'user')
-            ));
-            if (bypass.length !== messages.length) {
-                log(`History bypass: delivering history once via the state macro (${messages.length - bypass.length} rendered turns removed from this request).`);
-                prompt.messages = bypass;
+            const keep = new Set();
+            for (let i = 0; i < messages.length; i++) {
+                if (
+                    messages[i]?.role === 'system'
+                    || i === lastUser
+                    || (firstAssistant > -1 && i < firstAssistant && messages[i]?.role === 'user')
+                ) keep.add(i);
             }
+            if (keep.size === messages.length) return;
+            const removed = messages.length - keep.size;
+            for (let i = messages.length - 1; i >= 0; i--) {
+                if (!keep.has(i)) messages.splice(i, 1);
+            }
+            log(`History bypass: delivering history once via the state macro (${removed} rendered turns removed from this request).`);
         });
     }
     if (events.GENERATION_STOPPED) {
@@ -5339,6 +5375,15 @@ function initializeServerStateAfterAppReady(ctx) {
 
     if (events?.APP_READY) ctx.eventSource.on(events.APP_READY, start);
     else queueMicrotask(start);
+    // Story and background work commonly share one provider, and many
+    // providers serve a single concurrent request. Background passes wait for
+    // any active story generation to finish instead of racing it into a
+    // provider-side "concurrent generation is locked" rejection.
+    setStoryIdleGate(async signal => {
+        while (runtime.activeStoryGenerationId && !signal?.aborted) {
+            await new Promise(resolve => setTimeout(resolve, 1_500));
+        }
+    });
 }
 
 // Dual-mode entry: this file is the browser extension AND, when SillyTavern's
