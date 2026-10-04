@@ -103,8 +103,23 @@ export function extractResponseText(raw) {
 const CONCURRENCY_REJECTION_PATTERN = /(concurrent|locked|already generating|busy)/i;
 const serializationState = {
     backgroundInFlight: 0,
+    peerBackgroundInFlight: 0,
     lastBackgroundFinishedAt: 0,
 };
+
+let slotListener = null;
+
+export function setSlotListener(listener) {
+    slotListener = typeof listener === 'function' ? listener : null;
+}
+
+export function setPeerBackgroundInFlight(count) {
+    const next = Math.max(0, Number(count) || 0);
+    if (next !== serializationState.peerBackgroundInFlight) {
+        serializationState.peerBackgroundInFlight = next;
+        slotListener?.('peer', next);
+    }
+}
 
 let waitForStoryIdle = null;
 
@@ -113,13 +128,16 @@ export function setStoryIdleGate(gate) {
 }
 
 export function backgroundInFlightCount() {
-    return serializationState.backgroundInFlight;
+    return serializationState.backgroundInFlight + serializationState.peerBackgroundInFlight;
 }
 
-export async function waitForBackgroundIdle(timeoutMs = 240_000) {
+export async function waitForBackgroundIdle(timeoutMs = 300_000) {
     const deadline = Date.now() + Math.max(1_000, timeoutMs);
-    while (serializationState.backgroundInFlight > 0 && Date.now() < deadline) {
+    while (backgroundInFlightCount() > 0 && Date.now() < deadline) {
         await new Promise(resolve => setTimeout(resolve, 500));
+    }
+    if (backgroundInFlightCount() > 0) {
+        console.warn(`[InnerLore] Background work still in flight after ${Math.round(timeoutMs / 1000)}s; the story request proceeds anyway.`);
     }
 }
 
@@ -130,6 +148,7 @@ async function withBackgroundSlot(task, signal) {
         await waitForStoryIdle(signal);
     }
     serializationState.backgroundInFlight++;
+    slotListener?.('own', serializationState.backgroundInFlight);
     try {
         return await task();
     } catch (error) {
@@ -137,6 +156,7 @@ async function withBackgroundSlot(task, signal) {
     } finally {
         serializationState.backgroundInFlight--;
         serializationState.lastBackgroundFinishedAt = Date.now();
+        slotListener?.('own', serializationState.backgroundInFlight);
     }
 }
 

@@ -48,6 +48,8 @@ import { collectRecentStoryExpressions } from './expression-cooldown.js';
 import {
     backgroundInFlightCount,
     chooseDefaultProfileId,
+    setPeerBackgroundInFlight,
+    setSlotListener,
     isTransientRequestError,
     listConnectionProfiles,
     requestJsonPatch,
@@ -123,7 +125,7 @@ const PROMPT_KEY = 'inner_lore_context';
 const TURN_CONTRACT_PROMPT_KEY = 'inner_lore_latest_turn_contract';
 const TRIGGER_DELIVERY_PROMPT_KEY = 'inner_lore_trigger_delivery';
 const DISPLAY_NAME = 'InnerLore';
-const EXTENSION_VERSION = '0.17.3';
+const EXTENSION_VERSION = '0.17.4';
 const LOG_PREFIX = '[InnerLore]';
 
 /**
@@ -5068,6 +5070,8 @@ async function recoverIncompleteReply(messageIndex, initialReason) {
                 finalReason,
                 error: errorText,
                 quarantined: false,
+                backgroundInFlight: backgroundInFlightCount(),
+                peerStory: Boolean(runtime.peerStoryActiveAt && Date.now() - runtime.peerStoryActiveAt < 120_000),
                 at: Date.now(),
             };
         }
@@ -5156,6 +5160,8 @@ function registerEvents() {
     const events = eventTypes || event_types;
     if (events.MESSAGE_SENT) {
         eventSource.on(events.MESSAGE_SENT, () => {
+        runtime.storySendPendingAt = Date.now();
+        runtime.announceStoryState?.(true);
             // GENERATION_STARTED fires before SillyTavern moves the textarea
             // into chat. Refresh again here so the current player action—and
             // an explicit time skip such as “five minutes pass”—is in the
@@ -5228,6 +5234,13 @@ function registerEvents() {
         queueCompletedAssistantTurn(store);
     });
     eventSource.on(events.GENERATION_STARTED, async (generationType, _generationOptions, isDryRun) => {
+        // Claim the provider before any awaited listener work: a background
+        // timer firing during prompt assembly must see the story as active.
+        const storyStart = !['quiet', 'impersonate'].includes(generationType);
+        if (!isDryRun && storyStart && !runtime.activeStoryGenerationId) {
+            runtime.activeStoryGenerationId = `story:pending:${Date.now().toString(36)}`;
+            runtime.announceStoryState?.(true);
+        }
         runtime.userStoppedGenerationAt = 0;
         runtime.storyGenerationBlock = null;
         runtime.blockedGenerationCancellation = false;
@@ -5250,9 +5263,12 @@ function registerEvents() {
             showNarratorPill('Narrating');
             trackNarrationStreamingStart();
         }
+        runtime.storySendPendingAt = 0;
         runtime.activeStoryGenerationId = !isDryRun && storyGeneration
             ? `story:${Date.now().toString(36)}:${(++runtime.storyGenerationSerial).toString(36)}`
             : '';
+        if (runtime.activeStoryGenerationId) runtime.announceStoryState?.(true);
+        else runtime.announceStoryState?.(false);
         if (!isDryRun && storyGeneration) {
             // Phase 1 architecture: never block the story on InnerLore
             // preparation. Previously this handler awaited a full history
@@ -5361,6 +5377,11 @@ function registerEvents() {
     }
     if (events.GENERATION_STOPPED) {
         eventSource.on(events.GENERATION_STOPPED, () => {
+            runtime.storySendPendingAt = 0;
+            if (runtime.activeStoryGenerationId) {
+                runtime.activeStoryGenerationId = '';
+                runtime.announceStoryState?.(false);
+            }
             hideNarratorPill();
             restoreNarratorPromptSwap();
             syncNarrativeLog();
@@ -5525,12 +5546,48 @@ function initializeServerStateAfterAppReady(ctx) {
     // any active story generation to finish instead of racing it into a
     // provider-side "concurrent generation is locked" rejection.
     setStoryIdleGate(async signal => {
-        // Story and background never overlap: background requests wait for any
-        // active story generation to finish before leaving.
-        while (runtime.activeStoryGenerationId && !signal?.aborted) {
+        // Story and background never overlap - in this tab or any other:
+        // background requests wait for any active (or just-sent, still
+        // assembling) story generation before leaving.
+        const storyBusy = () => Boolean(runtime.activeStoryGenerationId)
+            || (Date.now() - (runtime.storySendPendingAt || 0) < 60_000)
+            || Boolean(runtime.peerStoryActiveAt && Date.now() - runtime.peerStoryActiveAt < 120_000);
+        while (storyBusy() && !signal?.aborted) {
             await new Promise(resolve => setTimeout(resolve, 1_000));
         }
     });
+    // Provider-level serialization must hold across SillyTavern tabs: a stale
+    // second tab runs its own InnerLore work against the same single-request
+    // provider. BroadcastChannel coordinates story/background state between
+    // tabs; peer facts carry timestamps so a crashed tab cannot wedge the
+    // gates open forever.
+    if (typeof BroadcastChannel === 'function' && !runtime.providerLockChannel) {
+        runtime.providerLockChannel = new BroadcastChannel('innerlore_provider_lock');
+        // Node's BroadcastChannel keeps the event loop alive, which would hang
+        // non-browser hosts (tests, the server plugin entry). Browsers have no
+        // unref; Node gets it so the channel never blocks shutdown.
+        runtime.providerLockChannel.unref?.();
+        runtime.peerStoryActiveAt = 0;
+        runtime.peerBackgroundCount = 0;
+        runtime.providerLockChannel.onmessage = event => {
+            const data = event?.data || {};
+            if (data.kind === 'story') {
+                runtime.peerStoryActiveAt = data.active ? Date.now() : 0;
+            } else if (data.kind === 'background') {
+                runtime.peerBackgroundCount = Math.max(0, Number(data.count) || 0);
+                runtime.peerBackgroundAt = runtime.peerBackgroundCount > 0 ? Date.now() : 0;
+                setPeerBackgroundInFlight(runtime.peerBackgroundCount > 0
+                    && Date.now() - (runtime.peerBackgroundAt || 0) < 600_000 ? 1 : 0);
+            }
+        };
+        const announce = payload => {
+            try { runtime.providerLockChannel?.postMessage(payload); } catch { /* channel closed */ }
+        };
+        runtime.announceStoryState = active => announce({ kind: 'story', active });
+        setSlotListener((scope, count) => {
+            if (scope === 'own') announce({ kind: 'background', count });
+        });
+    }
 }
 
 // Dual-mode entry: this file is the browser extension AND, when SillyTavern's
