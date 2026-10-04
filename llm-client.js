@@ -110,6 +110,31 @@ const serializationState = {
     lastBackgroundFinishedAt: 0,
 };
 
+/**
+ * Providers that serve one request at a time keep that property across
+ * sessions, so the serialized mode is persisted per connection profile: after
+ * the first observed concurrency rejection, every future page session starts
+ * serialized instead of paying the first-turn collision again.
+ */
+function concurrencyKey(profileId) {
+    return `innerlore:concurrency:${String(profileId || 'active')}`;
+}
+
+function readPersistedSerialization(profileId) {
+    try {
+        return globalThis.localStorage?.getItem(concurrencyKey(profileId)) === 'serialized' ? 'serialized' : null;
+    } catch {
+        return null;
+    }
+}
+
+function writePersistedSerialization(profileId, mode) {
+    try {
+        if (mode === 'serialized') globalThis.localStorage?.setItem(concurrencyKey(profileId), 'serialized');
+        else globalThis.localStorage?.removeItem(concurrencyKey(profileId));
+    } catch { /* storage unavailable in non-browser hosts */ }
+}
+
 let waitForStoryIdle = null;
 
 export function setStoryIdleGate(gate) {
@@ -129,11 +154,20 @@ export function backgroundActiveRecently() {
         || Date.now() - serializationState.lastBackgroundFinishedAt < 15_000;
 }
 
-export function markConcurrencyRejection() {
+export function markConcurrencyRejection(profileId = '') {
     if (serializationState.mode !== 'serialized') {
         serializationState.mode = 'serialized';
-        console.warn('[InnerLore] Provider rejected concurrent generation; serializing story and background requests for this session.');
+        console.warn('[InnerLore] Provider rejected concurrent generation; serializing story and background requests for every session on this connection profile.');
     }
+    writePersistedSerialization(profileId, 'serialized');
+}
+
+export function loadPersistedConcurrencyMode(profileId = '') {
+    const persisted = readPersistedSerialization(profileId);
+    if (persisted === 'serialized' && serializationState.mode !== 'serialized') {
+        serializationState.mode = 'serialized';
+    }
+    return serializationState.mode;
 }
 
 export async function waitForBackgroundIdle(timeoutMs = 180_000) {
@@ -148,7 +182,7 @@ function isConcurrencyRejection(error) {
         || Number(error?.status) === 429;
 }
 
-async function withBackgroundSlot(task, signal) {
+async function withBackgroundSlot(task, signal, profileId = '') {
     // Serialized sessions hold the story-first ordering: a background request
     // waits for any active story generation before leaving.
     if (serializationState.mode === 'serialized' && waitForStoryIdle) {
@@ -158,7 +192,7 @@ async function withBackgroundSlot(task, signal) {
     try {
         return await task();
     } catch (error) {
-        if (isConcurrencyRejection(error)) markConcurrencyRejection();
+        if (isConcurrencyRejection(error)) markConcurrencyRejection(profileId);
         throw error;
     } finally {
         serializationState.backgroundInFlight--;
@@ -168,6 +202,7 @@ async function withBackgroundSlot(task, signal) {
 
 async function sendViaProfile(settings, messages, signal, options = {}) {
     const ctx = context();
+    loadPersistedConcurrencyMode(settings.connectionProfileId);
     const service = ctx.ConnectionManagerRequestService;
     if (!service?.sendRequest) {
         throw new Error('SillyTavern Connection Manager request service is unavailable.');
@@ -203,7 +238,7 @@ async function sendViaProfile(settings, messages, signal, options = {}) {
             include_reasoning: false,
             ...(options.jsonSchema ? { json_schema: options.jsonSchema } : {}),
         },
-    ), signal);
+    ), signal, settings.connectionProfileId);
     if (typeof raw === 'function') {
         // Streaming response: an async generator whose chunks carry the
         // accumulated text. Only the final chunk's values are meaningful here.
