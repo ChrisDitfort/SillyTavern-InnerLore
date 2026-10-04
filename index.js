@@ -126,7 +126,7 @@ const PROMPT_KEY = 'inner_lore_context';
 const TURN_CONTRACT_PROMPT_KEY = 'inner_lore_latest_turn_contract';
 const TRIGGER_DELIVERY_PROMPT_KEY = 'inner_lore_trigger_delivery';
 const DISPLAY_NAME = 'InnerLore';
-const EXTENSION_VERSION = '0.16.1';
+const EXTENSION_VERSION = '0.16.2';
 const LOG_PREFIX = '[InnerLore]';
 
 /**
@@ -203,6 +203,8 @@ async function findMainPromptEntry() {
     return prompts.find(prompt => prompt?.identifier === 'main') || null;
 }
 
+const NARRATION_FRESHNESS_DIRECTIVE = 'Narration freshness: never reuse a distinctive image, descriptor, phrase, or closing construction that appeared in the earlier replies. Vary sentence architecture between replies - length, opening shape, and especially the final line. Two consecutive replies must never end with the same shaped closer (for example "just another ..."), and a sensory detail already given (a smell, a texture, a complexion) is spent: reference it only when the scene truly returns to it, and then with new wording.';
+
 const NARRATION_LENGTH_DIRECTIVES = Object.freeze({
     brief: 'Narration length: keep this reply brief — one tight paragraph of at most roughly 120 words. Favor one clear beat, then stop.',
     standard: 'Narration length: aim for roughly 250-400 words — two to four paragraphs covering a complete beat with sensory texture.',
@@ -234,7 +236,8 @@ async function applyNarratorPromptSwap(shouldApply) {
     const deliveryPlan = planNarratorPromptDelivery(orderList);
     narratorPromptRestore = { entry, content: entry.content, orderList, orderRestore: null };
     const lengthDirective = NARRATION_LENGTH_DIRECTIVES[settings.narrationLength];
-    entry.content = lengthDirective ? `${template}\n\n${lengthDirective}` : template;
+    const directives = [lengthDirective, NARRATION_FRESHNESS_DIRECTIVE].filter(Boolean).join('\n\n');
+    entry.content = directives ? `${template}\n\n${directives}` : template;
     if (deliveryPlan && orderList) {
         if (deliveryPlan.existed) {
             // Present but disabled: enable it in place for this generation.

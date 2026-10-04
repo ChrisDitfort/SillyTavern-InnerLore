@@ -150,6 +150,27 @@ export function compileContext(options = {}) {
         blocks.progression = '';
         text = cleanString(Object.values(blocks).filter(Boolean).join('\n\n'), 120_000);
     }
+    // The expression cooldown normally rides inside the private-minds block,
+    // which only renders when a relevant NPC mind exists. Quiet scenes still
+    // need the anti-repetition guard: emit it standalone whenever minds did
+    // not render but recent story expression text was collected.
+    if (recentExpressionText && !blocks.minds) {
+        const cooldownHeader = `<narration_freshness_cooldown priority="hard">
+The excerpts below are distinctive wording already spent in the most recent replies. Do not reuse their imagery, descriptors, sentence shapes, or closing constructions; express continuity through fresh language and a fresh final beat.
+
+`;
+        const cooldownFooter = '\n</narration_freshness_cooldown>';
+        // The packet's derived allowance stays a hard cap: the excerpt list is
+        // clipped to whatever room remains after the compiled sections.
+        const room = totalBudget
+            ? Math.max(0, totalBudget - text.length - cooldownHeader.length - cooldownFooter.length - 2)
+            : recentExpressionText.length;
+        const excerpt = room > 80 ? recentExpressionText.slice(-room) : '';
+        if (excerpt) {
+            blocks.minds = `${cooldownHeader}${excerpt}${cooldownFooter}`;
+            text = cleanString(Object.values(blocks).filter(Boolean).join('\n\n'), 120_000);
+        }
+    }
     const expressionBrain = continuity.selectedBrains.find(brain => (
         brain.caseStressPermitted && brain.pressuredCurrentMind && brain.expressionAnchor
     )) || continuity.selectedBrains.find(brain => (
