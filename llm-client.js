@@ -131,13 +131,13 @@ export function backgroundInFlightCount() {
     return serializationState.backgroundInFlight + serializationState.peerBackgroundInFlight;
 }
 
-export async function waitForBackgroundIdle(timeoutMs = 300_000) {
-    const deadline = Date.now() + Math.max(1_000, timeoutMs);
-    while (backgroundInFlightCount() > 0 && Date.now() < deadline) {
+export async function waitForBackgroundIdle() {
+    // The story waits until background work is actually done, then starts.
+    // Background requests carry their own request timeouts, so this wait is
+    // bounded by their completion - there is no separate cutoff that could
+    // let the story race an unfinished background pass onto the provider.
+    while (backgroundInFlightCount() > 0) {
         await new Promise(resolve => setTimeout(resolve, 500));
-    }
-    if (backgroundInFlightCount() > 0) {
-        console.warn(`[InnerLore] Background work still in flight after ${Math.round(timeoutMs / 1000)}s; the story request proceeds anyway.`);
     }
 }
 
