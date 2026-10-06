@@ -859,3 +859,92 @@ button.il-mv-card-toggle {
 @media (max-width: 700px) {
     #il_cast_bar { left: 48px; max-width: 70vw; }
 }
+
+/* InnerLore world map overlay. */
+#il_map_overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 31000;
+    background: rgba(8, 10, 14, 0.94);
+    display: flex;
+    flex-direction: column;
+}
+
+.il-map-header {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 10px 16px;
+    border-bottom: 1px solid #333;
+}
+
+.il-map-title { font-weight: 600; letter-spacing: 0.04em; color: #cfd8e6; }
+.il-map-hint { flex: 1; font-size: 0.8em; color: #7a8494; }
+
+.il-map-body { flex: 1; display: flex; min-height: 0; position: relative; }
+#il_map_svg { flex: 1; height: 100%; cursor: grab; touch-action: none; }
+#il_map_svg:active { cursor: grabbing; }
+
+.il-map-node { cursor: pointer; }
+.il-map-dot { fill: #9db4a4; stroke: #1b211c; stroke-width: 1.5; }
+.il-map-place .il-map-dot { fill: #c8b78a; }
+.il-map-discovered .il-map-dot { fill: #7fa9c9; }
+.il-map-region .il-map-dot { fill: none; stroke: #8fa3b8; stroke-dasharray: 3 3; }
+.il-map-label { fill: #d8dee8; font-size: 12px; font-family: serif; paint-order: stroke; stroke: rgba(10, 14, 18, 0.85); stroke-width: 3px; }
+.il-map-region .il-map-label { font-style: italic; letter-spacing: 2px; fill: #9fb0c2; }
+.il-map-link { stroke: rgba(140, 160, 180, 0.25); stroke-width: 1.2; stroke-dasharray: 4 5; }
+.il-map-npc-ring { fill: none; stroke: rgba(156, 142, 238, 0.6); stroke-width: 1.5; }
+.il-map-player-halo { fill: none; stroke: #8fb7e8; stroke-width: 2; opacity: 0.8; }
+.il-map-player-dot { fill: #8fb7e8; stroke: #e8f2ff; stroke-width: 2; }
+.il-map-player-label { fill: #cfe3f7; font-size: 13px; font-weight: 600; paint-order: stroke; stroke: rgba(10, 14, 18, 0.85); stroke-width: 3px; }
+
+.il-map-chips { display: flex; flex-wrap: wrap; gap: 3px; justify-content: center; }
+.il-map-chip {
+    font-size: 10px;
+    line-height: 1;
+    padding: 2px 5px;
+    border-radius: 6px;
+    border: 1px solid #5a5a66;
+    background: rgba(22, 22, 28, 0.85);
+    color: #b9bec8;
+    white-space: nowrap;
+}
+.il-map-chip.is-active { border-color: #8ee6a2; color: #b9f0c6; }
+.il-map-chip.is-recent { border-color: #f5d77d; color: #f0e2b0; }
+.il-map-chip.is-dormant { opacity: 0.55; }
+
+.il-map-detail {
+    width: 300px;
+    border-left: 1px solid #333;
+    background: rgba(16, 18, 24, 0.96);
+    padding: 14px 16px;
+    overflow-y: auto;
+    color: #c9cfd9;
+}
+
+.il-map-detail h3 { margin: 0 0 8px; color: #e2c99a; }
+.il-map-detail-summary { font-size: 0.9em; }
+.il-map-detail-state { font-size: 0.85em; color: #9fd6a8; }
+.il-map-detail-facts { margin: 8px 0; padding-left: 18px; font-size: 0.85em; color: #a8b0bc; }
+.il-map-detail-npcs ul { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.il-map-detail-npcs li { font-size: 0.85em; padding: 3px 8px; border-radius: 6px; border: 1px solid #444; }
+.il-map-detail-npcs li.is-active { border-color: #8ee6a2; color: #b9f0c6; }
+.il-map-detail-npcs li.is-recent { border-color: #f5d77d; color: #f0e2b0; }
+.il-map-detail-npcs li.is-dormant { opacity: 0.55; }
+
+.il-map-toggle {
+    pointer-events: auto;
+    display: inline-flex;
+    align-items: center;
+    padding: 4px 8px;
+    border-radius: 9px;
+    border: 1px solid #5a5a66;
+    background: rgba(22, 22, 28, 0.88);
+    color: #c8b78a;
+    cursor: pointer;
+}
+.il-map-toggle svg { width: 16px; height: 16px; display: block; }
+
+@media (max-width: 700px) {
+    .il-map-detail { position: absolute; right: 0; top: 0; bottom: 0; width: 72%; }
+}

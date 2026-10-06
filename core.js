@@ -785,10 +785,16 @@ export function parseCardSeedEntities(card) {
         const seed = {
             type,
             name,
-            importance: clamp(Number.parseInt(entry.importance, 10) || 50, 0, 100),
+            importance: clamp(Number.parseInt(entry.importance, 10) || 0, 0, 100) || 50,
             summary,
             description,
         };
+        const mapX = Number(entry.map?.x);
+        const mapY = Number(entry.map?.y);
+        if (Number.isFinite(mapX) && Number.isFinite(mapY)) {
+            seed.map = { x: mapX, y: mapY };
+            if (entry.map.region === true) seed.map.region = true;
+        }
         const aliases = uniqueStrings(
             operationArray(entry, 'aliases', 'aliases').filter(item => typeof item === 'string' && item.trim()),
             20,
@@ -1414,6 +1420,9 @@ function makeEntityRecord(operation, messageIndex) {
         history: [],
         currentState: '',
         spatial: type === 'location' ? { invariants: {} } : undefined,
+        map: type === 'location' && operation.map && Number.isFinite(Number(operation.map.x)) && Number.isFinite(Number(operation.map.y))
+            ? { x: Number(operation.map.x), y: Number(operation.map.y), ...(operation.map.region === true ? { region: true } : {}) }
+            : undefined,
         parentLocationId: '',
         parentLocationName: '',
         unresolved: [],
@@ -1810,6 +1819,9 @@ export function mergeEntityOperations(store, operations, options = {}) {
             record.description = description;
         }
         if (currentState) record.currentState = currentState;
+        if (operation.map && Number.isFinite(Number(operation.map.x)) && Number.isFinite(Number(operation.map.y))) {
+            record.map = { x: Number(operation.map.x), y: Number(operation.map.y), ...(operation.map.region === true ? { region: true } : {}) };
+        }
         if (ACTIVE_STATUSES.has(status)) record.status = status;
 
         if (type === 'location' && operation.spatial && typeof operation.spatial === 'object') {

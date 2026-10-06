@@ -31,6 +31,7 @@ import {
     uniqueStrings,
 } from './core.js?v=46';
 import { compileContext } from './context-compiler.js?v=5';
+import { createMapPanel } from './map-view.js?v=1';
 import {
     applyContextProfileToSettings,
     deriveContextBudgets,
@@ -125,7 +126,7 @@ const PROMPT_KEY = 'inner_lore_context';
 const TURN_CONTRACT_PROMPT_KEY = 'inner_lore_latest_turn_contract';
 const TRIGGER_DELIVERY_PROMPT_KEY = 'inner_lore_trigger_delivery';
 const DISPLAY_NAME = 'InnerLore';
-const EXTENSION_VERSION = '0.17.5';
+const EXTENSION_VERSION = '0.18.0';
 const LOG_PREFIX = '[InnerLore]';
 
 /**
@@ -1619,6 +1620,18 @@ function updateCastCards() {
     userCard.innerHTML = `${CAST_SVG.user}<span></span>`;
     userCard.querySelector('span').textContent = userName;
     bar.appendChild(userCard);
+    const mapToggle = document.createElement('button');
+    mapToggle.type = 'button';
+    mapToggle.className = 'il-map-toggle';
+    mapToggle.title = 'Open the InnerLore world map';
+    mapToggle.setAttribute('aria-label', 'Open world map');
+    mapToggle.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M9 4 3 6v14l6-2 6 2 6-2V4l-6 2-6-2z"/><path d="M9 4v14M15 6v14"/></svg>';
+    mapToggle.addEventListener('click', () => {
+        if (!runtime.mapPanel) runtime.mapPanel = createMapPanel();
+        runtime.mapPanel.refresh(getChatStore(), runtime.lastCompilation?.scene || null, cleanString(context().name1, 100) || 'You');
+        runtime.mapPanel.open();
+    });
+    bar.appendChild(mapToggle);
     for (const participant of participants) {
         const card = document.createElement('div');
         card.className = 'il-cast-card';
@@ -1861,6 +1874,9 @@ function updateInjection({ isContinue = false } = {}) {
         ctx.setExtensionPrompt(PROMPT_KEY, injection, 1, Number(settings.injectionDepth) || 0, false, 0);
         runtime.lastInjection = injection;
         updateCastCards();
+        if (runtime.mapPanel && !document.getElementById('il_map_overlay')?.classList.contains('displayNone')) {
+            runtime.mapPanel.refresh(promptStore, compilation?.scene || null, cleanString(ctx.name1, 100) || 'You');
+        }
         log('Prompt injection updated:', injection.length, 'characters');
     }
     // A continue extends an already-written reply. The latest-turn contract is

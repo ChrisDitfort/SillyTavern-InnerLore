@@ -88,3 +88,22 @@ test('seed operations merge into a fresh store as tracked locations', () => {
     assert.ok(vigil.summary.startsWith('A free city'));
     assert.ok(store.entities[entityId('location', 'The Maw of the First')]);
 });
+
+test('location seeds carry their world-map coordinates into the store', () => {
+    const card = {
+        data: { extensions: { inner_lore_seed: { entities: [
+            { type: 'location', name: 'Vigil Cross', importance: 80, summary: 'Ley-line city.', map: { x: 430, y: 340 } },
+            { type: 'location', name: 'The Heartlands', importance: 45, summary: 'Region.', map: { x: 450, y: 310, region: true } },
+            { type: 'location', name: 'No Coords', summary: 'Somewhere.' },
+        ] } } },
+    };
+    const seeds = parseCardSeedEntities(card);
+    const store = createEmptyStore('seed-map');
+    mergeEntityOperations(store, seeds, { minimumImportance: 0, maximumOperations: 10, messageIndex: -1 });
+    const vigil = store.entities[entityId('location', 'Vigil Cross')];
+    assert.deepEqual(vigil.map, { x: 430, y: 340 });
+    const region = store.entities[entityId('location', 'The Heartlands')];
+    assert.equal(region.map.region, true);
+    const bare = store.entities[entityId('location', 'No Coords')];
+    assert.equal(bare.map, undefined);
+});
