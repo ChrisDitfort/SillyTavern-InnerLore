@@ -860,31 +860,53 @@ button.il-mv-card-toggle {
     #il_cast_bar { left: 48px; max-width: 70vw; }
 }
 
-/* InnerLore world map overlay. */
+/* InnerLore world map overlay — mobile, fold, and desktop aware. */
 #il_map_overlay {
     position: fixed;
     inset: 0;
+    width: 100vw;
+    height: 100vh;
+    height: 100dvh;
     z-index: 31000;
-    background: rgba(8, 10, 14, 0.94);
+    background: rgba(8, 10, 14, 0.96);
     display: flex;
     flex-direction: column;
+    padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+    box-sizing: border-box;
 }
 
 .il-map-header {
     display: flex;
     align-items: center;
-    gap: 14px;
-    padding: 10px 16px;
+    gap: 10px;
+    padding: 8px 12px;
     border-bottom: 1px solid #333;
+    flex-wrap: wrap;
+    min-height: 44px;
 }
 
-.il-map-title { font-weight: 600; letter-spacing: 0.04em; color: #cfd8e6; }
-.il-map-hint { flex: 1; font-size: 0.8em; color: #7a8494; }
+.il-map-title { font-weight: 600; letter-spacing: 0.04em; color: #cfd8e6; white-space: nowrap; }
+.il-map-hint { flex: 1 1 160px; font-size: 0.75em; color: #7a8494; min-width: 140px; }
 
-.il-map-body { flex: 1; display: flex; min-height: 0; position: relative; }
-#il_map_svg { flex: 1; height: 100%; cursor: grab; touch-action: none; }
+.il-map-zoom { display: inline-flex; gap: 4px; }
+.il-map-zoom-btn {
+    width: 34px; height: 34px;
+    border-radius: 8px;
+    border: 1px solid #5a5a66;
+    background: rgba(22, 22, 28, 0.9);
+    color: #c8b78a;
+    font-size: 16px;
+    line-height: 1;
+    cursor: pointer;
+    display: inline-flex; align-items: center; justify-content: center;
+}
+.il-map-close { min-height: 34px; }
+
+.il-map-body { flex: 1 1 auto; display: flex; min-height: 0; position: relative; }
+#il_map_svg { flex: 1 1 auto; width: 100%; height: 100%; min-width: 0; cursor: grab; touch-action: none; display: block; }
 #il_map_svg:active { cursor: grabbing; }
 
+.il-map-hit { fill: transparent; }
 .il-map-node { cursor: pointer; }
 .il-map-dot { fill: #9db4a4; stroke: #1b211c; stroke-width: 1.5; }
 .il-map-place .il-map-dot { fill: #c8b78a; }
@@ -898,7 +920,7 @@ button.il-mv-card-toggle {
 .il-map-player-dot { fill: #8fb7e8; stroke: #e8f2ff; stroke-width: 2; }
 .il-map-player-label { fill: #cfe3f7; font-size: 13px; font-weight: 600; paint-order: stroke; stroke: rgba(10, 14, 18, 0.85); stroke-width: 3px; }
 
-.il-map-chips { display: flex; flex-wrap: wrap; gap: 3px; justify-content: center; }
+.il-map-chips { display: flex; flex-wrap: wrap; gap: 3px; justify-content: center; pointer-events: none; }
 .il-map-chip {
     font-size: 10px;
     line-height: 1;
@@ -915,11 +937,13 @@ button.il-mv-card-toggle {
 
 .il-map-detail {
     width: 300px;
+    max-width: 46vw;
     border-left: 1px solid #333;
     background: rgba(16, 18, 24, 0.96);
     padding: 14px 16px;
     overflow-y: auto;
     color: #c9cfd9;
+    box-sizing: border-box;
 }
 
 .il-map-detail h3 { margin: 0 0 8px; color: #e2c99a; }
@@ -945,6 +969,25 @@ button.il-mv-card-toggle {
 }
 .il-map-toggle svg { width: 16px; height: 16px; display: block; }
 
-@media (max-width: 700px) {
-    .il-map-detail { position: absolute; right: 0; top: 0; bottom: 0; width: 72%; }
+/* Narrow portrait screens (phones, fold inner portrait): the detail panel
+   becomes a bottom sheet and the header sheds its hint text. */
+@media (max-width: 720px), (orientation: portrait) and (max-width: 950px) {
+    .il-map-hint { display: none; }
+    .il-map-title { font-size: 0.92em; }
+    .il-map-detail {
+        position: absolute;
+        left: 0; right: 0; bottom: 0;
+        width: auto;
+        max-width: none;
+        max-height: 46%;
+        border-left: none;
+        border-top: 1px solid #333;
+        border-radius: 14px 14px 0 0;
+    }
+}
+
+/* Fold cover screen and very small viewports: compact everything. */
+@media (max-width: 400px) {
+    .il-map-header { gap: 6px; padding: 6px 8px; }
+    .il-map-zoom-btn { width: 30px; height: 30px; }
 }

@@ -174,6 +174,7 @@ function renderModel(container, model, callbacks) {
         const chips = npcs.map(chip => `<span class="il-map-chip ${chip.active ? 'is-active' : chip.recent ? 'is-recent' : 'is-dormant'}">${svgEscape(chip.name)}</span>`).join('');
         const isPlayerHere = model.player?.node === node;
         return `<g class="${classes.join(' ')}" data-node-id="${svgEscape(node.id)}" transform="translate(${node.x}, ${node.y})">
+            <circle class="il-map-hit" r="26"/>
             ${isPlayerHere ? `<circle class="il-map-player-halo" r="26"/>` : ''}
             <circle class="il-map-dot" r="${node.region ? 5 : 9}"/>
             ${!node.region && node.npcs.length ? `<circle class="il-map-npc-ring" r="14"/>` : ''}
@@ -224,7 +225,12 @@ export function createMapPanel() {
         overlay.innerHTML = `
             <div class="il-map-header">
                 <span class="il-map-title">InnerLore — world map</span>
-                <span class="il-map-hint">drag to pan · wheel to zoom · click a place for details</span>
+                <span class="il-map-hint">drag to pan · pinch or wheel to zoom · tap a place for details</span>
+                <span class="il-map-zoom">
+                    <button type="button" class="il-map-zoom-btn" data-zoom="out" aria-label="Zoom out">−</button>
+                    <button type="button" class="il-map-zoom-btn" data-zoom="reset" aria-label="Reset view">⌖</button>
+                    <button type="button" class="il-map-zoom-btn" data-zoom="in" aria-label="Zoom in">+</button>
+                </span>
                 <button type="button" class="il-map-close menu_button">Close</button>
             </div>
             <div class="il-map-body">
@@ -235,24 +241,70 @@ export function createMapPanel() {
         svg = overlay.querySelector('#il_map_svg');
         detail = overlay.querySelector('.il-map-detail');
         overlay.querySelector('.il-map-close').addEventListener('click', close);
+        const pointers = new Map();
+        let pinch = null;
         svg.addEventListener('pointerdown', event => {
-            drag = { x: event.clientX, y: event.clientY, viewX: view.x, viewY: view.y };
+            pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
             svg.setPointerCapture(event.pointerId);
+            if (pointers.size === 1) {
+                drag = { x: event.clientX, y: event.clientY, viewX: view.x, viewY: view.y };
+            } else if (pointers.size === 2) {
+                const [a, b] = [...pointers.values()];
+                drag = null;
+                pinch = {
+                    distance: Math.hypot(a.x - b.x, a.y - b.y),
+                    scale: view.scale,
+                    cx: (a.x + b.x) / 2, cy: (a.y + b.y) / 2,
+                    viewX: view.x, viewY: view.y,
+                };
+            }
         });
         svg.addEventListener('pointermove', event => {
-            if (!drag) return;
-            const rect = svg.getBoundingClientRect();
-            const factor = (MAP_VIEWBOX.width / rect.width) / view.scale;
-            view.x = drag.viewX - (event.clientX - drag.x) * factor;
-            view.y = drag.viewY - (event.clientY - drag.y) * factor;
-            applyView();
+            if (!pointers.has(event.pointerId)) return;
+            pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+            if (pinch && pointers.size >= 2) {
+                const [a, b] = [...pointers.values()];
+                const distance = Math.hypot(a.x - b.x, a.y - b.y);
+                const rect = svg.getBoundingClientRect();
+                const nextScale = Math.min(6, Math.max(0.7, pinch.scale * (distance / Math.max(1, pinch.distance))));
+                // Keep the pinch midpoint anchored while zooming.
+                const factor = (MAP_VIEWBOX.width / rect.width);
+                const cxMap = pinch.viewX + (pinch.cx - rect.left) * factor / view.scale;
+                const cyMap = pinch.viewY + (pinch.cy - rect.top) * (MAP_VIEWBOX.height / rect.height) / view.scale;
+                view.scale = nextScale;
+                view.x = cxMap - (pinch.cx - rect.left) * factor / nextScale;
+                view.y = cyMap - (pinch.cy - rect.top) * (MAP_VIEWBOX.height / rect.height) / nextScale;
+                applyView();
+            } else if (drag) {
+                const rect = svg.getBoundingClientRect();
+                const factor = (MAP_VIEWBOX.width / rect.width) / view.scale;
+                view.x = drag.viewX - (event.clientX - drag.x) * factor;
+                view.y = drag.viewY - (event.clientY - drag.y) * factor;
+                applyView();
+            }
         });
-        svg.addEventListener('pointerup', () => { drag = null; });
+        const releasePointer = event => {
+            pointers.delete(event.pointerId);
+            if (pointers.size < 2) pinch = null;
+            if (pointers.size === 0) drag = null;
+        };
+        svg.addEventListener('pointerup', releasePointer);
+        svg.addEventListener('pointercancel', releasePointer);
         svg.addEventListener('wheel', event => {
             event.preventDefault();
             view.scale = Math.min(6, Math.max(0.7, view.scale * (event.deltaY < 0 ? 1.15 : 0.87)));
             applyView();
         }, { passive: false });
+        for (const button of overlay.querySelectorAll('.il-map-zoom-btn')) {
+            button.addEventListener('click', () => {
+                if (button.dataset.zoom === 'reset') {
+                    view = { x: 0, y: 0, scale: 1 };
+                } else {
+                    view.scale = Math.min(6, Math.max(0.7, view.scale * (button.dataset.zoom === 'in' ? 1.3 : 0.77)));
+                }
+                applyView();
+            });
+        }
     };
 
     function showDetail(node) {
@@ -272,7 +324,10 @@ export function createMapPanel() {
 
     function refresh(store, scene, playerName) {
         ensureOverlay();
-        if (!store) return;
+        if (!store) {
+            if (svg) svg.innerHTML = '<text x="500" y="350" text-anchor="middle" fill="#8fa3b8" font-size="18" font-family="serif" font-style="italic">World state is still loading…</text>';
+            return;
+        }
         const chat = (typeof window !== 'undefined' && window.SillyTavern?.getContext?.()?.chat) || [];
         const enrichedScene = { ...scene, chatLength: chat.length };
         lastModel = buildMapModel(store, enrichedScene, playerName);

@@ -126,7 +126,7 @@ const PROMPT_KEY = 'inner_lore_context';
 const TURN_CONTRACT_PROMPT_KEY = 'inner_lore_latest_turn_contract';
 const TRIGGER_DELIVERY_PROMPT_KEY = 'inner_lore_trigger_delivery';
 const DISPLAY_NAME = 'InnerLore';
-const EXTENSION_VERSION = '0.18.0';
+const EXTENSION_VERSION = '0.18.2';
 const LOG_PREFIX = '[InnerLore]';
 
 /**
@@ -1104,6 +1104,7 @@ async function loadChatStore() {
         if (generation !== runtime.storageLoadGeneration || chatId !== currentChatId()) return null;
 
         runtime.store = normalizeStore(result.store, chatId);
+        runtime.committedEntityCount = Object.keys(runtime.store?.entities || {}).length;
         runtime.storeChatId = chatId;
         runtime.storageWorldId = result.worldId;
         runtime.storageRevision = result.revision;
@@ -1153,13 +1154,42 @@ async function loadChatStore() {
     }
 }
 
-async function saveChatStore() {
+/** Re-load the server's committed store for the current chat, replacing a
+ *  stale in-memory snapshot instead of committing it. */
+async function reloadCurrentChatStore() {
+    try {
+        const chatId = currentChatId();
+        if (!chatId || !runtime.storageWorldId) return;
+        const loaded = await activeStorageClient().load(runtime.storageWorldId);
+        if (loaded && loaded.chatId === chatId) {
+            runtime.store = normalizeStore(loaded, chatId);
+            runtime.committedEntityCount = Object.keys(runtime.store?.entities || {}).length;
+            if (Number.isFinite(loaded.revision)) runtime.storageRevision = loaded.revision;
+            updateUI();
+        }
+    } catch (error) {
+        console.error('[InnerLore] Could not reload the committed store after blocking a shrinking save:', error);
+    }
+}
+
+async function saveChatStore(options = {}) {
     const requestedChatId = currentChatId();
     if (!requestedChatId || !runtime.storageReady || runtime.storeChatId !== requestedChatId) return;
     const operation = async () => {
         if (!runtime.storageReady || runtime.storeChatId !== requestedChatId || !runtime.storageWorldId) return;
         const worldId = runtime.storageWorldId;
         const expectedRevision = runtime.storageRevision;
+        // Shrink guard: a stale in-memory store captured before seeding or a
+        // load must never silently replace a fuller committed world. Real
+        // deletions pass allowEntityShrink explicitly (entity editor).
+        const liveCount = Object.keys(runtime.store?.entities || {}).length;
+        if (!options.allowEntityShrink
+            && Number.isFinite(runtime.committedEntityCount)
+            && liveCount < Math.floor(runtime.committedEntityCount * 0.7)) {
+            console.warn(`[InnerLore] Blocked a save that would shrink the world from ${runtime.committedEntityCount} to ${liveCount} entities (stale store snapshot); reload your chat state instead of losing canon.`);
+            await reloadCurrentChatStore();
+            return;
+        }
         const snapshot = clone(runtime.store);
         const branch = narrativeBranchDescriptor();
         const scene = narrativeScene(runtime.lastCompilation?.scene);
@@ -1171,6 +1201,7 @@ async function saveChatStore() {
         });
         if (runtime.storeChatId === requestedChatId && runtime.storageWorldId === worldId) {
             runtime.storageRevision = result.revision;
+            runtime.committedEntityCount = Object.keys(runtime.store?.entities || {}).length;
             runtime.storageSnapshotHash = result.snapshotHash;
             runtime.preparedContext = null;
             const pointer = context().chatMetadata?.[MODULE_KEY];
@@ -1628,8 +1659,18 @@ function updateCastCards() {
     mapToggle.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M9 4 3 6v14l6-2 6 2 6-2V4l-6 2-6-2z"/><path d="M9 4v14M15 6v14"/></svg>';
     mapToggle.addEventListener('click', () => {
         if (!runtime.mapPanel) runtime.mapPanel = createMapPanel();
-        runtime.mapPanel.refresh(getChatStore(), runtime.lastCompilation?.scene || null, cleanString(context().name1, 100) || 'You');
         runtime.mapPanel.open();
+        // The store attach can lag a chat change by a moment; retry briefly
+        // instead of rendering an empty map.
+        const renderMap = attempt => {
+            const store = getChatStore();
+            if (store) {
+                runtime.mapPanel.refresh(store, runtime.lastCompilation?.scene || null, cleanString(context().name1, 100) || 'You');
+                return;
+            }
+            if (attempt < 6) setTimeout(() => renderMap(attempt + 1), 1_000);
+        };
+        renderMap(0);
     });
     bar.appendChild(mapToggle);
     for (const participant of participants) {
