@@ -1117,6 +1117,14 @@ async function loadChatStore() {
         runtime.store = normalizeStore(result.store, chatId);
         runtime.committedEntityCount = Object.keys(runtime.store?.entities || {}).length;
         runtime.storeChatId = chatId;
+        // Self-healing seeds: a greeting-only chat re-seeds from its card on
+        // every open. The merge is idempotent (keyed by entity name), so a
+        // creation-time glitch that left the world empty or partial is
+        // repaired the moment the chat is opened, without duplicating canon.
+        if (Array.isArray(ctx.chat) && ctx.chat.length === 1 && !ctx.chat[0]?.is_user && !ctx.chat[0]?.is_system) {
+            const seededNow = seedNewStoreFromCard(runtime.store);
+            if (seededNow > 0) void saveChatStore({ allowEntityShrink: true }).catch(() => { /* heal retries on next open */ });
+        }
         runtime.storageWorldId = result.worldId;
         runtime.storageRevision = result.revision;
         runtime.storageSnapshotHash = result.snapshotHash;
@@ -3001,7 +3009,8 @@ function getCardContext() {
 function getCardSeedEntities() {
     try {
         const ctx = context();
-        const card = ctx.characters?.[ctx.characterId];
+        const card = ctx.characters?.[ctx.characterId]
+            || (ctx.name2 ? ctx.characters?.find(candidate => candidate?.name === ctx.name2) : null);
         return parseCardSeedEntities(card);
     } catch (error) {
         log('Could not read card seed entities:', error);
