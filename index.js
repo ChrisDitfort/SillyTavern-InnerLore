@@ -126,7 +126,7 @@ const PROMPT_KEY = 'inner_lore_context';
 const TURN_CONTRACT_PROMPT_KEY = 'inner_lore_latest_turn_contract';
 const TRIGGER_DELIVERY_PROMPT_KEY = 'inner_lore_trigger_delivery';
 const DISPLAY_NAME = 'InnerLore';
-const EXTENSION_VERSION = '0.18.2';
+const EXTENSION_VERSION = '0.18.3';
 const LOG_PREFIX = '[InnerLore]';
 
 /**
@@ -1066,7 +1066,7 @@ async function loadChatStore() {
 
     const settings = getSettings();
     const metadataValue = ctx.chatMetadata?.[MODULE_KEY];
-    const metadataPointer = isInnerLoreStoragePointer(metadataValue) ? metadataValue : null;
+    let metadataPointerValue = isInnerLoreStoragePointer(metadataValue) ? metadataValue : null;
     const registeredWorldId = settings.storageRegistry[chatId];
     const registryPointer = registeredWorldId ? {
         backend: 'airpg-storage',
@@ -1077,16 +1077,27 @@ async function loadChatStore() {
     // A mismatched metadata pointer signals a real SillyTavern branch and must
     // win over the registry so the server can fork the source world. But
     // SillyTavern also clones chat metadata onto a brand-new chat started from
-    // an open one: a greeting-only chat with an inherited pointer is a fresh
-    // start, not a branch, and must create (and card-seed) its own world.
+    // an open one. New worlds are strictly independent of old worlds: a
+    // greeting-only chat never inherits InnerLore state - the cloned pointer
+    // is deleted outright so no later path can fork, reuse, or compare against
+    // the previous world - and the chat creates (and card-seeds) its own.
     const greetingOnlyChat = Array.isArray(ctx.chat)
         && ctx.chat.length === 1
         && !ctx.chat[0]?.is_user
         && !ctx.chat[0]?.is_system;
-    const pointer = !greetingOnlyChat && metadataPointer?.chatId && metadataPointer.chatId !== chatId
-        ? metadataPointer
-        : (registryPointer || metadataPointer);
-    const legacyStore = isLegacyInnerLoreStore(metadataValue) ? metadataValue : null;
+    if (greetingOnlyChat && metadataPointer?.chatId && metadataPointer.chatId !== chatId) {
+        try {
+            delete ctx.chatMetadata[MODULE_KEY];
+            ctx.saveChat?.();
+        } catch (error) {
+            console.error('[InnerLore] Could not strip inherited world state from a new chat:', error);
+        }
+        metadataPointerValue = null;
+    }
+    const pointer = !greetingOnlyChat && metadataPointerValue?.chatId && metadataPointerValue.chatId !== chatId
+        ? metadataPointerValue
+        : (registryPointer || metadataPointerValue);
+    const legacyStore = metadataPointerValue && isLegacyInnerLoreStore(metadataValue) ? metadataValue : null;
     const initialStore = createInitialChatStore(chatId, legacyStore);
     // Chats with existing SQLite worlds always keep using the server backend;
     // everything else follows the configured backend (embedded = standalone).

@@ -126,6 +126,10 @@ History rides inside the state macro as part of the packet, and SillyTavern's ow
 
 There is no off switch; only the shares, the safety margin, and the history turn cap are configurable, from the InnerLore panel's context section.
 
+## World independence
+
+Every chat owns a world of its own, keyed deterministically to the chat id. New worlds are strictly independent of old worlds: a brand-new chat (greeting-only) never inherits InnerLore state from the chat it was started from - SillyTavern's cloned chat metadata is stripped of the previous world's pointer at load, so nothing can fork, reuse, or compare against it. The chat then creates its own world and card-seeds it. Genuine branches - ST's branch/checkpoint feature and swipes, which clone the full message history - still fork the source world by design. A save that would shrink a world below 70% of its committed entity count is blocked and the server state reloaded, so a stale snapshot in any tab cannot silently destroy a seeded world.
+
 ## Card-declared seed entities
 
 A character card can pre-populate a brand-new chat's world with canon entities — its locations, most usefully — instead of waiting for the curator to meet each place in play. Declare them on the card at `data.extensions.inner_lore_seed` (or `extensions.inner_lore_seed` for v1-style cards) as either an array or `{ "entities": [...] }`:
