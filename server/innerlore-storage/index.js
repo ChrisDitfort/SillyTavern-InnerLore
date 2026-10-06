@@ -155,11 +155,16 @@ export function init(router, args) {
 
         const snapshot = JSON.stringify(store);
         const attempt = (() => {
+            // Defense in depth: clear a leaked transaction instead of failing.
+            try { db.exec('ROLLBACK'); } catch { /* no transaction open */ }
             db.exec('BEGIN');
             try {
             const row = db.prepare('SELECT revision FROM stores WHERE world_id = ?').get(worldId);
             const currentRevision = row ? row.revision : 0;
             if (expectedRevision !== null && expectedRevision !== currentRevision) {
+                // Returning inside the transaction would leak an open BEGIN
+                // and wedge every later write on this connection.
+                db.exec('ROLLBACK');
                 return { conflict: currentRevision };
             }
             const nextRevision = currentRevision + 1;
@@ -204,6 +209,7 @@ export function init(router, args) {
         if (!targetId || !targetChatId) return sendError(response, 400, 'targetWorldId and targetChatId are required', 'INVALID_FORK');
         const source = db.prepare('SELECT * FROM stores WHERE world_id = ?').get(sourceId);
         if (!source) return sendError(response, 404, 'Source store not found', 'STORE_NOT_FOUND');
+        try { db.exec('ROLLBACK'); } catch { /* no transaction open */ }
         db.exec('BEGIN');
         try {
             db.prepare(`INSERT OR IGNORE INTO worlds (id, name, metadata) VALUES (?, ?, ?)`)
