@@ -126,7 +126,7 @@ const PROMPT_KEY = 'inner_lore_context';
 const TURN_CONTRACT_PROMPT_KEY = 'inner_lore_latest_turn_contract';
 const TRIGGER_DELIVERY_PROMPT_KEY = 'inner_lore_trigger_delivery';
 const DISPLAY_NAME = 'InnerLore';
-const EXTENSION_VERSION = '0.18.3';
+const EXTENSION_VERSION = '0.18.4';
 const LOG_PREFIX = '[InnerLore]';
 
 /**
@@ -1085,7 +1085,7 @@ async function loadChatStore() {
         && ctx.chat.length === 1
         && !ctx.chat[0]?.is_user
         && !ctx.chat[0]?.is_system;
-    if (greetingOnlyChat && metadataPointer?.chatId && metadataPointer.chatId !== chatId) {
+    if (greetingOnlyChat && metadataPointerValue?.chatId && metadataPointerValue.chatId !== chatId) {
         try {
             delete ctx.chatMetadata[MODULE_KEY];
             ctx.saveChat?.();
