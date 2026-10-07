@@ -127,7 +127,7 @@ const PROMPT_KEY = 'inner_lore_context';
 const TURN_CONTRACT_PROMPT_KEY = 'inner_lore_latest_turn_contract';
 const TRIGGER_DELIVERY_PROMPT_KEY = 'inner_lore_trigger_delivery';
 const DISPLAY_NAME = 'InnerLore';
-const EXTENSION_VERSION = '0.22.2';
+const EXTENSION_VERSION = '0.22.3';
 const LOG_PREFIX = '[InnerLore]';
 
 /**
@@ -5695,6 +5695,7 @@ function registerEvents() {
             runtime.storyDepartedAt = Date.now();
             runtime.storyRequestInFlight = true;
             runtime.storyRequestInFlightAt = Date.now();
+            runtime.storyClaimIsQuiet = generationType === 'quiet';
             runtime.announceStoryState?.(true);
             if (!runtime.derivedContext) return;
             // SillyTavern 1.18 passes { chat }; older builds passed { messages }.
@@ -5725,6 +5726,14 @@ function registerEvents() {
                 if (!keep.has(i)) messages.splice(i, 1);
             }
             log(`History bypass: delivering history once via the state macro (${removed} rendered turns removed from this request).`);
+        });
+    }
+    if (events.GENERATION_ENDED) {
+        eventSource.on(events.GENERATION_ENDED, () => {
+            if (runtime.storyRequestInFlight) {
+                runtime.storyRequestInFlight = false;
+                runtime.announceStoryState?.(false);
+            }
         });
     }
     if (events.GENERATION_STOPPED) {
@@ -5908,7 +5917,8 @@ function initializeServerStateAfterAppReady(ctx) {
         // background work - that ordering is the whole point). Peer stories
         // still block, with a staleness expiry so a dead tab cannot wedge it.
         const claimFresh = () => Boolean(runtime.storyRequestInFlight)
-            && Date.now() - (runtime.storyRequestInFlightAt || 0) < 480_000;
+            && Date.now() - (runtime.storyRequestInFlightAt || 0) < (
+                runtime.storyClaimIsQuiet ? 90_000 : 480_000);
         while (!signal?.aborted && (claimFresh()
             || Boolean(runtime.peerStoryActiveAt && Date.now() - runtime.peerStoryActiveAt < 120_000))) {
             await new Promise(resolve => setTimeout(resolve, 1_000));
