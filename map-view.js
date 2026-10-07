@@ -532,18 +532,41 @@ export function createMinimap(openFullMap) {
 
     return {
         toggle() {
-            ensure();
+            try {
+                ensure();
+            } catch (error) {
+                console.error('[InnerLore] Could not create the location panel:', error);
+                (globalThis.toastr?.error?.('InnerLore could not create the location panel: ' + (error?.message || error), 'InnerLore'));
+                return false;
+            }
             const nowVisible = element.classList.toggle('displayNone') === false;
             hiddenByUser = !nowVisible;
             try {
                 globalThis.localStorage?.setItem('innerlore:minimap:hidden', nowVisible ? '0' : '1');
             } catch { /* no storage */ }
+            (globalThis.toastr?.info?.(nowVisible ? 'Location panel shown' : 'Location panel hidden', 'InnerLore', { timeOut: 2_500 }));
             return nowVisible;
         },
         refresh(store, scene) {
-            ensure();
-            if (!store || hiddenByUser) {
+            try {
+                ensure();
+            } catch (error) {
+                console.error('[InnerLore] Could not create the location panel:', error);
+                return;
+            }
+            if (hiddenByUser) {
                 element.classList.add('displayNone');
+                return;
+            }
+            // Show the shell even before the store attaches: the scene's
+            // location name is enough for the panel to be useful, and a
+            // visible shell prevents refresh cycles from hiding a panel the
+            // user just toggled on.
+            element.classList.remove('displayNone');
+            if (!store) {
+                const fallback = scene?.location?.name;
+                element.querySelector('.il-minimap-loc').textContent = fallback || 'Loading world…';
+                element.querySelector('.il-minimap-body').innerHTML = '<div class="il-minimap-near is-empty">World state is loading…</div>';
                 return;
             }
             const keyOf = name => String(name || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
