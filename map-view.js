@@ -214,8 +214,25 @@ export function buildSceneModel(store, scene, playerName = '', chatLength = 1_00
     return model;
 }
 
+/** Scene-view backdrop: a focused spotlight instead of the continent art. */
+function sceneArt() {
+    return `
+<defs>
+    <radialGradient id="il-scene-spot" cx="50%" cy="46%" r="65%">
+        <stop offset="0%" stop-color="#2a3140"/>
+        <stop offset="55%" stop-color="#171d28"/>
+        <stop offset="100%" stop-color="#0b0f16"/>
+    </radialGradient>
+</defs>
+<rect x="0" y="0" width="1000" height="700" fill="url(#il-scene-spot)"/>
+<circle cx="500" cy="340" r="240" fill="none" stroke="#3a4356" stroke-width="1.5" stroke-dasharray="2 6" opacity="0.8"/>
+<circle cx="500" cy="340" r="330" fill="none" stroke="#2c3342" stroke-width="1" stroke-dasharray="2 8" opacity="0.6"/>
+<text x="500" y="668" text-anchor="middle" fill="#5f6a7a" font-size="14" font-family="serif" font-style="italic">current scene</text>`;
+}
+
 /** Render the map model into the overlay's SVG element. */
-function renderModel(container, model, callbacks) {
+function renderModel(container, model, callbacks, options = {}) {
+    const sceneMode = options.scene === true;
     const links = [];
     for (const node of model.nodes) {
         if (!node.parent) continue;
@@ -225,7 +242,11 @@ function renderModel(container, model, callbacks) {
         if (parent && !parent.region) links.push([node, parent]);
     }
     const linkMarkup = links.map(([node, parent]) =>
-        `<line class="il-map-link" x1="${node.x}" y1="${node.y}" x2="${parent.x}" y2="${parent.y}"/>`).join('');
+        `<line class="il-map-link${sceneMode ? ' il-scene-link' : ''}" x1="${node.x}" y1="${node.y}" x2="${parent.x}" y2="${parent.y}"/>`).join('')
+        + (sceneMode
+            ? model.nodes.filter(node => node !== model.nodes[0])
+                .map(node => `<line class="il-scene-link" x1="500" y1="340" x2="${node.x}" y2="${node.y}"/>`).join('')
+            : '');
 
     const nodeMarkup = model.nodes.map(node => {
         const classes = ['il-map-node', node.region ? 'il-map-region' : 'il-map-place'];
@@ -236,7 +257,7 @@ function renderModel(container, model, callbacks) {
         return `<g class="${classes.join(' ')}" data-node-id="${svgEscape(node.id)}" transform="translate(${node.x}, ${node.y})">
             <circle class="il-map-hit" r="26"/>
             ${isPlayerHere ? `<circle class="il-map-player-halo" r="26"/>` : ''}
-            <circle class="il-map-dot" r="${node.region ? 5 : 9}"/>
+            <circle class="il-map-dot${sceneMode ? ' il-scene-dot' : ''}" r="${sceneMode ? (node === model.nodes[0] ? 14 : node.region ? 6 : 11) : (node.region ? 5 : 9)}"/>
             ${!node.region && node.npcs.length ? `<circle class="il-map-npc-ring" r="14"/>` : ''}
             <text class="il-map-label" y="${node.region ? -10 : -16}" text-anchor="middle">${svgEscape(node.name)}</text>
             ${chips ? `<foreignObject x="-90" y="10" width="180" height="52"><div class="il-map-chips" xmlns="http://www.w3.org/1999/xhtml">${chips}</div></foreignObject>` : ''}
@@ -250,7 +271,12 @@ function renderModel(container, model, callbacks) {
         </g>`
         : '';
 
-    container.innerHTML = `${worldArt()}${linkMarkup}${nodeMarkup}${playerMarkup}`;
+    if (sceneMode && model.nodes.length <= 2) {
+        const hint = `<text x="500" y="560" text-anchor="middle" fill="#8fa3b8" font-size="16" font-family="serif" font-style="italic">No discovered places inside yet - explore to reveal them</text>`;
+        container.innerHTML = `${sceneArt()}${linkMarkup}${nodeMarkup}${playerMarkup}${hint}`;
+    } else {
+        container.innerHTML = `${(sceneMode ? sceneArt() : worldArt())}${linkMarkup}${nodeMarkup}${playerMarkup}`;
+    }
     for (const element of container.querySelectorAll('[data-node-id]')) {
         element.addEventListener('click', () => {
             const node = model.nodes.find(candidate => candidate.id === element.dataset.nodeId);
@@ -276,6 +302,10 @@ export function createMapPanel() {
     const applyView = () => {
         if (!svg) return;
         const { width, height } = MAP_VIEWBOX;
+        if (activeView === 'scene') {
+            svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+            return;
+        }
         svg.setAttribute('viewBox', `${view.x} ${view.y} ${width / view.scale} ${height / view.scale}`);
     };
 
@@ -410,7 +440,7 @@ export function createMapPanel() {
         lastModel = activeView === 'scene'
             ? buildSceneModel(store, enrichedScene, playerName, chat.length)
             : buildMapModel(store, enrichedScene, playerName);
-        renderModel(svg, lastModel, { onSelect: showDetail });
+        renderModel(svg, lastModel, { onSelect: showDetail }, { scene: activeView === 'scene' });
         applyView();
     }
 

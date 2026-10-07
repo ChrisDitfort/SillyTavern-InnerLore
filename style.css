@@ -1009,7 +1009,7 @@ button.il-mv-card-toggle {
 #il_minimap {
     position: fixed;
     right: 12px;
-    bottom: 86px;
+    bottom: calc(env(safe-area-inset-bottom, 0px) + 96px);
     z-index: 29000;
     width: 190px;
     border: 1px solid #5a5a66;
@@ -1040,5 +1040,11 @@ button.il-mv-card-toggle {
 .il-minimap-dots i.is-on { background: #8ee6a2; box-shadow: 0 0 6px rgba(142, 230, 162, 0.7); }
 
 @media (max-width: 720px) {
-    #il_minimap { width: 160px; right: 8px; bottom: 96px; }
+    #il_minimap { width: 156px; right: 8px; bottom: calc(env(safe-area-inset-bottom, 0px) + 108px); font-size: 0.75em; }
 }
+
+/* Scene view presentation. */
+.il-scene-link { stroke: rgba(156, 142, 238, 0.4); stroke-width: 1.6; stroke-dasharray: none; }
+.il-scene-dot { stroke-width: 2.5; }
+.il-map-node .il-scene-dot { filter: drop-shadow(0 0 6px rgba(200, 183, 138, 0.45)); }
+svg .il-map-label { transition: none; }
