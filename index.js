@@ -126,7 +126,7 @@ const PROMPT_KEY = 'inner_lore_context';
 const TURN_CONTRACT_PROMPT_KEY = 'inner_lore_latest_turn_contract';
 const TRIGGER_DELIVERY_PROMPT_KEY = 'inner_lore_trigger_delivery';
 const DISPLAY_NAME = 'InnerLore';
-const EXTENSION_VERSION = '0.20.6';
+const EXTENSION_VERSION = '0.20.7';
 const LOG_PREFIX = '[InnerLore]';
 
 /**
@@ -1221,6 +1221,7 @@ async function saveChatStore(options = {}) {
         if (runtime.storeChatId === requestedChatId && runtime.storageWorldId === worldId) {
             runtime.storageRevision = result.revision;
             runtime.committedEntityCount = Object.keys(runtime.store?.entities || {}).length;
+            updateCastCards();
             runtime.storageSnapshotHash = result.snapshotHash;
             runtime.preparedContext = null;
             const pointer = context().chatMetadata?.[MODULE_KEY];
@@ -1564,7 +1565,7 @@ async function prepareServerContext({ force = false } = {}) {
  *  a stale stylesheet can never unstyle the bar. Night-theme palette. */
 const DOCK_STYLE_ID = 'il_dock_styles';
 function ensureDockStyles() {
-    if (typeof document === 'undefined') return;
+    if (typeof document === 'undefined' || typeof document.createElement !== 'function') return;
     if (document.getElementById(DOCK_STYLE_ID)) return;
     const style = document.createElement('style');
     style.id = DOCK_STYLE_ID;
@@ -1731,6 +1732,7 @@ function showEntityCard(name, focus = 'details') {
 }
 
 function updateCastCards() {
+    if (typeof document === 'undefined' || typeof document.createElement !== 'function') return;
     ensureDockStyles();
     const bar = castBarElement();
     bar.innerHTML = '';
@@ -2107,12 +2109,13 @@ function updateInjection({ isContinue = false } = {}) {
         // makes it harder for long context to wash out private state and canon.
         ctx.setExtensionPrompt(PROMPT_KEY, injection, 1, Number(settings.injectionDepth) || 0, false, 0);
         runtime.lastInjection = injection;
-        updateCastCards();
-        runtime.minimap?.refresh(promptStore, compilation?.scene || null);
-        if (runtime.mapPanel && !document.getElementById('il_map_overlay')?.classList.contains('displayNone')) {
-            runtime.mapPanel.refresh(promptStore, compilation?.scene || null, cleanString(ctx.name1, 100) || 'You');
-        }
         log('Prompt injection updated:', injection.length, 'characters');
+    }
+    // The HUD reflects the compiled scene and store whether or not the
+    // packet text itself changed; refresh it on every injection build.
+    updateCastCards();
+    if (runtime.mapPanel && !document.getElementById('il_map_overlay')?.classList.contains('displayNone')) {
+        runtime.mapPanel.refresh(promptStore, compilation?.scene || null, cleanString(ctx.name1, 100) || 'You');
     }
     // A continue extends an already-written reply. The latest-turn contract is
     // a "produce THIS reply" directive full of mandatory-outcome and required-
@@ -5484,6 +5487,7 @@ function registerEvents() {
             });
         }
         queueCompletedAssistantTurn(store);
+        updateCastCards();
     });
     eventSource.on(events.GENERATION_STARTED, async (generationType, _generationOptions, isDryRun) => {
         // Claim the provider before any awaited listener work: a background
