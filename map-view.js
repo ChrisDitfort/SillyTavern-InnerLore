@@ -546,10 +546,9 @@ export function createMapPanel() {
 export function createMinimap(openFullMap, versionText = '') {
     let element = null;
     let drag = null;
-    let hiddenByUser = false;
-    try {
-        hiddenByUser = globalThis.localStorage?.getItem('innerlore:minimap:hidden') === '1';
-    } catch { /* no storage */ }
+    // The location panel is always shown; the hide preference from the old
+    // toggle era is deliberately ignored.
+    const hiddenByUser = false;
 
     const restorePosition = () => {
         try {

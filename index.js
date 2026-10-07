@@ -126,7 +126,7 @@ const PROMPT_KEY = 'inner_lore_context';
 const TURN_CONTRACT_PROMPT_KEY = 'inner_lore_latest_turn_contract';
 const TRIGGER_DELIVERY_PROMPT_KEY = 'inner_lore_trigger_delivery';
 const DISPLAY_NAME = 'InnerLore';
-const EXTENSION_VERSION = '0.20.4';
+const EXTENSION_VERSION = '0.20.5';
 const LOG_PREFIX = '[InnerLore]';
 
 /**
@@ -1587,7 +1587,9 @@ body.il-dock-active #chat{padding-top:34px}
 .il-cast-name{display:block;font-size:.68em;text-align:center;color:#c3cad6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .il-dock-side{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
 .il-dock-left{flex:0 1 auto}
-.il-dock-right{margin-left:auto;flex:0 1 auto;align-items:center}
+.il-dock-right{margin-left:auto;flex:0 1 auto;align-items:center;gap:8px}
+.il-hud-clock{display:inline-flex;align-items:center;gap:6px;padding:5px 10px;border:1px solid #4a5468;border-radius:10px;background:linear-gradient(180deg, rgba(38,44,58,.9), rgba(24,28,38,.9));color:#e8d9a8;font-size:.78em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:220px}
+.il-hud-clock svg{width:14px;height:14px;color:#c8b78a;flex:none}
 .il-cast-portrait{transition:border-color .15s, box-shadow .15s, transform .1s}
 .il-cast-portrait:hover{border-color:#5a87b5;box-shadow:0 0 10px rgba(95,135,181,.35);transform:translateY(-1px)}
 .il-cast-photo{background:radial-gradient(circle at 50% 32%, rgba(90,105,135,.35), rgba(30,34,44,.85))}
@@ -1812,6 +1814,16 @@ function updateCastCards() {
     rightSide.className = 'il-dock-side il-dock-right';
     bar.append(leftSide, rightSide);
     leftSide.appendChild(buildPortraitCard({ title: 'You', icon: CAST_SVG.user, name: userName, isUser: true }));
+    const clockChip = document.createElement('div');
+    clockChip.className = 'il-hud-clock';
+    const clock = getChatStore()?.progression?.clock;
+    const clockLabel = clock?.currentTimeLabel
+        || clock?.lastExactAnchor
+        || (clock ? `Elapsed story time: ${formatClockRange(clock)}` : 'Day 1 — story time begins');
+    clockChip.title = 'Story clock (InnerLore progression)';
+    clockChip.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15.5 14"/></svg><span></span>`;
+    clockChip.querySelector('span').textContent = clockLabel;
+    rightSide.appendChild(clockChip);
     if (!runtime.minimap) {
         runtime.minimap = createMinimap(() => {
             if (!runtime.mapPanel) runtime.mapPanel = createMapPanel();
@@ -1839,14 +1851,6 @@ function updateCastCards() {
     mapToggle.title = 'Open the InnerLore world map';
     mapToggle.setAttribute('aria-label', 'Open world map');
     mapToggle.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M9 4 3 6v14l6-2 6 2 6-2V4l-6 2-6-2z"/><path d="M9 4v14M15 6v14"/></svg>';
-    const minimapToggle = document.createElement('button');
-    minimapToggle.type = 'button';
-    minimapToggle.className = 'il-map-toggle il-minimap-toggle';
-    minimapToggle.title = 'Show or hide the floating location panel';
-    minimapToggle.setAttribute('aria-label', 'Toggle location panel');
-    minimapToggle.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><rect x="12" y="12" width="7" height="6" rx="1" fill="currentColor" stroke="none"/></svg>';
-    minimapToggle.addEventListener('click', () => runtime.minimap?.toggle());
-    rightSide.append(minimapToggle);
     rightSide.append(mapToggle);
     mapToggle.addEventListener('click', () => {
         if (!runtime.mapPanel) runtime.mapPanel = createMapPanel();
