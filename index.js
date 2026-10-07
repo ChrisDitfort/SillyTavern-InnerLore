@@ -126,7 +126,7 @@ const PROMPT_KEY = 'inner_lore_context';
 const TURN_CONTRACT_PROMPT_KEY = 'inner_lore_latest_turn_contract';
 const TRIGGER_DELIVERY_PROMPT_KEY = 'inner_lore_trigger_delivery';
 const DISPLAY_NAME = 'InnerLore';
-const EXTENSION_VERSION = '0.20.0';
+const EXTENSION_VERSION = '0.20.1';
 const LOG_PREFIX = '[InnerLore]';
 
 /**
@@ -1708,6 +1708,10 @@ function updateCastCards() {
             };
             renderMap(0);
         }, EXTENSION_VERSION);
+    }
+    if (runtime.minimap) {
+        // bar.innerHTML='' above drops the docked panel on every refresh;
+        // re-dock it each pass (idempotent) and refresh in place.
         runtime.minimap.dockInto(bar);
         runtime.minimap.refresh(getChatStore(), runtime.lastCompilation?.scene || null);
     }
