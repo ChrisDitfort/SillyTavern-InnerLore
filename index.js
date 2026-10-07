@@ -127,7 +127,7 @@ const PROMPT_KEY = 'inner_lore_context';
 const TURN_CONTRACT_PROMPT_KEY = 'inner_lore_latest_turn_contract';
 const TRIGGER_DELIVERY_PROMPT_KEY = 'inner_lore_trigger_delivery';
 const DISPLAY_NAME = 'InnerLore';
-const EXTENSION_VERSION = '0.22.0';
+const EXTENSION_VERSION = '0.22.1';
 const LOG_PREFIX = '[InnerLore]';
 
 /**
@@ -5290,6 +5290,14 @@ function queueCompletedAssistantTurn(store) {
 }
 
 async function recoverIncompleteReply(messageIndex, initialReason) {
+    // Provider state at the moment of failure - not minutes later when
+    // recovery has finished - is what diagnoses the cause.
+    const failureContext = {
+        backgroundInFlight: backgroundInFlightCount(),
+        peerStory: Boolean(runtime.peerStoryActiveAt && Date.now() - runtime.peerStoryActiveAt < 120_000),
+        storyRequestInFlight: Boolean(runtime.storyRequestInFlight),
+    };
+    recordTelemetryEntry({ kind: 'story', phase: 'quarantine-start', ...failureContext, reason: String(initialReason).slice(0, 60) });
     const ctx = context();
     const runChatId = currentChatId();
     const settings = getSettings();
@@ -5364,8 +5372,9 @@ async function recoverIncompleteReply(messageIndex, initialReason) {
                 finalReason,
                 error: errorText,
                 quarantined: false,
-                backgroundInFlight: backgroundInFlightCount(),
-                peerStory: Boolean(runtime.peerStoryActiveAt && Date.now() - runtime.peerStoryActiveAt < 120_000),
+                backgroundInFlight: failureContext.backgroundInFlight,
+                peerStory: failureContext.peerStory,
+                storyRequestInFlight: failureContext.storyRequestInFlight,
                 at: Date.now(),
             };
         }
@@ -5556,7 +5565,9 @@ function registerEvents() {
     eventSource.on(events.GENERATION_STARTED, async (generationType, _generationOptions, isDryRun) => {
         // Claim the provider before any awaited listener work: a background
         // timer firing during prompt assembly must see the story as active.
-        const storyStart = !['quiet', 'impersonate'].includes(generationType);
+        // Quiet generations (auto-title on a new chat's first message) share
+        // the same single-slot provider and are serialized the same way.
+        const storyStart = generationType !== 'impersonate';
         if (!isDryRun && storyStart && !runtime.activeStoryGenerationId) {
             runtime.activeStoryGenerationId = `story:pending:${Date.now().toString(36)}`;
             runtime.announceStoryState?.(true);
