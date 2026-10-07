@@ -31,7 +31,7 @@ import {
     uniqueStrings,
 } from './core.js?v=46';
 import { compileContext } from './context-compiler.js?v=5';
-import { createMapPanel, createMinimap } from './map-view.js?v=2';
+import { createMapPanel, createMinimap } from './map-view.js?v=3';
 import {
     applyContextProfileToSettings,
     deriveContextBudgets,
@@ -126,7 +126,7 @@ const PROMPT_KEY = 'inner_lore_context';
 const TURN_CONTRACT_PROMPT_KEY = 'inner_lore_latest_turn_contract';
 const TRIGGER_DELIVERY_PROMPT_KEY = 'inner_lore_trigger_delivery';
 const DISPLAY_NAME = 'InnerLore';
-const EXTENSION_VERSION = '0.20.1';
+const EXTENSION_VERSION = '0.20.2';
 const LOG_PREFIX = '[InnerLore]';
 
 /**
@@ -1576,6 +1576,32 @@ function ensureDockStyles() {
 #il_cast_bar.il-dock .il-map-toggle{border-color:#3a4150;background:rgba(24,27,34,.85)}
 #il_cast_bar.il-dock .il-cast-eye{color:#9c8eee}
 body.il-dock-active #chat{padding-top:34px}
+.il-cast-portrait{flex-direction:column;width:86px;padding:5px;gap:4px;align-items:stretch}
+.il-cast-photo{position:relative;height:46px;display:flex;align-items:center;justify-content:center;background:rgba(36,41,52,.75);border:1px solid #3a4150;border-radius:8px;color:#8896ab}
+.il-cast-photo svg{width:26px;height:26px}
+.il-cast-user .il-cast-photo{border-color:#42618a;color:#a9c4e4}
+.il-cast-info{position:absolute;top:2px;right:2px;padding:2px;background:none;border:none;cursor:pointer;color:#8fb7e8;opacity:.85}
+.il-cast-info svg{width:13px;height:13px}
+.il-cast-portrait .il-cast-eye{position:absolute;bottom:2px;right:2px;padding:2px;margin:0}
+.il-cast-portrait .il-cast-eye svg{width:13px;height:13px}
+.il-cast-name{display:block;font-size:.68em;text-align:center;color:#c3cad6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.il-cast-user .il-cast-name{color:#cfe3f7}
+#il_entity_card{position:fixed;inset:0;z-index:42000;background:rgba(5,7,10,.72);display:flex;align-items:center;justify-content:center;padding:18px}
+.il-entity-card-inner{width:min(520px,94vw);max-height:82vh;overflow-y:auto;background:#141821;border:1px solid #3a4150;border-radius:14px;box-shadow:0 10px 40px rgba(0,0,0,.6);color:#c9cfd9}
+.il-entity-head{display:flex;align-items:center;gap:10px;padding:12px 14px;border-bottom:1px solid #2c313c;position:sticky;top:0;background:#141821}
+.il-entity-photo{display:flex;width:40px;height:40px;align-items:center;justify-content:center;border:1px solid #3a4150;border-radius:10px;color:#8896ab;background:rgba(36,41,52,.75)}
+.il-entity-photo svg{width:24px;height:24px}
+.il-entity-title{flex:1;font-weight:600;color:#e2c99a}
+.il-entity-body{padding:12px 16px 16px}
+.il-entity-summary{font-size:.92em}
+.il-entity-state{font-size:.85em;color:#9fd6a8}
+.il-entity-facts{margin:8px 0;padding-left:18px;font-size:.85em;color:#a8b0bc}
+.il-entity-mind{margin-top:12px;padding-top:10px;border-top:1px dashed #3a4150}
+.il-entity-mind h4{margin:0 0 8px;color:#9c8eee;font-size:.95em}
+.il-entity-mind h4 small{color:#6d7684;font-weight:400}
+.il-entity-mind p{margin:4px 0;font-size:.85em}
+.il-entity-mind hr{border:none;border-top:1px solid #2c313c;margin:8px 0}
+.is-dormant{color:#6d7684;font-style:italic}
 `;
     document.head.appendChild(style);
 }
@@ -1584,6 +1610,7 @@ const CAST_SVG = {
     person: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 3.6-7 8-7s8 3 8 7"/></svg>',
     user: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 3.6-7 8-7s8 3 8 7"/><path d="M17 3l4 4M21 3l-4 4"/></svg>',
     eye: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/></svg>',
+    info: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="11" x2="12" y2="16"/><circle cx="12" cy="7.5" r="0.6" fill="currentColor"/></svg>',
 };
 
 function castBarElement() {
@@ -1641,6 +1668,49 @@ function renderMindInChat(name) {
     bubble.scrollIntoView({ behavior: 'smooth', block: 'end' });
 }
 
+function showEntityCard(name, focus = 'details') {
+    let popup = document.getElementById('il_entity_card');
+    if (popup) popup.remove();
+    popup = document.createElement('div');
+    popup.id = 'il_entity_card';
+    const store = getChatStore();
+    const entity = Object.values(store?.entities || {})
+        .find(candidate => candidate?.type === 'character' && canonicalNameKey(candidate.name) === canonicalNameKey(name));
+    const brain = store?.brains?.[canonicalNameKey(name)];
+    const facts = (entity?.facts || []).slice(0, 6)
+        .map(fact => `<li>${String(typeof fact === 'string' ? fact : fact?.statement || '').replace(/</g, '&lt;')}</li>`).join('');
+    const mindHtml = brain
+        ? mindBubbleText(brain).split('\n').map(line => line ? `<p>${line.replace(/</g, '&lt;')}</p>` : '<hr/>').join('')
+        : '<p class="is-dormant">(no InnerLore mind is tracked for this name yet)</p>';
+    popup.innerHTML = `
+        <div class="il-entity-card-inner">
+            <div class="il-entity-head">
+                <span class="il-entity-photo">${CAST_SVG.person}</span>
+                <span class="il-entity-title">${String(name).replace(/</g, '&lt;')}</span>
+                <button type="button" class="il-entity-close menu_button">Close</button>
+            </div>
+            <div class="il-entity-body">
+                <section class="il-entity-details">
+                    ${entity?.summary ? `<p class="il-entity-summary">${String(entity.summary).replace(/</g, '&lt;')}</p>` : ''}
+                    ${entity?.currentState ? `<p class="il-entity-state"><b>Now:</b> ${String(entity.currentState).replace(/</g, '&lt;')}</p>` : ''}
+                    ${facts ? `<ul class="il-entity-facts">${facts}</ul>` : ''}
+                    ${!entity ? '<p class="is-dormant">(no entity record yet - it appears once the curator observes this NPC)</p>' : ''}
+                </section>
+                <section class="il-entity-mind">
+                    <h4>Private mind <small>(player view only, never sent to the model)</small></h4>
+                    ${mindHtml}
+                </section>
+            </div>
+        </div>`;
+    document.body.appendChild(popup);
+    popup.querySelector('.il-entity-close').addEventListener('click', () => popup.remove());
+    popup.addEventListener('click', event => {
+        if (event.target === popup) popup.remove();
+    });
+    const target = focus === 'mind' ? popup.querySelector('.il-entity-mind') : popup.querySelector('.il-entity-details');
+    target?.scrollIntoView({ block: 'nearest' });
+}
+
 function updateCastCards() {
     ensureDockStyles();
     const bar = castBarElement();
@@ -1687,12 +1757,40 @@ function updateCastCards() {
         bar.classList.add('displayNone');
         return;
     }
-    const userCard = document.createElement('div');
-    userCard.className = 'il-cast-card il-cast-user';
-    userCard.title = 'You';
-    userCard.innerHTML = `${CAST_SVG.user}<span></span>`;
-    userCard.querySelector('span').textContent = userName;
-    bar.appendChild(userCard);
+    const buildPortraitCard = ({ title, icon, name, isUser, onMind, onInfo }) => {
+        const card = document.createElement('div');
+        card.className = 'il-cast-card il-cast-portrait' + (isUser ? ' il-cast-user' : '');
+        card.title = title;
+        const photo = document.createElement('div');
+        photo.className = 'il-cast-photo';
+        photo.innerHTML = icon;
+        if (onInfo) {
+            const info = document.createElement('button');
+            info.type = 'button';
+            info.className = 'il-cast-info';
+            info.title = 'View character details';
+            info.setAttribute('aria-label', `Details for ${name}`);
+            info.innerHTML = CAST_SVG.info;
+            info.addEventListener('click', event => { event.stopPropagation(); onInfo(); });
+            photo.appendChild(info);
+        }
+        if (onMind) {
+            const eye = document.createElement('button');
+            eye.type = 'button';
+            eye.className = 'il-cast-eye';
+            eye.title = 'View private mind';
+            eye.setAttribute('aria-label', `Mind of ${name}`);
+            eye.innerHTML = CAST_SVG.eye;
+            eye.addEventListener('click', event => { event.stopPropagation(); onMind(); });
+            photo.appendChild(eye);
+        }
+        const label = document.createElement('span');
+        label.className = 'il-cast-name';
+        label.textContent = name;
+        card.append(photo, label);
+        return card;
+    };
+    bar.appendChild(buildPortraitCard({ title: 'You', icon: CAST_SVG.user, name: userName, isUser: true }));
     runtime.minimap?.refresh(getChatStore(), runtime.lastCompilation?.scene || null);
     if (!runtime.minimap) {
         runtime.minimap = createMinimap(() => {
@@ -1746,22 +1844,14 @@ function updateCastCards() {
     });
     bar.appendChild(mapToggle);
     for (const participant of participants) {
-        const card = document.createElement('div');
-        card.className = 'il-cast-card';
-        card.title = `NPC - click the eye to view ${participant.name}'s private mind`;
-        const icon = document.createElement('span');
-        icon.className = 'il-cast-icon';
-        icon.innerHTML = CAST_SVG.person;
-        const label = document.createElement('span');
-        label.textContent = participant.name;
-        const eye = document.createElement('button');
-        eye.type = 'button';
-        eye.className = 'il-cast-eye';
-        eye.setAttribute('aria-label', `View ${participant.name} mind`);
-        eye.innerHTML = CAST_SVG.eye;
-        eye.addEventListener('click', () => renderMindInChat(participant.name));
-        card.append(icon, label, eye);
-        bar.appendChild(card);
+        bar.appendChild(buildPortraitCard({
+            title: participant.name,
+            icon: CAST_SVG.person,
+            name: participant.name,
+            isUser: false,
+            onMind: () => showEntityCard(participant.name, 'mind'),
+            onInfo: () => showEntityCard(participant.name, 'details'),
+        }));
     }
     bar.classList.remove('displayNone');
 }
