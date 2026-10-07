@@ -126,7 +126,7 @@ const PROMPT_KEY = 'inner_lore_context';
 const TURN_CONTRACT_PROMPT_KEY = 'inner_lore_latest_turn_contract';
 const TRIGGER_DELIVERY_PROMPT_KEY = 'inner_lore_trigger_delivery';
 const DISPLAY_NAME = 'InnerLore';
-const EXTENSION_VERSION = '0.20.2';
+const EXTENSION_VERSION = '0.20.3';
 const LOG_PREFIX = '[InnerLore]';
 
 /**
@@ -1585,18 +1585,31 @@ body.il-dock-active #chat{padding-top:34px}
 .il-cast-portrait .il-cast-eye{position:absolute;bottom:2px;right:2px;padding:2px;margin:0}
 .il-cast-portrait .il-cast-eye svg{width:13px;height:13px}
 .il-cast-name{display:block;font-size:.68em;text-align:center;color:#c3cad6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.il-dock-side{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.il-dock-left{flex:0 1 auto}
+.il-dock-right{margin-left:auto;flex:0 1 auto;align-items:center}
+.il-cast-portrait{transition:border-color .15s, box-shadow .15s, transform .1s}
+.il-cast-portrait:hover{border-color:#5a87b5;box-shadow:0 0 10px rgba(95,135,181,.35);transform:translateY(-1px)}
+.il-cast-photo{background:radial-gradient(circle at 50% 32%, rgba(90,105,135,.35), rgba(30,34,44,.85))}
+.il-cast-user .il-cast-photo{background:radial-gradient(circle at 50% 32%, rgba(95,135,181,.4), rgba(24,32,48,.9))}
 .il-cast-user .il-cast-name{color:#cfe3f7}
-#il_entity_card{position:fixed;inset:0;z-index:42000;background:rgba(5,7,10,.72);display:flex;align-items:center;justify-content:center;padding:18px}
-.il-entity-card-inner{width:min(520px,94vw);max-height:82vh;overflow-y:auto;background:#141821;border:1px solid #3a4150;border-radius:14px;box-shadow:0 10px 40px rgba(0,0,0,.6);color:#c9cfd9}
-.il-entity-head{display:flex;align-items:center;gap:10px;padding:12px 14px;border-bottom:1px solid #2c313c;position:sticky;top:0;background:#141821}
-.il-entity-photo{display:flex;width:40px;height:40px;align-items:center;justify-content:center;border:1px solid #3a4150;border-radius:10px;color:#8896ab;background:rgba(36,41,52,.75)}
-.il-entity-photo svg{width:24px;height:24px}
-.il-entity-title{flex:1;font-weight:600;color:#e2c99a}
-.il-entity-body{padding:12px 16px 16px}
+#il_entity_card{position:fixed;inset:0;z-index:42000;background:#0c0f15;color:#c9cfd9}
+.il-entity-card-inner{display:flex;flex-direction:column;width:100%;height:100%}
+.il-entity-head{display:flex;align-items:center;gap:12px;padding:calc(env(safe-area-inset-top,0px) + 14px) 16px 14px;border-bottom:1px solid #2c313c;background:linear-gradient(180deg, rgba(38,44,58,.95), rgba(20,24,33,.98))}
+.il-entity-heading{flex:1;display:flex;flex-direction:column;min-width:0}
+.il-entity-kicker{font-size:.62em;letter-spacing:.22em;text-transform:uppercase;color:#6d7684}
+.il-entity-title{font-weight:700;font-size:1.15em;color:#e2c99a;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.il-entity-photo{display:flex;width:52px;height:52px;align-items:center;justify-content:center;border:1px solid #4a5468;border-radius:12px;color:#9aa8be;background:radial-gradient(circle at 50% 30%, rgba(90,105,135,.4), rgba(28,32,42,.9))}
+.il-entity-photo svg{width:30px;height:30px}
+.il-entity-close{display:flex;width:40px;height:40px;align-items:center;justify-content:center;border:1px solid #4a5468;border-radius:10px;background:rgba(28,32,42,.8);color:#c3cad6;cursor:pointer}
+.il-entity-close svg{width:18px;height:18px}
+.il-entity-close:hover{border-color:#c96a6a;color:#e8a0a0}
+.il-entity-body{flex:1;overflow-y:auto;padding:16px 18px calc(env(safe-area-inset-bottom,0px) + 24px)}
+.il-entity-details{background:rgba(26,30,40,.55);border:1px solid #2c313c;border-radius:12px;padding:12px 14px;margin-bottom:14px}
 .il-entity-summary{font-size:.92em}
 .il-entity-state{font-size:.85em;color:#9fd6a8}
 .il-entity-facts{margin:8px 0;padding-left:18px;font-size:.85em;color:#a8b0bc}
-.il-entity-mind{margin-top:12px;padding-top:10px;border-top:1px dashed #3a4150}
+.il-entity-mind{background:linear-gradient(180deg, rgba(40,34,64,.35), rgba(24,22,36,.5));border:1px solid #3d3560;border-radius:12px;padding:12px 14px}
 .il-entity-mind h4{margin:0 0 8px;color:#9c8eee;font-size:.95em}
 .il-entity-mind h4 small{color:#6d7684;font-weight:400}
 .il-entity-mind p{margin:4px 0;font-size:.85em}
@@ -1686,8 +1699,11 @@ function showEntityCard(name, focus = 'details') {
         <div class="il-entity-card-inner">
             <div class="il-entity-head">
                 <span class="il-entity-photo">${CAST_SVG.person}</span>
-                <span class="il-entity-title">${String(name).replace(/</g, '&lt;')}</span>
-                <button type="button" class="il-entity-close menu_button">Close</button>
+                <div class="il-entity-heading">
+                    <span class="il-entity-kicker">character</span>
+                    <span class="il-entity-title">${String(name).replace(/</g, '&lt;')}</span>
+                </div>
+                <button type="button" class="il-entity-close" aria-label="Close" title="Close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg></button>
             </div>
             <div class="il-entity-body">
                 <section class="il-entity-details">
@@ -1790,8 +1806,12 @@ function updateCastCards() {
         card.append(photo, label);
         return card;
     };
-    bar.appendChild(buildPortraitCard({ title: 'You', icon: CAST_SVG.user, name: userName, isUser: true }));
-    runtime.minimap?.refresh(getChatStore(), runtime.lastCompilation?.scene || null);
+    const leftSide = document.createElement('div');
+    leftSide.className = 'il-dock-side il-dock-left';
+    const rightSide = document.createElement('div');
+    rightSide.className = 'il-dock-side il-dock-right';
+    bar.append(leftSide, rightSide);
+    leftSide.appendChild(buildPortraitCard({ title: 'You', icon: CAST_SVG.user, name: userName, isUser: true }));
     if (!runtime.minimap) {
         runtime.minimap = createMinimap(() => {
             if (!runtime.mapPanel) runtime.mapPanel = createMapPanel();
@@ -1810,7 +1830,7 @@ function updateCastCards() {
     if (runtime.minimap) {
         // bar.innerHTML='' above drops the docked panel on every refresh;
         // re-dock it each pass (idempotent) and refresh in place.
-        runtime.minimap.dockInto(bar);
+        runtime.minimap.dockInto(rightSide);
         runtime.minimap.refresh(getChatStore(), runtime.lastCompilation?.scene || null);
     }
     const mapToggle = document.createElement('button');
@@ -1826,12 +1846,11 @@ function updateCastCards() {
     minimapToggle.setAttribute('aria-label', 'Toggle location panel');
     minimapToggle.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><rect x="12" y="12" width="7" height="6" rx="1" fill="currentColor" stroke="none"/></svg>';
     minimapToggle.addEventListener('click', () => runtime.minimap?.toggle());
-    bar.appendChild(minimapToggle);
+    rightSide.append(minimapToggle);
+    rightSide.append(mapToggle);
     mapToggle.addEventListener('click', () => {
         if (!runtime.mapPanel) runtime.mapPanel = createMapPanel();
         runtime.mapPanel.open();
-        // The store attach can lag a chat change by a moment; retry briefly
-        // instead of rendering an empty map.
         const renderMap = attempt => {
             const store = getChatStore();
             if (store) {
@@ -1842,9 +1861,8 @@ function updateCastCards() {
         };
         renderMap(0);
     });
-    bar.appendChild(mapToggle);
     for (const participant of participants) {
-        bar.appendChild(buildPortraitCard({
+        leftSide.appendChild(buildPortraitCard({
             title: participant.name,
             icon: CAST_SVG.person,
             name: participant.name,
