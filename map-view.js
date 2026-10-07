@@ -61,7 +61,7 @@ const MAP_STYLES = `
 .il-map-detail-npcs li.is-dormant{opacity:.55}
 .il-map-toggle{pointer-events:auto;display:inline-flex;align-items:center;padding:4px 8px;border-radius:9px;border:1px solid #5a5a66;background:rgba(22,22,28,.88);color:#c8b78a;cursor:pointer}
 .il-map-toggle svg{width:16px;height:16px;display:block}
-#il_minimap{position:fixed;right:12px;bottom:calc(env(safe-area-inset-bottom,0px) + 96px);z-index:29000;width:190px;border:1px solid #5a5a66;border-radius:12px;background:rgba(16,18,24,.92);box-shadow:0 4px 14px rgba(0,0,0,.4);color:#c9cfd9;font-size:.8em;cursor:grab;touch-action:none}
+#il_minimap{position:fixed;right:12px;top:calc(env(safe-area-inset-top,0px) + 54px);z-index:40000;width:190px;border:1px solid #5a5a66;border-radius:12px;background:rgba(16,18,24,.92);box-shadow:0 4px 14px rgba(0,0,0,.4);color:#c9cfd9;font-size:.8em;cursor:grab;touch-action:none}
 .il-minimap-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:7px 10px 4px;border-bottom:1px solid #333}
 .il-minimap-loc{font-weight:600;color:#e2c99a}
 .il-minimap-expand{cursor:pointer;color:#8fb7e8;padding:2px 4px}
@@ -73,7 +73,7 @@ const MAP_STYLES = `
 .il-minimap-dots i.is-on{background:#8ee6a2;box-shadow:0 0 6px rgba(142,230,162,.7)}
 .il-scene-link{stroke:rgba(156,142,238,.4);stroke-width:1.6;stroke-dasharray:none}
 .il-scene-dot{stroke-width:2.5;filter:drop-shadow(0 0 6px rgba(200,183,138,.45))}
-@media (max-width:720px){.il-map-hint{display:none}.il-map-title{font-size:.92em}.il-map-detail{position:absolute;left:0;right:0;bottom:0;width:auto;max-width:none;max-height:46%;border-left:none;border-top:1px solid #333;border-radius:14px 14px 0 0}#il_minimap{width:156px;right:8px;bottom:calc(env(safe-area-inset-bottom,0px) + 108px);font-size:.75em}}
+@media (max-width:720px){.il-map-hint{display:none}.il-map-title{font-size:.92em}.il-map-detail{position:absolute;left:0;right:0;bottom:0;width:auto;max-width:none;max-height:46%;border-left:none;border-top:1px solid #333;border-radius:14px 14px 0 0}#il_minimap{width:156px;right:8px;top:calc(env(safe-area-inset-top,0px) + 60px);font-size:.75em}}
 @media (max-width:400px){.il-map-header{gap:6px;padding:6px 8px}.il-map-zoom-btn{width:30px;height:30px}}
 `;
 
@@ -575,10 +575,13 @@ export function createMinimap(openFullMap, versionText = '') {
         // stale or missing, can make the panel invisible.
         element.style.position = 'fixed';
         element.style.right = '12px';
-        element.style.bottom = 'calc(env(safe-area-inset-bottom, 0px) + 96px)';
-        element.style.zIndex = '29000';
+        // Top-right: the bottom edge is crowded on mobile browsers (floating
+        // toolbars) and SillyTavern's send form; the top-right corner under
+        // the cast bar is the only reliably clear mobile real estate.
+        element.style.top = 'calc(env(safe-area-inset-top, 0px) + 54px)';
+        element.style.zIndex = '40000';
         element.style.width = '190px';
-        element.style.border = '1px solid #5a5a66';
+        element.style.border = '1px solid #8fb7e8';
         element.style.borderRadius = '12px';
         element.style.background = 'rgba(16, 18, 24, 0.95)';
         element.style.boxShadow = '0 4px 14px rgba(0, 0, 0, 0.5)';
