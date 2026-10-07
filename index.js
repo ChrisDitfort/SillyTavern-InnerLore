@@ -127,7 +127,7 @@ const PROMPT_KEY = 'inner_lore_context';
 const TURN_CONTRACT_PROMPT_KEY = 'inner_lore_latest_turn_contract';
 const TRIGGER_DELIVERY_PROMPT_KEY = 'inner_lore_trigger_delivery';
 const DISPLAY_NAME = 'InnerLore';
-const EXTENSION_VERSION = '0.22.1';
+const EXTENSION_VERSION = '0.22.2';
 const LOG_PREFIX = '[InnerLore]';
 
 /**
@@ -5694,6 +5694,7 @@ function registerEvents() {
             });
             runtime.storyDepartedAt = Date.now();
             runtime.storyRequestInFlight = true;
+            runtime.storyRequestInFlightAt = Date.now();
             runtime.announceStoryState?.(true);
             if (!runtime.derivedContext) return;
             // SillyTavern 1.18 passes { chat }; older builds passed { messages }.
@@ -5906,10 +5907,16 @@ function initializeServerStateAfterAppReady(ctx) {
         // request that is actually streaming (not one still waiting behind
         // background work - that ordering is the whole point). Peer stories
         // still block, with a staleness expiry so a dead tab cannot wedge it.
-        while (!signal?.aborted
-            && (runtime.storyRequestInFlight
-                || Boolean(runtime.peerStoryActiveAt && Date.now() - runtime.peerStoryActiveAt < 120_000))) {
+        const claimFresh = () => Boolean(runtime.storyRequestInFlight)
+            && Date.now() - (runtime.storyRequestInFlightAt || 0) < 480_000;
+        while (!signal?.aborted && (claimFresh()
+            || Boolean(runtime.peerStoryActiveAt && Date.now() - runtime.peerStoryActiveAt < 120_000))) {
             await new Promise(resolve => setTimeout(resolve, 1_000));
+        }
+        if (runtime.storyRequestInFlight && !claimFresh()) {
+            console.warn('[InnerLore] A story-slot claim went stale (likely a quiet generation with no message event); releasing it.');
+            runtime.storyRequestInFlight = false;
+            runtime.announceStoryState?.(false);
         }
     });
     // Provider-level serialization must hold across SillyTavern tabs: a stale
