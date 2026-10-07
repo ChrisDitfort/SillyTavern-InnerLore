@@ -538,7 +538,7 @@ export function createMapPanel() {
  * its nearest neighbors, and NPC activity dots. Clicking it opens the full
  * map on the scene view. Its position persists in localStorage.
  */
-export function createMinimap(openFullMap) {
+export function createMinimap(openFullMap, versionText = '') {
     let element = null;
     let drag = null;
     let hiddenByUser = false;
@@ -571,6 +571,20 @@ export function createMinimap(openFullMap) {
         element = document.createElement('div');
         element.id = 'il_minimap';
         element.className = 'displayNone';
+        // Critical placement lives on the element itself: no stylesheet,
+        // stale or missing, can make the panel invisible.
+        element.style.position = 'fixed';
+        element.style.right = '12px';
+        element.style.bottom = 'calc(env(safe-area-inset-bottom, 0px) + 96px)';
+        element.style.zIndex = '29000';
+        element.style.width = '190px';
+        element.style.border = '1px solid #5a5a66';
+        element.style.borderRadius = '12px';
+        element.style.background = 'rgba(16, 18, 24, 0.95)';
+        element.style.boxShadow = '0 4px 14px rgba(0, 0, 0, 0.5)';
+        element.style.color = '#e2c99a';
+        element.style.fontSize = '0.85em';
+        element.style.padding = '8px 10px';
         element.innerHTML = `
             <div class="il-minimap-head">
                 <span class="il-minimap-loc"></span>
@@ -622,7 +636,8 @@ export function createMinimap(openFullMap) {
             try {
                 globalThis.localStorage?.setItem('innerlore:minimap:hidden', nowVisible ? '0' : '1');
             } catch { /* no storage */ }
-            (globalThis.toastr?.info?.(nowVisible ? 'Location panel shown' : 'Location panel hidden', 'InnerLore', { timeOut: 2_500 }));
+            const suffix = versionText ? ` (${versionText})` : '';
+            (globalThis.toastr?.info?.((nowVisible ? 'Location panel shown' : 'Location panel hidden') + suffix, 'InnerLore', { timeOut: 4_000 }));
             return nowVisible;
         },
         refresh(store, scene) {

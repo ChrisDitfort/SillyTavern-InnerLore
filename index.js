@@ -126,7 +126,7 @@ const PROMPT_KEY = 'inner_lore_context';
 const TURN_CONTRACT_PROMPT_KEY = 'inner_lore_latest_turn_contract';
 const TRIGGER_DELIVERY_PROMPT_KEY = 'inner_lore_trigger_delivery';
 const DISPLAY_NAME = 'InnerLore';
-const EXTENSION_VERSION = '0.19.6';
+const EXTENSION_VERSION = '0.19.7';
 const LOG_PREFIX = '[InnerLore]';
 
 /**
@@ -1684,7 +1684,7 @@ function updateCastCards() {
                 if (attempt < 6) setTimeout(() => renderMap(attempt + 1), 1_000);
             };
             renderMap(0);
-        });
+        }, EXTENSION_VERSION);
         runtime.minimap.refresh(getChatStore(), runtime.lastCompilation?.scene || null);
     }
     const mapToggle = document.createElement('button');
