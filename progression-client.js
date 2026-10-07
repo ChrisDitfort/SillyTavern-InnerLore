@@ -172,6 +172,7 @@ export function validateProgressionPayload(payload, options = {}) {
 
 export async function requestProgressionPatch(settings, messages, signal, options = {}) {
     const requestSettings = progressionRequestSettings(settings);
+    requestSettings.telemetryKind = 'progression';
     const validationOptions = { discardImpossibleMatches: true, ...options };
     const format = normalizeOutputFormat(settings.maintenanceOutputFormat);
     const requestMessages = appendDslEvaluationKeyContract(

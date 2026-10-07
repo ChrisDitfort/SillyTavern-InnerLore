@@ -101,6 +101,44 @@ export function extractResponseText(raw) {
  * settings, no visible retries.
  */
 const CONCURRENCY_REJECTION_PATTERN = /(concurrent|locked|already generating|busy)/i;
+/**
+ * Speed telemetry: one entry per model request (background kinds and the
+ * story lifecycle events fed from the extension entry). Ring-buffered,
+ * exportable, never sent anywhere - a local measurement tool for tuning
+ * pass sizes, cadence, and scheduling on real playthroughs.
+ */
+const telemetry = {
+    entries: [],
+    turnId: 0,
+};
+
+export function recordTelemetryEntry(entry) {
+    telemetry.entries.push({ t: Date.now(), turn: telemetry.turnId, ...entry });
+    if (telemetry.entries.length > 800) telemetry.entries.splice(0, telemetry.entries.length - 800);
+}
+
+export function nextTelemetryTurn() {
+    telemetry.turnId += 1;
+    return telemetry.turnId;
+}
+
+export function getTelemetry() {
+    return { startedAt: telemetry.startedAt || null, turnId: telemetry.turnId, entries: [...telemetry.entries] };
+}
+
+export function resetTelemetry() {
+    telemetry.entries = [];
+    telemetry.turnId = 0;
+}
+
+function estimateMessageChars(messages) {
+    try {
+        return JSON.stringify(messages || []).length;
+    } catch {
+        return 0;
+    }
+}
+
 const serializationState = {
     backgroundInFlight: 0,
     peerBackgroundInFlight: 0,
@@ -358,6 +396,35 @@ export function connectionFallbackProfileIds(settings = {}) {
 }
 
 export async function sendInnerLoreRequest(settings, messages, signal, options = {}) {
+    const telemetryStart = Date.now();
+    const telemetryChars = estimateMessageChars(messages);
+    const telemetryKind = options.telemetryKind || settings.telemetryKind
+        || (settings.autoLoreEnabled === false && settings.maximumEntitiesPerPass === 1 ? 'foundation'
+            : settings.progressionRequest === true ? 'progression' : 'background');
+    try {
+        const output = await sendInnerLoreRequestInner(settings, messages, signal, options);
+        recordTelemetryEntry({
+            kind: telemetryKind, phase: 'background',
+            durationMs: Date.now() - telemetryStart,
+            inChars: telemetryChars,
+            outChars: typeof output === 'string' ? output.length : 0,
+            status: 'ok',
+        });
+        return output;
+    } catch (error) {
+        recordTelemetryEntry({
+            kind: telemetryKind, phase: 'background',
+            durationMs: Date.now() - telemetryStart,
+            inChars: telemetryChars,
+            outChars: 0,
+            status: 'error',
+            error: String(error?.message || error).slice(0, 120),
+        });
+        throw error;
+    }
+}
+
+async function sendInnerLoreRequestInner(settings, messages, signal, options = {}) {
     const maximumAttempts = Math.max(1, Math.min(3, Number(settings.requestMaximumAttempts) || 3));
     const fallbackMaximumAttempts = Math.max(1, Math.min(2, Number(settings.fallbackRequestMaximumAttempts) || 1));
     const timeoutMilliseconds = Math.max(15_000, Math.min(300_000, (Number(settings.requestTimeoutSeconds) || 90) * 1_000));

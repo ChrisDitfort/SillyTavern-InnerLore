@@ -127,7 +127,7 @@ const PROMPT_KEY = 'inner_lore_context';
 const TURN_CONTRACT_PROMPT_KEY = 'inner_lore_latest_turn_contract';
 const TRIGGER_DELIVERY_PROMPT_KEY = 'inner_lore_trigger_delivery';
 const DISPLAY_NAME = 'InnerLore';
-const EXTENSION_VERSION = '0.21.2';
+const EXTENSION_VERSION = '0.22.0';
 const LOG_PREFIX = '[InnerLore]';
 
 /**
@@ -5136,6 +5136,17 @@ function bindUIEvents() {
             toastr.error(`Could not expand the narrator prompt: ${error?.message || error}`, DISPLAY_NAME);
         }
     });
+    document.getElementById('il_export_telemetry')?.addEventListener('click', () => {
+        const data = getTelemetry();
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const anchor = document.createElement('a');
+        anchor.href = url;
+        anchor.download = `innerlore-speed-telemetry-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+        anchor.click();
+        URL.revokeObjectURL(url);
+        toastr.info(`Exported ${data.entries.length} telemetry entries across ${data.turnId} turn(s).`, DISPLAY_NAME);
+    });
     document.getElementById('il_narrator_prompt_reset')?.addEventListener('click', () => {
         getSettings().narratorPromptTemplate = DEFAULT_NARRATOR_PROMPT;
         saveSettings();
@@ -5443,7 +5454,9 @@ function registerEvents() {
     const events = eventTypes || event_types;
     if (events.MESSAGE_SENT) {
         eventSource.on(events.MESSAGE_SENT, () => {
-        runtime.storySendPendingAt = Date.now();
+        runtime.currentTelemetryTurn = nextTelemetryTurn();
+        runtime.turnSentAt = Date.now();
+        recordTelemetryEntry({ kind: 'story', phase: 'sent' });
             // GENERATION_STARTED fires before SillyTavern moves the textarea
             // into chat. Refresh again here so the current player action—and
             // an explicit time skip such as “five minutes pass”—is in the
@@ -5515,6 +5528,15 @@ function registerEvents() {
         }
         runtime.storyRequestInFlight = false;
         runtime.announceStoryState?.(false);
+        if (runtime.storyDepartedAt) {
+            recordTelemetryEntry({ kind: 'story', phase: 'reply', durationMs: Date.now() - runtime.storyDepartedAt });
+        }
+        const turn = runtime.currentTelemetryTurn;
+        const entries = getTelemetry().entries.filter(item => item.turn === turn);
+        const bg = entries.filter(item => item.phase === 'background');
+        const storyWait = entries.find(item => item.phase === 'departed');
+        const storyReply = entries.find(item => item.phase === 'reply');
+        console.info(`[InnerLore] Turn ${turn} timeline: send->depart ${((storyWait?.timeSinceSentMs ?? 0) / 1000).toFixed(1)}s (waited ${((storyWait?.waitedForBackgroundMs ?? 0) / 1000).toFixed(1)}s for background) | story ${((storyReply?.durationMs ?? 0) / 1000).toFixed(1)}s | background before reply: ${bg.filter(item => item.t <= (storyReply?.t ?? Infinity)).length} pass(es), ${((bg.filter(item => item.t <= (storyReply?.t ?? Infinity)).reduce((sum, item) => sum + item.durationMs, 0)) / 1000).toFixed(1)}s total`);
         queueCompletedAssistantTurn(store);
         // Immediate, model-free HUD refresh: rebuild the scene from the new
         // reply deterministically so location and present cast update the
@@ -5637,23 +5659,29 @@ function registerEvents() {
             const scheduledBackground = () => Boolean(
                 runtime.queued || runtime.historyRebuildQueued || runtime.foundationPromise
                 || runtime.historyTimer || runtime.preparingFoundation);
+            const waitStart = Date.now();
             if (backgroundInFlightCount() > 0 || scheduledBackground()) {
                 console.debug(`[InnerLore] Background-first: story waiting behind ${backgroundInFlightCount()} in-flight background request(s)${scheduledBackground() ? ' + scheduled work' : ''}.`);
                 showNarratorPill('Narrating - background work finishing first');
-                const startedWaiting = Date.now();
                 try {
                     for (;;) {
                         await waitForBackgroundIdle();
-                        if (!scheduledBackground() || Date.now() - startedWaiting > 120_000) break;
+                        if (!scheduledBackground() || Date.now() - waitStart > 120_000) break;
                         await new Promise(resolve => setTimeout(resolve, 750));
                     }
                 } finally {
-                    console.debug(`[InnerLore] Background-first: background work done after ${Math.round((Date.now() - startedWaiting) / 1000)}s; the story request leaves now.`);
+                    console.debug(`[InnerLore] Background-first: background work done after ${Math.round((Date.now() - waitStart) / 1000)}s; the story request leaves now.`);
                     showNarratorPill('Narrating');
                 }
             } else {
                 console.debug('[InnerLore] Background-first: no pending background work; the story request leaves immediately.');
             }
+            recordTelemetryEntry({
+                kind: 'story', phase: 'departed',
+                waitedForBackgroundMs: Date.now() - waitStart,
+                timeSinceSentMs: runtime.turnSentAt ? Date.now() - runtime.turnSentAt : 0,
+            });
+            runtime.storyDepartedAt = Date.now();
             runtime.storyRequestInFlight = true;
             runtime.announceStoryState?.(true);
             if (!runtime.derivedContext) return;
