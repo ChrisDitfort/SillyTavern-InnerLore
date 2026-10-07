@@ -127,7 +127,7 @@ const PROMPT_KEY = 'inner_lore_context';
 const TURN_CONTRACT_PROMPT_KEY = 'inner_lore_latest_turn_contract';
 const TRIGGER_DELIVERY_PROMPT_KEY = 'inner_lore_trigger_delivery';
 const DISPLAY_NAME = 'InnerLore';
-const EXTENSION_VERSION = '0.21.0';
+const EXTENSION_VERSION = '0.21.1';
 const LOG_PREFIX = '[InnerLore]';
 
 /**
@@ -1732,6 +1732,29 @@ function showEntityCard(name, focus = 'details') {
     target?.scrollIntoView({ block: 'nearest' });
 }
 
+/**
+ * Resolve the scene's location for display: known entities pass through; a
+ * generic prose phrase ("the city", "a side street") that matched no entity
+ * falls back to the last known canonical location instead of replacing the
+ * HUD with raw narration wording. Genuinely new named places (proper nouns)
+ * are kept as-is - they are real discoveries.
+ */
+function resolveSceneLocationForDisplay(scene) {
+    const location = scene?.location;
+    if (!location?.name) return scene;
+    if (location.id) {
+        runtime.lastKnownSceneLocation = location.name;
+        return scene;
+    }
+    const words = String(location.name).split(/\s+/).filter(Boolean);
+    const hasProperNoun = words.some(word => /\p{Lu}/u.test(word) && !/^(?:The|A|An)$/u.test(word));
+    if (hasProperNoun) return scene;
+    if (runtime.lastKnownSceneLocation) {
+        return { ...scene, location: { ...location, name: runtime.lastKnownSceneLocation, resolvedFromPhrase: location.name } };
+    }
+    return scene;
+}
+
 function updateCastCards() {
     if (typeof document === 'undefined' || typeof document.createElement !== 'function') return;
     ensureDockStyles();
@@ -2113,7 +2136,11 @@ function updateInjection({ isContinue = false } = {}) {
         log('Prompt injection updated:', injection.length, 'characters');
     }
     // The HUD reflects the compiled scene and store whether or not the
-    // packet text itself changed; refresh it on every injection build.
+    // packet text itself changed; refresh it on every injection build. The
+    // displayed location resolves to canonical entities.
+    if (compilation?.scene) {
+        compilation.scene = resolveSceneLocationForDisplay(compilation.scene);
+    }
     updateCastCards();
     if (runtime.mapPanel && !document.getElementById('il_map_overlay')?.classList.contains('displayNone')) {
         runtime.mapPanel.refresh(promptStore, compilation?.scene || null, cleanString(ctx.name1, 100) || 'You');
@@ -5498,7 +5525,7 @@ function registerEvents() {
                 playerName: context().name1,
                 lookbackMessages: getSettings().sceneLookbackMessages ?? 4,
             });
-            runtime.lastCompilation = { ...(runtime.lastCompilation || {}), scene: freshScene };
+            runtime.lastCompilation = { ...(runtime.lastCompilation || {}), scene: resolveSceneLocationForDisplay(freshScene) };
         } catch (error) {
             console.error('[InnerLore] Could not rebuild the scene for the HUD:', error);
         }
@@ -5611,6 +5638,7 @@ function registerEvents() {
                 runtime.queued || runtime.historyRebuildQueued || runtime.foundationPromise
                 || runtime.historyTimer || runtime.preparingFoundation);
             if (backgroundInFlightCount() > 0 || scheduledBackground()) {
+                console.debug(`[InnerLore] Background-first: story waiting behind ${backgroundInFlightCount()} in-flight background request(s)${scheduledBackground() ? ' + scheduled work' : ''}.`);
                 showNarratorPill('Narrating - background work finishing first');
                 const startedWaiting = Date.now();
                 try {
@@ -5620,8 +5648,11 @@ function registerEvents() {
                         await new Promise(resolve => setTimeout(resolve, 750));
                     }
                 } finally {
+                    console.debug(`[InnerLore] Background-first: background work done after ${Math.round((Date.now() - startedWaiting) / 1000)}s; the story request leaves now.`);
                     showNarratorPill('Narrating');
                 }
+            } else {
+                console.debug('[InnerLore] Background-first: no pending background work; the story request leaves immediately.');
             }
             runtime.storyRequestInFlight = true;
             runtime.announceStoryState?.(true);
