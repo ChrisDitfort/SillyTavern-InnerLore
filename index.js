@@ -31,6 +31,7 @@ import {
     uniqueStrings,
 } from './core.js?v=46';
 import { compileContext } from './context-compiler.js?v=5';
+import { deriveSceneState } from './scene.js?v=4';
 import { createMapPanel, createMinimap } from './map-view.js?v=3';
 import {
     applyContextProfileToSettings,
@@ -126,7 +127,7 @@ const PROMPT_KEY = 'inner_lore_context';
 const TURN_CONTRACT_PROMPT_KEY = 'inner_lore_latest_turn_contract';
 const TRIGGER_DELIVERY_PROMPT_KEY = 'inner_lore_trigger_delivery';
 const DISPLAY_NAME = 'InnerLore';
-const EXTENSION_VERSION = '0.20.7';
+const EXTENSION_VERSION = '0.20.8';
 const LOG_PREFIX = '[InnerLore]';
 
 /**
@@ -5487,6 +5488,19 @@ function registerEvents() {
             });
         }
         queueCompletedAssistantTurn(store);
+        // Immediate, model-free HUD refresh: rebuild the scene from the new
+        // reply deterministically so location and present cast update the
+        // moment a reply lands, instead of waiting for the background pass.
+        try {
+            const freshScene = deriveSceneState(context().chat, store, {
+                currentIndex: messageIndex,
+                playerName: context().name1,
+                lookbackMessages: getSettings().sceneLookbackMessages ?? 4,
+            });
+            runtime.lastCompilation = { ...(runtime.lastCompilation || {}), scene: freshScene };
+        } catch (error) {
+            console.error('[InnerLore] Could not rebuild the scene for the HUD:', error);
+        }
         updateCastCards();
     });
     eventSource.on(events.GENERATION_STARTED, async (generationType, _generationOptions, isDryRun) => {
