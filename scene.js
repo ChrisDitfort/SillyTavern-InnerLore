@@ -68,7 +68,14 @@ function referenceMatch(candidate, record) {
     if (!wanted) return false;
     return recordReferences(record).some(reference => {
         const key = canonicalNameKey(reference).replace(/^(?:the|a|an)\s+/u, '');
-        return key === wanted || (wanted.length >= 4 && (key.includes(wanted) || wanted.includes(key)));
+        if (key === wanted) return true;
+        // Substring matches are only trustworthy for long, distinctive names;
+        // short generic words ("city") must not match compound aliases
+        // ("eldest blood-city") or the scene relocates to the wrong place.
+        const shorter = Math.min(key.length, wanted.length);
+        if (shorter < 8) return false;
+        const wholeWord = (haystack, needle) => (` ${haystack} `).includes(` ${needle} `);
+        return wholeWord(key, wanted) || wholeWord(wanted, key);
     });
 }
 
