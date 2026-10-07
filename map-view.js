@@ -10,6 +10,82 @@
 
 const MAP_VIEWBOX = { width: 1000, height: 700 };
 
+/**
+ * Self-injected styles: extension CSS loads without a cache-buster, so a
+ * stale stylesheet would leave these elements unstyled and invisible while
+ * the (cache-busted) JavaScript runs the newest logic. Injecting the styles
+ * from the module guarantees markup and styling always match.
+ */
+const MAP_STYLE_ID = 'il_map_inline_styles';
+const MAP_STYLES = `
+#il_map_overlay{position:fixed;inset:0;width:100vw;height:100vh;height:100dvh;z-index:31000;background:rgba(8,10,14,.96);display:flex;flex-direction:column;padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);box-sizing:border-box}
+.il-map-header{display:flex;align-items:center;gap:10px;padding:8px 12px;border-bottom:1px solid #333;flex-wrap:wrap;min-height:44px}
+.il-map-title{font-weight:600;letter-spacing:.04em;color:#cfd8e6;white-space:nowrap}
+.il-map-hint{flex:1 1 160px;font-size:.75em;color:#7a8494;min-width:140px}
+.il-map-views{display:inline-flex;gap:4px}
+.il-map-view-btn{padding:6px 12px;border-radius:8px;border:1px solid #5a5a66;background:rgba(22,22,28,.9);color:#9aa3b0;font-size:.85em;cursor:pointer;min-height:30px}
+.il-map-view-btn.is-active{border-color:#c8b78a;color:#e2c99a}
+.il-map-zoom{display:inline-flex;gap:4px}
+.il-map-zoom-btn{width:34px;height:34px;border-radius:8px;border:1px solid #5a5a66;background:rgba(22,22,28,.9);color:#c8b78a;font-size:16px;line-height:1;cursor:pointer;display:inline-flex;align-items:center;justify-content:center}
+.il-map-close{min-height:34px}
+.il-map-body{flex:1 1 auto;display:flex;min-height:0;position:relative}
+#il_map_svg{flex:1 1 auto;width:100%;height:100%;min-width:0;cursor:grab;touch-action:none;display:block}
+#il_map_svg:active{cursor:grabbing}
+.il-map-hit{fill:transparent}
+.il-map-node{cursor:pointer}
+.il-map-dot{fill:#9db4a4;stroke:#1b211c;stroke-width:1.5}
+.il-map-place .il-map-dot{fill:#c8b78a}
+.il-map-discovered .il-map-dot{fill:#7fa9c9}
+.il-map-region .il-map-dot{fill:none;stroke:#8fa3b8;stroke-dasharray:3 3}
+.il-map-label{fill:#d8dee8;font-size:12px;font-family:serif;paint-order:stroke;stroke:rgba(10,14,18,.85);stroke-width:3px}
+.il-map-region .il-map-label{font-style:italic;letter-spacing:2px;fill:#9fb0c2}
+.il-map-link{stroke:rgba(140,160,180,.25);stroke-width:1.2;stroke-dasharray:4 5}
+.il-map-npc-ring{fill:none;stroke:rgba(156,142,238,.6);stroke-width:1.5}
+.il-map-player-halo{fill:none;stroke:#8fb7e8;stroke-width:2;opacity:.8}
+.il-map-player-dot{fill:#8fb7e8;stroke:#e8f2ff;stroke-width:2}
+.il-map-player-label{fill:#cfe3f7;font-size:13px;font-weight:600;paint-order:stroke;stroke:rgba(10,14,18,.85);stroke-width:3px}
+.il-map-chips{display:flex;flex-wrap:wrap;gap:3px;justify-content:center;pointer-events:none}
+.il-map-chip{font-size:10px;line-height:1;padding:2px 5px;border-radius:6px;border:1px solid #5a5a66;background:rgba(22,22,28,.85);color:#b9bec8;white-space:nowrap}
+.il-map-chip.is-active{border-color:#8ee6a2;color:#b9f0c6}
+.il-map-chip.is-recent{border-color:#f5d77d;color:#f0e2b0}
+.il-map-chip.is-dormant{opacity:.55}
+.il-map-detail{width:300px;max-width:46vw;border-left:1px solid #333;background:rgba(16,18,24,.96);padding:14px 16px;overflow-y:auto;color:#c9cfd9;box-sizing:border-box}
+.il-map-detail h3{margin:0 0 8px;color:#e2c99a}
+.il-map-detail-summary{font-size:.9em}
+.il-map-detail-state{font-size:.85em;color:#9fd6a8}
+.il-map-detail-facts{margin:8px 0;padding-left:18px;font-size:.85em;color:#a8b0bc}
+.il-map-detail-npcs ul{list-style:none;margin:6px 0 0;padding:0;display:flex;flex-direction:column;gap:4px}
+.il-map-detail-npcs li{font-size:.85em;padding:3px 8px;border-radius:6px;border:1px solid #444}
+.il-map-detail-npcs li.is-active{border-color:#8ee6a2;color:#b9f0c6}
+.il-map-detail-npcs li.is-recent{border-color:#f5d77d;color:#f0e2b0}
+.il-map-detail-npcs li.is-dormant{opacity:.55}
+.il-map-toggle{pointer-events:auto;display:inline-flex;align-items:center;padding:4px 8px;border-radius:9px;border:1px solid #5a5a66;background:rgba(22,22,28,.88);color:#c8b78a;cursor:pointer}
+.il-map-toggle svg{width:16px;height:16px;display:block}
+#il_minimap{position:fixed;right:12px;bottom:calc(env(safe-area-inset-bottom,0px) + 96px);z-index:29000;width:190px;border:1px solid #5a5a66;border-radius:12px;background:rgba(16,18,24,.92);box-shadow:0 4px 14px rgba(0,0,0,.4);color:#c9cfd9;font-size:.8em;cursor:grab;touch-action:none}
+.il-minimap-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:7px 10px 4px;border-bottom:1px solid #333}
+.il-minimap-loc{font-weight:600;color:#e2c99a}
+.il-minimap-expand{cursor:pointer;color:#8fb7e8;padding:2px 4px}
+.il-minimap-body{padding:6px 10px 8px}
+.il-minimap-near{display:flex;flex-direction:column;gap:3px;color:#a8b0bc}
+.il-minimap-near.is-empty{font-style:italic;color:#6d7684}
+.il-minimap-dots{display:flex;gap:4px;margin-top:6px}
+.il-minimap-dots i{width:7px;height:7px;border-radius:50%;background:#5a5a66}
+.il-minimap-dots i.is-on{background:#8ee6a2;box-shadow:0 0 6px rgba(142,230,162,.7)}
+.il-scene-link{stroke:rgba(156,142,238,.4);stroke-width:1.6;stroke-dasharray:none}
+.il-scene-dot{stroke-width:2.5;filter:drop-shadow(0 0 6px rgba(200,183,138,.45))}
+@media (max-width:720px){.il-map-hint{display:none}.il-map-title{font-size:.92em}.il-map-detail{position:absolute;left:0;right:0;bottom:0;width:auto;max-width:none;max-height:46%;border-left:none;border-top:1px solid #333;border-radius:14px 14px 0 0}#il_minimap{width:156px;right:8px;bottom:calc(env(safe-area-inset-bottom,0px) + 108px);font-size:.75em}}
+@media (max-width:400px){.il-map-header{gap:6px;padding:6px 8px}.il-map-zoom-btn{width:30px;height:30px}}
+`;
+
+function ensureInlineStyles() {
+    if (typeof document === 'undefined') return;
+    if (document.getElementById(MAP_STYLE_ID)) return;
+    const style = document.createElement('style');
+    style.id = MAP_STYLE_ID;
+    style.textContent = MAP_STYLES;
+    document.head.appendChild(style);
+}
+
 function svgEscape(value) {
     return String(value ?? '')
         .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
@@ -310,6 +386,7 @@ export function createMapPanel() {
     };
 
     const ensureOverlay = () => {
+        ensureInlineStyles();
         if (overlay) return;
         overlay = document.createElement('div');
         overlay.id = 'il_map_overlay';
@@ -489,6 +566,7 @@ export function createMinimap(openFullMap) {
     };
 
     const ensure = () => {
+        ensureInlineStyles();
         if (element) return;
         element = document.createElement('div');
         element.id = 'il_minimap';
