@@ -464,6 +464,10 @@ export function createMapPanel() {
 export function createMinimap(openFullMap) {
     let element = null;
     let drag = null;
+    let hiddenByUser = false;
+    try {
+        hiddenByUser = globalThis.localStorage?.getItem('innerlore:minimap:hidden') === '1';
+    } catch { /* no storage */ }
 
     const restorePosition = () => {
         try {
@@ -523,10 +527,22 @@ export function createMinimap(openFullMap) {
         element.addEventListener('pointercancel', release);
     };
 
+    ensure();
+    if (hiddenByUser) element.classList.add('displayNone');
+
     return {
+        toggle() {
+            ensure();
+            const nowVisible = element.classList.toggle('displayNone') === false;
+            hiddenByUser = !nowVisible;
+            try {
+                globalThis.localStorage?.setItem('innerlore:minimap:hidden', nowVisible ? '0' : '1');
+            } catch { /* no storage */ }
+            return nowVisible;
+        },
         refresh(store, scene) {
             ensure();
-            if (!store) {
+            if (!store || hiddenByUser) {
                 element.classList.add('displayNone');
                 return;
             }
