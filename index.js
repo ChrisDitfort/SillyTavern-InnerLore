@@ -126,7 +126,7 @@ const PROMPT_KEY = 'inner_lore_context';
 const TURN_CONTRACT_PROMPT_KEY = 'inner_lore_latest_turn_contract';
 const TRIGGER_DELIVERY_PROMPT_KEY = 'inner_lore_trigger_delivery';
 const DISPLAY_NAME = 'InnerLore';
-const EXTENSION_VERSION = '0.20.3';
+const EXTENSION_VERSION = '0.20.4';
 const LOG_PREFIX = '[InnerLore]';
 
 /**
@@ -1593,7 +1593,7 @@ body.il-dock-active #chat{padding-top:34px}
 .il-cast-photo{background:radial-gradient(circle at 50% 32%, rgba(90,105,135,.35), rgba(30,34,44,.85))}
 .il-cast-user .il-cast-photo{background:radial-gradient(circle at 50% 32%, rgba(95,135,181,.4), rgba(24,32,48,.9))}
 .il-cast-user .il-cast-name{color:#cfe3f7}
-#il_entity_card{position:fixed;inset:0;z-index:42000;background:#0c0f15;color:#c9cfd9}
+#il_entity_card{position:fixed!important;top:0!important;left:0!important;right:0!important;bottom:0!important;width:100vw!important;height:100vh!important;height:100dvh!important;max-width:none!important;z-index:42000;background:#0c0f15;color:#c9cfd9}
 .il-entity-card-inner{display:flex;flex-direction:column;width:100%;height:100%}
 .il-entity-head{display:flex;align-items:center;gap:12px;padding:calc(env(safe-area-inset-top,0px) + 14px) 16px 14px;border-bottom:1px solid #2c313c;background:linear-gradient(180deg, rgba(38,44,58,.95), rgba(20,24,33,.98))}
 .il-entity-heading{flex:1;display:flex;flex-direction:column;min-width:0}
