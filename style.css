@@ -991,3 +991,54 @@ button.il-mv-card-toggle {
     .il-map-header { gap: 6px; padding: 6px 8px; }
     .il-map-zoom-btn { width: 30px; height: 30px; }
 }
+
+/* Map view tabs and floating minimap. */
+.il-map-views { display: inline-flex; gap: 4px; }
+.il-map-view-btn {
+    padding: 6px 12px;
+    border-radius: 8px;
+    border: 1px solid #5a5a66;
+    background: rgba(22, 22, 28, 0.9);
+    color: #9aa3b0;
+    font-size: 0.85em;
+    cursor: pointer;
+    min-height: 30px;
+}
+.il-map-view-btn.is-active { border-color: #c8b78a; color: #e2c99a; }
+
+#il_minimap {
+    position: fixed;
+    right: 12px;
+    bottom: 86px;
+    z-index: 29000;
+    width: 190px;
+    border: 1px solid #5a5a66;
+    border-radius: 12px;
+    background: rgba(16, 18, 24, 0.92);
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+    color: #c9cfd9;
+    font-size: 0.8em;
+    cursor: grab;
+    touch-action: none;
+    backdrop-filter: blur(3px);
+}
+.il-minimap-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 7px 10px 4px;
+    border-bottom: 1px solid #333;
+}
+.il-minimap-loc { font-weight: 600; color: #e2c99a; }
+.il-minimap-expand { cursor: pointer; color: #8fb7e8; padding: 2px 4px; }
+.il-minimap-body { padding: 6px 10px 8px; }
+.il-minimap-near { display: flex; flex-direction: column; gap: 3px; color: #a8b0bc; }
+.il-minimap-near.is-empty { font-style: italic; color: #6d7684; }
+.il-minimap-dots { display: flex; gap: 4px; margin-top: 6px; }
+.il-minimap-dots i { width: 7px; height: 7px; border-radius: 50%; background: #5a5a66; }
+.il-minimap-dots i.is-on { background: #8ee6a2; box-shadow: 0 0 6px rgba(142, 230, 162, 0.7); }
+
+@media (max-width: 720px) {
+    #il_minimap { width: 160px; right: 8px; bottom: 96px; }
+}

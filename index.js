@@ -31,7 +31,7 @@ import {
     uniqueStrings,
 } from './core.js?v=46';
 import { compileContext } from './context-compiler.js?v=5';
-import { createMapPanel } from './map-view.js?v=1';
+import { createMapPanel, createMinimap } from './map-view.js?v=2';
 import {
     applyContextProfileToSettings,
     deriveContextBudgets,
@@ -1670,6 +1670,21 @@ function updateCastCards() {
     userCard.innerHTML = `${CAST_SVG.user}<span></span>`;
     userCard.querySelector('span').textContent = userName;
     bar.appendChild(userCard);
+    if (!runtime.minimap) {
+        runtime.minimap = createMinimap(() => {
+            if (!runtime.mapPanel) runtime.mapPanel = createMapPanel();
+            runtime.mapPanel.open();
+            const renderMap = attempt => {
+                const store = getChatStore();
+                if (store) {
+                    runtime.mapPanel.refresh(store, runtime.lastCompilation?.scene || null, cleanString(context().name1, 100) || 'You');
+                    return;
+                }
+                if (attempt < 6) setTimeout(() => renderMap(attempt + 1), 1_000);
+            };
+            renderMap(0);
+        });
+    }
     const mapToggle = document.createElement('button');
     mapToggle.type = 'button';
     mapToggle.className = 'il-map-toggle';
@@ -1934,6 +1949,7 @@ function updateInjection({ isContinue = false } = {}) {
         ctx.setExtensionPrompt(PROMPT_KEY, injection, 1, Number(settings.injectionDepth) || 0, false, 0);
         runtime.lastInjection = injection;
         updateCastCards();
+        runtime.minimap?.refresh(promptStore, compilation?.scene || null);
         if (runtime.mapPanel && !document.getElementById('il_map_overlay')?.classList.contains('displayNone')) {
             runtime.mapPanel.refresh(promptStore, compilation?.scene || null, cleanString(ctx.name1, 100) || 'You');
         }

@@ -154,6 +154,66 @@ export function buildMapModel(store, scene, playerName = '') {
     };
 }
 
+/**
+ * Scene view model: the local bubble around the current scene - the location
+ * itself, its parent region, the places it contains, and everyone present,
+ * laid out as a "you are here" cluster.
+ */
+export function buildSceneModel(store, scene, playerName = '', chatLength = 1_000_000) {
+    const keyOf = name => String(name || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    const entities = Object.values(store?.entities || {});
+    const locations = entities.filter(entity => entity?.type === 'location' && entity.enabled !== false);
+    const characters = entities.filter(entity => entity?.type === 'character' && entity.enabled !== false);
+    const byKey = new Map();
+    for (const location of locations) byKey.set(keyOf(location.name), location);
+
+    const focusKey = keyOf(scene?.location?.name || '');
+    const focus = focusKey ? byKey.get(focusKey) : null;
+    const hostName = focus?.name || scene?.location?.name || 'Somewhere';
+
+    const node = (name, x, y, extra = {}) => ({
+        id: 'scene:' + keyOf(name), name, region: false, x, y, importance: 50,
+        parent: '', summary: '', description: '', facts: [], currentState: '',
+        npcs: [], ...extra,
+    });
+
+    const center = node(hostName, 500, 340, { importance: 90 });
+    const model = { nodes: [center], player: { name: playerName || 'You', x: 500, y: 340, node: center } };
+
+    const parentName = focus?.parentLocationName || '';
+    if (parentName && byKey.has(keyOf(parentName))) {
+        const parent = byKey.get(keyOf(parentName));
+        model.nodes.push(node(parent.name, 500, 160, {
+            region: true, summary: parent.summary || '', currentState: parent.currentState || '', facts: parent.facts || [],
+        }));
+    }
+    const children = locations
+        .filter(location => keyOf(location.parentLocationName) === keyOf(hostName) && keyOf(location.name) !== focusKey)
+        .slice(0, 8);
+    children.forEach((child, index) => {
+        const angle = (Math.PI * 2 * index) / Math.max(4, children.length) - Math.PI / 2;
+        model.nodes.push(node(child.name, 500 + Math.cos(angle) * 190, 340 + Math.sin(angle) * 150, {
+            summary: child.summary || '', currentState: child.currentState || '', facts: child.facts || [],
+            importance: child.importance || 50,
+        }));
+    });
+
+    // Everyone present: scene participants first, then containment and
+    // current-state matching, exactly like the world map.
+    const sceneNames = new Set((scene?.participants || []).map(item => keyOf(item?.name)));
+    for (const character of characters) {
+        const age = chatLength - (Number.isFinite(character.lastSeenMessage) ? character.lastSeenMessage : -1);
+        const chip = { name: character.name, active: age <= 8, recent: age <= 24 };
+        let hosted = sceneNames.has(keyOf(character.name));
+        if (!hosted && focus) {
+            hosted = keyOf(character.parentLocationName) === keyOf(hostName);
+        }
+        if (hosted) center.npcs.push(chip);
+        else if (model.nodes.length > 1) model.nodes[1].npcs.push(chip);
+    }
+    return model;
+}
+
 /** Render the map model into the overlay's SVG element. */
 function renderModel(container, model, callbacks) {
     const links = [];
@@ -210,6 +270,8 @@ export function createMapPanel() {
     let view = { x: 0, y: 0, scale: 1 };
     let drag = null;
     let lastModel = null;
+    let activeView = 'world';
+    let lastInputs = null;
 
     const applyView = () => {
         if (!svg) return;
@@ -224,7 +286,11 @@ export function createMapPanel() {
         overlay.className = 'displayNone';
         overlay.innerHTML = `
             <div class="il-map-header">
-                <span class="il-map-title">InnerLore — world map</span>
+                <span class="il-map-title">InnerLore — map</span>
+                <span class="il-map-views">
+                    <button type="button" class="il-map-view-btn is-active" data-view="world">World</button>
+                    <button type="button" class="il-map-view-btn" data-view="scene">Scene</button>
+                </span>
                 <span class="il-map-hint">drag to pan · pinch or wheel to zoom · tap a place for details</span>
                 <span class="il-map-zoom">
                     <button type="button" class="il-map-zoom-btn" data-zoom="out" aria-label="Zoom out">−</button>
@@ -295,6 +361,16 @@ export function createMapPanel() {
             view.scale = Math.min(6, Math.max(0.7, view.scale * (event.deltaY < 0 ? 1.15 : 0.87)));
             applyView();
         }, { passive: false });
+        for (const button of overlay.querySelectorAll('.il-map-view-btn')) {
+            button.addEventListener('click', () => {
+                activeView = button.dataset.view === 'scene' ? 'scene' : 'world';
+                for (const other of overlay.querySelectorAll('.il-map-view-btn')) {
+                    other.classList.toggle('is-active', other === button);
+                }
+                view = { x: 0, y: 0, scale: 1 };
+                if (lastInputs) refresh(lastInputs.store, lastInputs.scene, lastInputs.playerName);
+            });
+        }
         for (const button of overlay.querySelectorAll('.il-map-zoom-btn')) {
             button.addEventListener('click', () => {
                 if (button.dataset.zoom === 'reset') {
@@ -324,13 +400,16 @@ export function createMapPanel() {
 
     function refresh(store, scene, playerName) {
         ensureOverlay();
+        lastInputs = { store, scene, playerName };
         if (!store) {
             if (svg) svg.innerHTML = '<text x="500" y="350" text-anchor="middle" fill="#8fa3b8" font-size="18" font-family="serif" font-style="italic">World state is still loading…</text>';
             return;
         }
         const chat = (typeof window !== 'undefined' && window.SillyTavern?.getContext?.()?.chat) || [];
         const enrichedScene = { ...scene, chatLength: chat.length };
-        lastModel = buildMapModel(store, enrichedScene, playerName);
+        lastModel = activeView === 'scene'
+            ? buildSceneModel(store, enrichedScene, playerName, chat.length)
+            : buildMapModel(store, enrichedScene, playerName);
         renderModel(svg, lastModel, { onSelect: showDetail });
         applyView();
     }
@@ -345,4 +424,111 @@ export function createMapPanel() {
     }
 
     return { open, refresh, close };
+}
+
+/**
+ * Floating minimap: a small draggable widget showing the current location,
+ * its nearest neighbors, and NPC activity dots. Clicking it opens the full
+ * map on the scene view. Its position persists in localStorage.
+ */
+export function createMinimap(openFullMap) {
+    let element = null;
+    let drag = null;
+
+    const restorePosition = () => {
+        try {
+            const saved = JSON.parse(globalThis.localStorage?.getItem('innerlore:minimap:pos') || 'null');
+            if (saved && Number.isFinite(saved.x) && Number.isFinite(saved.y)) {
+                element.style.right = 'auto';
+                element.style.bottom = 'auto';
+                element.style.left = Math.max(8, Math.min(saved.x, window.innerWidth - 200)) + 'px';
+                element.style.top = Math.max(8, Math.min(saved.y, window.innerHeight - 160)) + 'px';
+            }
+        } catch { /* no storage */ }
+    };
+
+    const persistPosition = () => {
+        try {
+            const rect = element.getBoundingClientRect();
+            globalThis.localStorage?.setItem('innerlore:minimap:pos', JSON.stringify({ x: rect.left, y: rect.top }));
+        } catch { /* no storage */ }
+    };
+
+    const ensure = () => {
+        if (element) return;
+        element = document.createElement('div');
+        element.id = 'il_minimap';
+        element.className = 'displayNone';
+        element.innerHTML = `
+            <div class="il-minimap-head">
+                <span class="il-minimap-loc"></span>
+                <span class="il-minimap-expand" title="Open the full map" role="button" tabindex="0">⤢</span>
+            </div>
+            <div class="il-minimap-body"></div>`;
+        document.body.appendChild(element);
+        restorePosition();
+        element.querySelector('.il-minimap-expand').addEventListener('click', event => {
+            event.stopPropagation();
+            openFullMap?.();
+        });
+        element.addEventListener('pointerdown', event => {
+            if (event.target.closest('.il-minimap-expand')) return;
+            drag = { x: event.clientX, y: event.clientY, left: element.offsetLeft, top: element.offsetTop };
+            element.setPointerCapture(event.pointerId);
+        });
+        element.addEventListener('pointermove', event => {
+            if (!drag) return;
+            element.style.right = 'auto';
+            element.style.bottom = 'auto';
+            element.style.left = Math.max(4, drag.left + event.clientX - drag.x) + 'px';
+            element.style.top = Math.max(4, drag.top + event.clientY - drag.y) + 'px';
+        });
+        const release = () => {
+            if (drag) {
+                drag = null;
+                persistPosition();
+            }
+        };
+        element.addEventListener('pointerup', release);
+        element.addEventListener('pointercancel', release);
+    };
+
+    return {
+        refresh(store, scene) {
+            ensure();
+            if (!store) {
+                element.classList.add('displayNone');
+                return;
+            }
+            const keyOf = name => String(name || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+            const entities = Object.values(store.entities || {});
+            const locations = entities.filter(entity => entity?.type === 'location' && entity.enabled !== false);
+            const byKey = new Map(locations.map(location => [keyOf(location.name), location]));
+            const focusKey = keyOf(scene?.location?.name || '');
+            const focus = byKey.get(focusKey);
+            const here = focus?.name || scene?.location?.name || 'Somewhere';
+            const neighbors = locations
+                .filter(location => keyOf(location.name) !== focusKey
+                    && (keyOf(location.parentLocationName) === focusKey
+                        || (focus && keyOf(location.parentLocationName) === keyOf(focus.parentLocationName || '') && keyOf(location.parentLocationName))))
+                .slice(0, 4);
+            const chat = (typeof window !== 'undefined' && window.SillyTavern?.getContext?.()?.chat) || [];
+            const activeNearby = entities
+                .filter(entity => entity?.type === 'character' && entity.enabled !== false
+                    && chat.length - (Number.isFinite(entity.lastSeenMessage) ? entity.lastSeenMessage : -1) <= 8)
+                .slice(0, 6);
+            element.querySelector('.il-minimap-loc').textContent = here;
+            element.querySelector('.il-minimap-body').innerHTML =
+                (neighbors.length
+                    ? `<div class="il-minimap-near">${neighbors.map(n => `<span>${svgEscape(n.name)}</span>`).join('')}</div>`
+                    : '<div class="il-minimap-near is-empty">No nearby places discovered yet</div>')
+                + (activeNearby.length
+                    ? `<div class="il-minimap-dots">${activeNearby.map(() => '<i class="is-on"></i>').join('')}</div>`
+                    : '');
+            element.classList.remove('displayNone');
+        },
+        hide() {
+            element?.classList.add('displayNone');
+        },
+    };
 }
