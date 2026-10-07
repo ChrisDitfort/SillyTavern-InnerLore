@@ -61,6 +61,11 @@ const MAP_STYLES = `
 .il-map-detail-npcs li.is-dormant{opacity:.55}
 .il-map-toggle{pointer-events:auto;display:inline-flex;align-items:center;padding:4px 8px;border-radius:9px;border:1px solid #5a5a66;background:rgba(22,22,28,.88);color:#c8b78a;cursor:pointer}
 .il-map-toggle svg{width:16px;height:16px;display:block}
+body.il-dock-active #chat{padding-top:34px}
+#il_cast_bar.il-dock #il_minimap{position:static;width:auto;min-width:180px;max-width:280px;flex:1 1 180px;margin-left:auto;border:none;background:transparent;box-shadow:none;padding:0;cursor:default;color:#a8b0bc}
+#il_cast_bar.il-dock #il_minimap .il-minimap-head{padding:0 0 3px;border-bottom:1px solid #2c313c}
+#il_cast_bar.il-dock #il_minimap .il-minimap-body{padding:3px 0 0}
+body.il-dock-active #chat{padding-top:34px}
 #il_minimap{position:fixed;right:12px;top:calc(env(safe-area-inset-top,0px) + 54px);z-index:40000;width:190px;border:1px solid #5a5a66;border-radius:12px;background:rgba(16,18,24,.92);box-shadow:0 4px 14px rgba(0,0,0,.4);color:#c9cfd9;font-size:.8em;cursor:grab;touch-action:none}
 .il-minimap-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:7px 10px 4px;border-bottom:1px solid #333}
 .il-minimap-loc{font-weight:600;color:#e2c99a}
@@ -601,6 +606,7 @@ export function createMinimap(openFullMap, versionText = '') {
             openFullMap?.();
         });
         element.addEventListener('pointerdown', event => {
+            if (element.dataset.docked === '1') return;
             if (event.target.closest('.il-minimap-expand')) return;
             drag = { x: event.clientX, y: event.clientY, left: element.offsetLeft, top: element.offsetTop };
             element.setPointerCapture(event.pointerId);
@@ -625,7 +631,17 @@ export function createMinimap(openFullMap, versionText = '') {
     ensure();
     if (hiddenByUser) element.classList.add('displayNone');
 
+    const dockInto = container => {
+        ensure();
+        element.dataset.docked = '1';
+        for (const key of ['position', 'top', 'right', 'bottom', 'left', 'zIndex', 'width', 'border', 'borderRadius', 'background', 'boxShadow', 'padding']) {
+            element.style[key] = '';
+        }
+        if (container && element.parentElement !== container) container.appendChild(element);
+    };
+
     return {
+        dockInto,
         toggle() {
             try {
                 ensure();

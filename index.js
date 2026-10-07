@@ -126,7 +126,7 @@ const PROMPT_KEY = 'inner_lore_context';
 const TURN_CONTRACT_PROMPT_KEY = 'inner_lore_latest_turn_contract';
 const TRIGGER_DELIVERY_PROMPT_KEY = 'inner_lore_trigger_delivery';
 const DISPLAY_NAME = 'InnerLore';
-const EXTENSION_VERSION = '0.19.8';
+const EXTENSION_VERSION = '0.20.0';
 const LOG_PREFIX = '[InnerLore]';
 
 /**
@@ -1560,6 +1560,26 @@ async function prepareServerContext({ force = false } = {}) {
  * area as an ephemeral, styled bubble - a player-side view only; it is never
  * saved to the chat and never enters the model's context.
  */
+/** Dock styles for the HUD strip, injected from the (cache-busted) module so
+ *  a stale stylesheet can never unstyle the bar. Night-theme palette. */
+const DOCK_STYLE_ID = 'il_dock_styles';
+function ensureDockStyles() {
+    if (typeof document === 'undefined') return;
+    if (document.getElementById(DOCK_STYLE_ID)) return;
+    const style = document.createElement('style');
+    style.id = DOCK_STYLE_ID;
+    style.textContent = `
+#il_cast_bar{position:fixed;top:6px;left:52px;display:flex;gap:6px;z-index:30000;max-width:min(46vw,620px);pointer-events:none}
+#il_cast_bar.il-dock{position:fixed;top:calc(env(safe-area-inset-top,0px) + 44px);left:0;right:0;max-width:none;padding:5px 10px;background:rgba(9,11,16,.92);border-bottom:1px solid #262b34;backdrop-filter:blur(5px);z-index:28000;flex-wrap:wrap;align-items:center}
+#il_cast_bar.il-dock .il-cast-card{border-color:#3a4150;background:rgba(24,27,34,.85);color:#c3cad6}
+#il_cast_bar.il-dock .il-cast-user{border-color:#5f87b5;color:#cfe3f7}
+#il_cast_bar.il-dock .il-map-toggle{border-color:#3a4150;background:rgba(24,27,34,.85)}
+#il_cast_bar.il-dock .il-cast-eye{color:#9c8eee}
+body.il-dock-active #chat{padding-top:34px}
+`;
+    document.head.appendChild(style);
+}
+
 const CAST_SVG = {
     person: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 3.6-7 8-7s8 3 8 7"/></svg>',
     user: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 3.6-7 8-7s8 3 8 7"/><path d="M17 3l4 4M21 3l-4 4"/></svg>',
@@ -1622,8 +1642,11 @@ function renderMindInChat(name) {
 }
 
 function updateCastCards() {
+    ensureDockStyles();
     const bar = castBarElement();
     bar.innerHTML = '';
+    bar.classList.add('il-dock');
+    document.body.classList.add('il-dock-active');
     const ctx = context();
     const userName = cleanString(ctx.name1, 100) || 'You';
     const userKey = canonicalNameKey(userName);
@@ -1685,6 +1708,7 @@ function updateCastCards() {
             };
             renderMap(0);
         }, EXTENSION_VERSION);
+        runtime.minimap.dockInto(bar);
         runtime.minimap.refresh(getChatStore(), runtime.lastCompilation?.scene || null);
     }
     const mapToggle = document.createElement('button');
