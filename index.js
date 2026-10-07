@@ -127,7 +127,7 @@ const PROMPT_KEY = 'inner_lore_context';
 const TURN_CONTRACT_PROMPT_KEY = 'inner_lore_latest_turn_contract';
 const TRIGGER_DELIVERY_PROMPT_KEY = 'inner_lore_trigger_delivery';
 const DISPLAY_NAME = 'InnerLore';
-const EXTENSION_VERSION = '0.20.8';
+const EXTENSION_VERSION = '0.21.0';
 const LOG_PREFIX = '[InnerLore]';
 
 /**
@@ -5417,7 +5417,6 @@ function registerEvents() {
     if (events.MESSAGE_SENT) {
         eventSource.on(events.MESSAGE_SENT, () => {
         runtime.storySendPendingAt = Date.now();
-        runtime.announceStoryState?.(true);
             // GENERATION_STARTED fires before SillyTavern moves the textarea
             // into chat. Refresh again here so the current player action—and
             // an explicit time skip such as “five minutes pass”—is in the
@@ -5487,6 +5486,8 @@ function registerEvents() {
                 console.error(`${LOG_PREFIX} Could not persist foreground event verification:`, error);
             });
         }
+        runtime.storyRequestInFlight = false;
+        runtime.announceStoryState?.(false);
         queueCompletedAssistantTurn(store);
         // Immediate, model-free HUD refresh: rebuild the scene from the new
         // reply deterministically so location and present cast update the
@@ -5603,17 +5604,27 @@ function registerEvents() {
         eventSource.on(events.CHAT_COMPLETION_PROMPT_READY, async prompt => {
             const settings = getSettings();
             if (!settings.enabled || !runtime.activeStoryGenerationId) return;
-            if (backgroundInFlightCount() > 0) {
-                // Story and background never overlap: let the in-flight
-                // background request finish, keep the user informed, then this
-                // story request leaves - no failed attempt, no retry.
+            // Background-first: everything already running - and anything
+            // scheduled but not yet started - completes before the story
+            // narrates, so the packet carries the freshest world state.
+            const scheduledBackground = () => Boolean(
+                runtime.queued || runtime.historyRebuildQueued || runtime.foundationPromise
+                || runtime.historyTimer || runtime.preparingFoundation);
+            if (backgroundInFlightCount() > 0 || scheduledBackground()) {
                 showNarratorPill('Narrating - background work finishing first');
+                const startedWaiting = Date.now();
                 try {
-                    await waitForBackgroundIdle();
+                    for (;;) {
+                        await waitForBackgroundIdle();
+                        if (!scheduledBackground() || Date.now() - startedWaiting > 120_000) break;
+                        await new Promise(resolve => setTimeout(resolve, 750));
+                    }
                 } finally {
                     showNarratorPill('Narrating');
                 }
             }
+            runtime.storyRequestInFlight = true;
+            runtime.announceStoryState?.(true);
             if (!runtime.derivedContext) return;
             // SillyTavern 1.18 passes { chat }; older builds passed { messages }.
             // The array must be mutated in place - reassignment is ignored.
@@ -5647,6 +5658,10 @@ function registerEvents() {
     }
     if (events.GENERATION_STOPPED) {
         eventSource.on(events.GENERATION_STOPPED, () => {
+            if (runtime.storyRequestInFlight) {
+                runtime.storyRequestInFlight = false;
+                runtime.announceStoryState?.(false);
+            }
             runtime.storySendPendingAt = 0;
             if (runtime.activeStoryGenerationId) {
                 runtime.activeStoryGenerationId = '';
@@ -5816,13 +5831,14 @@ function initializeServerStateAfterAppReady(ctx) {
     // any active story generation to finish instead of racing it into a
     // provider-side "concurrent generation is locked" rejection.
     setStoryIdleGate(async signal => {
-        // Story and background never overlap - in this tab or any other:
-        // background requests wait for any active (or just-sent, still
-        // assembling) story generation before leaving.
-        const storyBusy = () => Boolean(runtime.activeStoryGenerationId)
-            || (Date.now() - (runtime.storySendPendingAt || 0) < 60_000)
-            || Boolean(runtime.peerStoryActiveAt && Date.now() - runtime.peerStoryActiveAt < 120_000);
-        while (storyBusy() && !signal?.aborted) {
+        // Serialized scheduling, background-first: background work runs ahead
+        // of the story whenever both are pending, and only defers to a story
+        // request that is actually streaming (not one still waiting behind
+        // background work - that ordering is the whole point). Peer stories
+        // still block, with a staleness expiry so a dead tab cannot wedge it.
+        while (!signal?.aborted
+            && (runtime.storyRequestInFlight
+                || Boolean(runtime.peerStoryActiveAt && Date.now() - runtime.peerStoryActiveAt < 120_000))) {
             await new Promise(resolve => setTimeout(resolve, 1_000));
         }
     });
