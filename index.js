@@ -127,7 +127,7 @@ const PROMPT_KEY = 'inner_lore_context';
 const TURN_CONTRACT_PROMPT_KEY = 'inner_lore_latest_turn_contract';
 const TRIGGER_DELIVERY_PROMPT_KEY = 'inner_lore_trigger_delivery';
 const DISPLAY_NAME = 'InnerLore';
-const EXTENSION_VERSION = '0.22.4';
+const EXTENSION_VERSION = '0.22.5';
 const LOG_PREFIX = '[InnerLore]';
 
 /**
@@ -1572,7 +1572,7 @@ function ensureDockStyles() {
     style.id = DOCK_STYLE_ID;
     style.textContent = `
 #il_cast_bar{position:fixed;top:6px;left:52px;display:flex;gap:6px;z-index:30000;max-width:min(46vw,620px);pointer-events:none}
-#il_cast_bar.il-dock{position:fixed;top:calc(env(safe-area-inset-top,0px) + 44px);left:0;right:0;max-width:none;padding:5px 10px;background:rgba(9,11,16,.92);border-bottom:1px solid #262b34;backdrop-filter:blur(5px);z-index:20;flex-wrap:wrap;align-items:center}
+#il_cast_bar.il-dock{position:fixed;top:calc(env(safe-area-inset-top,0px) + 44px);left:0;right:0;max-width:none;padding:5px 10px;background:rgba(9,11,16,.92);border-bottom:1px solid #262b34;backdrop-filter:blur(5px);z-index:1000;flex-wrap:wrap;align-items:center}
 #il_cast_bar.il-dock .il-cast-card{border-color:#3a4150;background:rgba(24,27,34,.85);color:#c3cad6}
 #il_cast_bar.il-dock .il-cast-user{border-color:#5f87b5;color:#cfe3f7}
 #il_cast_bar.il-dock .il-map-toggle{border-color:#3a4150;background:rgba(24,27,34,.85)}
