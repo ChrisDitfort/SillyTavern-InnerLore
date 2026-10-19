@@ -9,6 +9,7 @@
 import {
     canonicalNameKey,
     cleanString,
+    cleanTextMentions,
     clipAtBoundary,
     contextSimilarity,
     contextTokens,
@@ -198,15 +199,35 @@ function locationRanking(store, latestText, focusText, participantNames, current
         location: curatedLocationOf(store?.entities, record),
         weight: record === playerRecord ? 2 : 1,
     })).filter(item => item.location);
-    return Object.values(store?.entities || {})
-        .filter(record => record?.type === 'location' && record.enabled !== false)
+    const locations = Object.values(store?.entities || {})
+        .filter(record => record?.type === 'location' && record.enabled !== false);
+    const allReferences = locations.flatMap(record => recordReferences(record).map(reference => ({ id: record.id, reference })));
+    // "Highmarket Gate" names the gate, not the town: a place is only
+    // mentioned where its name stands on its own, outside any longer known
+    // place name that contains it.
+    const ownMentions = (text, record, references) => {
+        const keys = references.map(reference => reference.toLocaleLowerCase());
+        let remaining = text;
+        for (const { id, reference } of allReferences) {
+            const lower = reference.toLocaleLowerCase();
+            if (id === record.id || !keys.some(key => lower.length > key.length && lower.includes(key))) continue;
+            remaining = remaining.replace(new RegExp(reference.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), 'giu'), ' ');
+        }
+        return cleanTextMentions(remaining, references);
+    };
+    // Each passage is cleaned and tokenized once, not once per location.
+    const latestClean = cleanString(latestText, 200_000);
+    const focusClean = cleanString(focusText, 200_000);
+    const latestTokens = new Set(contextTokens(latestClean));
+    const focusTokens = new Set(contextTokens(focusClean));
+    return locations
         .map(record => {
             const references = recordReferences(record);
-            const latestMention = textMentions(latestText, references);
-            const focusMention = textMentions(focusText, references);
+            const latestMention = ownMentions(latestClean, record, references);
+            const focusMention = ownMentions(focusClean, record, references);
             const state = cleanString(record.currentState, 3_000);
-            const stateSimilarity = contextSimilarity(state, latestText);
-            const focusSimilarity = contextSimilarity(`${record.summary || ''} ${state}`, focusText);
+            const stateSimilarity = contextSimilarity(state, latestTokens);
+            const focusSimilarity = contextSimilarity(`${record.summary || ''} ${state}`, focusTokens);
             const participantMatches = participantNames.filter(name => textMentions(state, [name])).length;
             const age = Math.max(0, currentIndex - (Number(record.lastSeenMessage) || 0));
             const dormant = DORMANT_LOCATION.test(state);

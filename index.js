@@ -32,7 +32,13 @@ import {
 } from './core.js?v=47';
 import { compileContext } from './context-compiler.js?v=5';
 import { deriveSceneState } from './scene.js?v=5';
-import { createMapPanel, createMinimap } from './map-view.js?v=4';
+import {
+    createMapPanel,
+    describeSurroundings,
+    exploredPlaces,
+    personBadge,
+    resolveSceneLocation,
+} from './map-view.js?v=5';
 import {
     applyContextProfileToSettings,
     deriveContextBudgets,
@@ -131,7 +137,7 @@ const PROMPT_KEY = 'inner_lore_context';
 const TURN_CONTRACT_PROMPT_KEY = 'inner_lore_latest_turn_contract';
 const TRIGGER_DELIVERY_PROMPT_KEY = 'inner_lore_trigger_delivery';
 const DISPLAY_NAME = 'InnerLore';
-const EXTENSION_VERSION = '0.23.1';
+const EXTENSION_VERSION = '0.24.0';
 const LOG_PREFIX = '[InnerLore]';
 
 /**
@@ -1582,33 +1588,64 @@ function ensureDockStyles() {
     const style = document.createElement('style');
     style.id = DOCK_STYLE_ID;
     style.textContent = `
-#il_cast_bar{position:fixed;top:6px;left:52px;display:flex;gap:6px;z-index:30000;max-width:min(46vw,620px);pointer-events:none}
-#il_cast_bar.il-dock{position:fixed;top:var(--il-dock-top,calc(env(safe-area-inset-top,0px) + 44px));left:0;right:0;max-width:none;padding:5px 10px;background:rgba(9,11,16,.92);border-bottom:1px solid #262b34;backdrop-filter:blur(5px);z-index:1000;flex-wrap:wrap;align-items:center}
-#il_cast_bar.il-dock .il-cast-card{border-color:#3a4150;background:rgba(24,27,34,.85);color:#c3cad6}
-#il_cast_bar.il-dock .il-cast-user{border-color:#5f87b5;color:#cfe3f7}
-#il_cast_bar.il-dock .il-map-toggle{border-color:#3a4150;background:rgba(24,27,34,.85)}
-#il_cast_bar.il-dock .il-cast-eye{color:#9c8eee}
+#il_cast_bar{position:fixed;z-index:1000}
+#il_cast_bar.il-dock{--il-gold:#ecd9ac;--il-line:rgba(255,255,255,.09);top:var(--il-dock-top,calc(env(safe-area-inset-top,0px) + 44px));left:0;right:0;width:auto;max-width:none;display:block;padding:0;background:linear-gradient(180deg,rgba(15,18,24,.97),rgba(10,12,17,.96));border-bottom:1px solid rgba(226,201,154,.16);box-shadow:0 8px 20px rgba(0,0,0,.35);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);color:#d6dbe4;font-size:calc(var(--mainFontSize,15px) * .93);line-height:1.3;pointer-events:auto}
+#il_cast_bar.il-dock *{box-sizing:border-box}
 body.il-dock-active #chat{padding-top:var(--il-dock-clearance,96px)}
-.il-cast-portrait{flex-direction:column;width:86px;padding:5px;gap:4px;align-items:stretch}
-.il-cast-photo{position:relative;height:46px;display:flex;align-items:center;justify-content:center;background:rgba(36,41,52,.75);border:1px solid #3a4150;border-radius:8px;color:#8896ab}
-.il-cast-photo svg{width:26px;height:26px}
-.il-cast-user .il-cast-photo{border-color:#42618a;color:#a9c4e4}
-.il-cast-info{position:absolute;top:2px;right:2px;padding:2px;background:none;border:none;cursor:pointer;color:#8fb7e8;opacity:.85}
-.il-cast-info svg{width:13px;height:13px}
-.il-cast-portrait .il-cast-eye{position:absolute;bottom:2px;right:2px;padding:2px;margin:0}
-.il-cast-portrait .il-cast-eye svg{width:13px;height:13px}
-.il-cast-name{display:block;font-size:.68em;text-align:center;color:#c3cad6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.il-dock-side{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
-.il-dock-left{flex:0 1 auto}
-.il-dock-right{margin-left:auto;flex:0 1 auto;align-items:center;gap:8px}
-.il-hud-clock{display:inline-flex;align-items:center;gap:5px;padding:5px 9px;border:1px solid #4a5468;border-radius:10px;background:linear-gradient(180deg, rgba(38,44,58,.9), rgba(24,28,38,.9));color:#e8d9a8;font-size:.76em;letter-spacing:.02em;white-space:nowrap;max-width:170px}
-.il-hud-clock span{overflow:hidden;text-overflow:ellipsis}
-.il-hud-clock svg{width:14px;height:14px;color:#c8b78a;flex:none}
-.il-cast-portrait{transition:border-color .15s, box-shadow .15s, transform .1s}
-.il-cast-portrait:hover{border-color:#5a87b5;box-shadow:0 0 10px rgba(95,135,181,.35);transform:translateY(-1px)}
-.il-cast-photo{background:radial-gradient(circle at 50% 32%, rgba(90,105,135,.35), rgba(30,34,44,.85))}
-.il-cast-user .il-cast-photo{background:radial-gradient(circle at 50% 32%, rgba(95,135,181,.4), rgba(24,32,48,.9))}
-.il-cast-user .il-cast-name{color:#cfe3f7}
+.il-hud{display:flex;align-items:center;gap:10px;max-width:1180px;margin:0 auto;padding:6px 12px;min-height:54px}
+.il-hud-place{display:flex;align-items:center;gap:9px;flex:0 1 auto;min-width:0;max-width:min(34%,320px);padding:4px 8px 4px 4px;border:0;border-radius:12px;background:none;color:inherit;font:inherit;text-align:left;cursor:pointer}
+.il-hud-place:hover{background:rgba(255,255,255,.05)}
+.il-hud-pin{flex:none;width:34px;height:34px;border-radius:50%;display:grid;place-items:center;color:#e2c99a;background:radial-gradient(circle at 50% 35%,rgba(226,201,154,.28),rgba(226,201,154,.06));border:1px solid rgba(226,201,154,.38)}
+.il-hud-pin svg{width:17px;height:17px}
+.il-hud-place-text{display:flex;flex-direction:column;min-width:0}
+.il-hud-place-name{font-weight:650;color:var(--il-gold);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.il-hud-place-time{display:flex;align-items:center;gap:4px;font-size:.78em;color:#8f99a8;white-space:nowrap;overflow:hidden}
+.il-hud-place-time svg{width:12px;height:12px;flex:none}
+.il-hud-place-time span{overflow:hidden;text-overflow:ellipsis}
+.il-hud-cast{display:flex;align-items:center;gap:8px;flex:1 1 auto;min-width:0;overflow-x:auto;overflow-y:hidden;padding:3px 2px 3px 12px;border-left:1px solid var(--il-line);scrollbar-width:none}
+.il-hud-cast::-webkit-scrollbar{display:none}
+.il-hud-avatar{flex:none;display:flex;flex-direction:column;align-items:center;gap:3px;width:50px;padding:0;border:0;background:none;color:inherit;font:inherit;cursor:pointer}
+.il-hud-face{position:relative;width:34px;height:34px;border-radius:50%;display:grid;place-items:center;font-size:.8em;font-weight:700;letter-spacing:.02em;color:#0d1016;background:hsl(var(--hue,210) 34% 64%);box-shadow:0 0 0 2px #0e1117,0 0 0 3px hsl(var(--hue,210) 25% 38%);transition:transform .12s,box-shadow .12s}
+.il-hud-avatar:hover .il-hud-face{transform:translateY(-1px);box-shadow:0 0 0 2px #0e1117,0 0 0 3px #e2c99a}
+.il-hud-avatar.is-user .il-hud-face{background:#8fb7e8;box-shadow:0 0 0 2px #0e1117,0 0 0 3.5px #cfe3f7}
+.il-hud-avatar.is-recent .il-hud-face{opacity:.55;filter:saturate(.6)}
+.il-hud-avatar.is-more .il-hud-face{background:rgba(255,255,255,.08);color:#cfd6e0;box-shadow:0 0 0 1px var(--il-line)}
+.il-hud-name{max-width:50px;font-size:.7em;color:#aab3c0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.il-hud-actions{flex:none;display:flex;gap:6px}
+.il-hud-btn{width:40px;height:40px;border-radius:12px;display:grid;place-items:center;padding:0;border:1px solid var(--il-line);background:rgba(255,255,255,.04);color:#cfd6e0;cursor:pointer}
+.il-hud-btn:hover{border-color:rgba(226,201,154,.45);color:var(--il-gold)}
+.il-hud-btn svg{width:18px;height:18px;transition:transform .15s}
+.il-hud-btn[aria-expanded="true"]{background:rgba(226,201,154,.14);color:var(--il-gold)}
+.il-hud-btn[aria-expanded="true"] svg{transform:rotate(180deg)}
+.il-hud-drawer{position:absolute;left:0;right:0;top:100%;background:#0b0d12;border-bottom:1px solid rgba(226,201,154,.16);box-shadow:0 14px 28px rgba(0,0,0,.5);max-height:min(62vh,460px);overflow-y:auto}
+.il-hud-drawer-inner{max-width:1180px;margin:0 auto;padding:10px 14px 14px;display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px}
+.il-hud-section h4{margin:0 0 7px;font-size:.68em;letter-spacing:.16em;text-transform:uppercase;color:#7d8796;font-weight:600}
+.il-hud-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:5px}
+.il-hud-row{display:flex;align-items:center;gap:10px;width:100%;padding:7px 9px;border-radius:12px;border:1px solid var(--il-line);background:rgba(255,255,255,.03);color:inherit;font:inherit;text-align:left;cursor:pointer}
+.il-hud-row:hover{border-color:rgba(226,201,154,.4)}
+.il-hud-row.is-recent{opacity:.7}
+.il-hud-row .il-hud-face{width:30px;height:30px;font-size:.72em;flex:none}
+.il-hud-row-text{min-width:0;display:flex;flex-direction:column}
+.il-hud-row-text b{font-weight:600;color:#e4e8ef}
+.il-hud-row-text small{color:#8f99a8;font-size:.8em;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.il-hud-place-dot{flex:none;width:30px;display:grid;place-items:center}
+.il-hud-place-dot::before{content:'';width:10px;height:10px;border-radius:50%;background:#e2c99a;box-shadow:0 0 0 3px rgba(226,201,154,.18)}
+.il-hud-note{margin:6px 2px 0;font-size:.8em;color:#7d8796;font-style:italic}
+.il-hud-empty{margin:0;font-size:.85em;color:#6d7684;font-style:italic}
+.il-hud-links{grid-column:1/-1;display:flex;gap:8px;flex-wrap:wrap}
+.il-hud-link{display:inline-flex;align-items:center;gap:7px;padding:8px 12px;border-radius:12px;border:1px solid var(--il-line);background:rgba(255,255,255,.04);color:#cfd6e0;font:inherit;font-size:.88em;cursor:pointer}
+.il-hud-link:hover{border-color:rgba(226,201,154,.45);color:var(--il-gold)}
+.il-hud-link svg{width:15px;height:15px}
+@media (max-width:640px){
+.il-hud{gap:8px;padding:5px 8px;min-height:50px}
+.il-hud-place{max-width:44%;gap:7px;padding-right:4px}
+.il-hud-pin{width:30px;height:30px}
+.il-hud-cast{gap:6px;padding-left:8px}
+.il-hud-avatar{width:auto}
+.il-hud-name{display:none}
+.il-hud-face{width:32px;height:32px}
+.il-hud-btn{width:38px;height:38px}
+}
 #il_entity_card{position:fixed!important;top:0!important;left:0!important;right:0!important;bottom:0!important;width:100vw!important;height:100vh!important;height:100dvh!important;max-width:none!important;z-index:42000;background:#0c0f15;color:#c9cfd9}
 .il-entity-card-inner{display:flex;flex-direction:column;width:100%;height:100%}
 .il-entity-head{display:flex;align-items:center;gap:12px;padding:calc(env(safe-area-inset-top,0px) + 14px) 16px 14px;border-bottom:1px solid #2c313c;background:linear-gradient(180deg, rgba(38,44,58,.95), rgba(20,24,33,.98))}
@@ -1634,6 +1671,16 @@ body.il-dock-active #chat{padding-top:var(--il-dock-clearance,96px)}
 `;
     document.head.appendChild(style);
 }
+
+const HUD_SVG = {
+    pin: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 21s-6.5-5.6-6.5-11a6.5 6.5 0 0 1 13 0C18.5 15.4 12 21 12 21z"/><circle cx="12" cy="10" r="2.4"/></svg>',
+    clock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15.5 14"/></svg>',
+    map: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M9 4 3 6v14l6-2 6 2 6-2V4l-6 2-6-2z"/><path d="M9 4v14M15 6v14"/></svg>',
+    compass: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m15.5 8.5-2 5-5 2 2-5z"/></svg>',
+    chevron: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>',
+};
+// Avatars shown in the bar itself; the rest are one tap away in the drawer.
+const HUD_MAX_AVATARS = 6;
 
 const CAST_SVG = {
     person: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 3.6-7 8-7s8 3 8 7"/></svg>',
@@ -1782,11 +1829,11 @@ function updateCastCards() {
     // lack fresh location anchors).
     const seen = new Set([userKey]);
     const participants = [];
-    const pushParticipant = name => {
+    const pushParticipant = (name, recent = false) => {
         const key = canonicalNameKey(name || '');
         if (!name || !key || seen.has(key)) return;
         seen.add(key);
-        participants.push({ name });
+        participants.push({ name, recent });
     };
     for (const item of (runtime.lastCompilation?.scene?.participants || [])) pushParticipant(item?.name);
     for (const brain of (runtime.lastCompilation?.selectedBrains || [])) pushParticipant(brain?.name);
@@ -1806,55 +1853,16 @@ function updateCastCards() {
             }
         }
         recent.sort((a, b) => b.lastSeen - a.lastSeen);
-        for (const item of recent) pushParticipant(item.name);
+        for (const item of recent) pushParticipant(item.name, true);
     }
     participants.splice(8);
     if (!getSettings().enabled || !currentChatId()) {
         bar.classList.add('displayNone');
         return;
     }
-    const buildPortraitCard = ({ title, icon, name, isUser, onMind, onInfo }) => {
-        const card = document.createElement('div');
-        card.className = 'il-cast-card il-cast-portrait' + (isUser ? ' il-cast-user' : '');
-        card.title = title;
-        const photo = document.createElement('div');
-        photo.className = 'il-cast-photo';
-        photo.innerHTML = icon;
-        if (onInfo) {
-            const info = document.createElement('button');
-            info.type = 'button';
-            info.className = 'il-cast-info';
-            info.title = 'View character details';
-            info.setAttribute('aria-label', `Details for ${name}`);
-            info.innerHTML = CAST_SVG.info;
-            info.addEventListener('click', event => { event.stopPropagation(); onInfo(); });
-            photo.appendChild(info);
-        }
-        if (onMind) {
-            const eye = document.createElement('button');
-            eye.type = 'button';
-            eye.className = 'il-cast-eye';
-            eye.title = 'View private mind';
-            eye.setAttribute('aria-label', `Mind of ${name}`);
-            eye.innerHTML = CAST_SVG.eye;
-            eye.addEventListener('click', event => { event.stopPropagation(); onMind(); });
-            photo.appendChild(eye);
-        }
-        const label = document.createElement('span');
-        label.className = 'il-cast-name';
-        label.textContent = name;
-        card.append(photo, label);
-        return card;
-    };
-    const leftSide = document.createElement('div');
-    leftSide.className = 'il-dock-side il-dock-left';
-    const rightSide = document.createElement('div');
-    rightSide.className = 'il-dock-side il-dock-right';
-    bar.append(leftSide, rightSide);
-    leftSide.appendChild(buildPortraitCard({ title: 'You', icon: CAST_SVG.user, name: userName, isUser: true }));
-    const clockChip = document.createElement('div');
-    clockChip.className = 'il-hud-clock';
-    const clock = getChatStore()?.progression?.clock;
+    const scene = runtime.lastCompilation?.scene || null;
+    const where = resolveSceneLocation(store, scene).name || scene?.location?.name || 'Somewhere';
+    const clock = store?.progression?.clock;
     const compactDuration = seconds => {
         const total = Math.max(0, Math.round(Number(seconds) || 0));
         if (total < 60) return `${total}s`;
@@ -1863,68 +1871,83 @@ function updateCastCards() {
         return `${Math.round(total / 86_400)}d`;
     };
     const rawLabel = clock?.currentTimeLabel || clock?.lastExactAnchor || '';
-    const clockLabel = rawLabel
-        ? (rawLabel.length > 26 ? rawLabel.slice(0, 25) + '…' : rawLabel)
-        : `T+${compactDuration(clock?.estimatedSeconds ?? 0)}`;
-    clockChip.title = rawLabel ? `Story clock: ${rawLabel}` : `Story clock: ${compactDuration(clock?.estimatedSeconds ?? 0)} elapsed (estimate)`;
-    clockChip.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15.5 14"/></svg><span></span>`;
-    clockChip.querySelector('span').textContent = clockLabel;
-    rightSide.appendChild(clockChip);
-    if (!runtime.minimap) {
-        runtime.minimap = createMinimap(() => {
-            if (!runtime.mapPanel) runtime.mapPanel = createMapPanel();
-            runtime.mapPanel.open();
-            const renderMap = attempt => {
-                const store = getChatStore();
-                if (store) {
-                    runtime.mapPanel.refresh(store, runtime.lastCompilation?.scene || null, cleanString(context().name1, 100) || 'You');
-                    return;
-                }
-                if (attempt < 6) setTimeout(() => renderMap(attempt + 1), 1_000);
-            };
-            renderMap(0);
-        }, EXTENSION_VERSION);
+    const clockLabel = rawLabel || `T+${compactDuration(clock?.estimatedSeconds ?? 0)}`;
+
+    // Where and when: tapping it opens the map around the player.
+    const hud = document.createElement('div');
+    hud.className = 'il-hud';
+    const place = document.createElement('button');
+    place.type = 'button';
+    place.className = 'il-hud-place';
+    place.title = `${where} - show the map around you`;
+    place.innerHTML = `<span class="il-hud-pin">${HUD_SVG.pin}</span><span class="il-hud-place-text"><span class="il-hud-place-name"></span><span class="il-hud-place-time">${HUD_SVG.clock}<span></span></span></span>`;
+    place.querySelector('.il-hud-place-name').textContent = where;
+    place.querySelector('.il-hud-place-time span').textContent = clockLabel;
+    place.querySelector('.il-hud-place-time').title = rawLabel
+        ? `Story clock: ${rawLabel}`
+        : `Story clock: ${compactDuration(clock?.estimatedSeconds ?? 0)} elapsed (estimate)`;
+    place.addEventListener('click', () => openWorldMap('scene'));
+
+    // Who: the player, then everyone in the scene, then the recently seen.
+    const cast = document.createElement('div');
+    cast.className = 'il-hud-cast';
+    cast.setAttribute('role', 'list');
+    cast.setAttribute('aria-label', 'People in the scene');
+    const avatar = (name, { isUser = false, recent = false } = {}) => {
+        const badge = personBadge(name);
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'il-hud-avatar' + (isUser ? ' is-user' : '') + (recent ? ' is-recent' : '');
+        button.setAttribute('role', 'listitem');
+        button.title = isUser ? `${name} (you)` : recent ? `${name} - seen recently` : `${name} - in the scene`;
+        button.innerHTML = '<span class="il-hud-face"></span><span class="il-hud-name"></span>';
+        button.querySelector('.il-hud-face').style.setProperty('--hue', String(badge.hue));
+        button.querySelector('.il-hud-face').textContent = badge.initials;
+        button.querySelector('.il-hud-name').textContent = isUser ? 'You' : name.split(/\s+/)[0];
+        button.addEventListener('click', () => (isUser ? toggleHudDrawer() : showEntityCard(name, 'details')));
+        return button;
+    };
+    cast.append(avatar(userName, { isUser: true }));
+    for (const person of participants.slice(0, HUD_MAX_AVATARS)) cast.append(avatar(person.name, person));
+    const hiddenCast = participants.length - HUD_MAX_AVATARS;
+    if (hiddenCast > 0) {
+        const more = document.createElement('button');
+        more.type = 'button';
+        more.className = 'il-hud-avatar is-more';
+        more.title = `${hiddenCast} more - show everyone`;
+        more.innerHTML = '<span class="il-hud-face"></span><span class="il-hud-name">More</span>';
+        more.querySelector('.il-hud-face').textContent = `+${hiddenCast}`;
+        more.addEventListener('click', () => toggleHudDrawer(true));
+        cast.append(more);
     }
-    if (runtime.minimap) {
-        // bar.innerHTML='' above drops the docked panel on every refresh;
-        // re-dock it each pass (idempotent) and refresh in place.
-        runtime.minimap.dockInto(rightSide);
-        runtime.minimap.refresh(getChatStore(), runtime.lastCompilation?.scene || null, userName);
-    }
+
+    // Actions: the world map, and the drawer with the details.
+    const actions = document.createElement('div');
+    actions.className = 'il-hud-actions';
+    const mapButton = document.createElement('button');
+    mapButton.type = 'button';
+    mapButton.className = 'il-hud-btn';
+    mapButton.title = 'World map';
+    mapButton.setAttribute('aria-label', 'Open the world map');
+    mapButton.innerHTML = HUD_SVG.map;
+    mapButton.addEventListener('click', () => openWorldMap('world'));
+    const drawerButton = document.createElement('button');
+    drawerButton.type = 'button';
+    drawerButton.className = 'il-hud-btn il-hud-toggle';
+    drawerButton.title = 'Who is here and what is nearby';
+    drawerButton.setAttribute('aria-label', 'Show who is here and what is nearby');
+    drawerButton.setAttribute('aria-expanded', String(hudDrawerOpen()));
+    drawerButton.innerHTML = HUD_SVG.chevron;
+    drawerButton.addEventListener('click', () => toggleHudDrawer());
+    actions.append(mapButton, drawerButton);
+    hud.append(place, cast, actions);
+    bar.append(hud);
+    if (hudDrawerOpen()) bar.append(buildHudDrawer(store, scene, userName, participants));
+
     // An open full map follows the same refreshes as the HUD: a landed reply,
     // a committed curator pass, and every injection build.
     if (runtime.mapPanel && !document.getElementById('il_map_overlay')?.classList.contains('displayNone')) {
-        runtime.mapPanel.refresh(getChatStore(), runtime.lastCompilation?.scene || null, userName);
-    }
-    const mapToggle = document.createElement('button');
-    mapToggle.type = 'button';
-    mapToggle.className = 'il-map-toggle';
-    mapToggle.title = 'Open the InnerLore world map';
-    mapToggle.setAttribute('aria-label', 'Open world map');
-    mapToggle.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M9 4 3 6v14l6-2 6 2 6-2V4l-6 2-6-2z"/><path d="M9 4v14M15 6v14"/></svg>';
-    rightSide.append(mapToggle);
-    mapToggle.addEventListener('click', () => {
-        if (!runtime.mapPanel) runtime.mapPanel = createMapPanel();
-        runtime.mapPanel.open();
-        const renderMap = attempt => {
-            const store = getChatStore();
-            if (store) {
-                runtime.mapPanel.refresh(store, runtime.lastCompilation?.scene || null, cleanString(context().name1, 100) || 'You');
-                return;
-            }
-            if (attempt < 6) setTimeout(() => renderMap(attempt + 1), 1_000);
-        };
-        renderMap(0);
-    });
-    for (const participant of participants) {
-        leftSide.appendChild(buildPortraitCard({
-            title: participant.name,
-            icon: CAST_SVG.person,
-            name: participant.name,
-            isUser: false,
-            onMind: () => showEntityCard(participant.name, 'mind'),
-            onInfo: () => showEntityCard(participant.name, 'details'),
-        }));
+        runtime.mapPanel.refresh(store, scene, userName);
     }
     bar.classList.remove('displayNone');
     positionDock();
@@ -1949,6 +1972,139 @@ function positionDock() {
     // The padding sits inside #chat, which itself starts below the top bar.
     const chatTop = document.getElementById('chat')?.getBoundingClientRect().top || 0;
     root.style.setProperty('--il-dock-clearance', `${Math.ceil(Math.max(0, barBottom - chatTop) + 10)}px`);
+}
+
+function hudDrawerOpen() {
+    if (typeof runtime.hudDrawerOpen !== 'boolean') {
+        try {
+            runtime.hudDrawerOpen = globalThis.localStorage?.getItem('innerlore:hud:drawer') === '1';
+        } catch {
+            runtime.hudDrawerOpen = false;
+        }
+    }
+    return runtime.hudDrawerOpen;
+}
+
+function toggleHudDrawer(open = !hudDrawerOpen()) {
+    runtime.hudDrawerOpen = Boolean(open);
+    try {
+        globalThis.localStorage?.setItem('innerlore:hud:drawer', runtime.hudDrawerOpen ? '1' : '0');
+    } catch { /* storage unavailable: the drawer just forgets */ }
+    updateCastCards();
+}
+
+/**
+ * The drawer under the bar: who is with the player (with what they are
+ * doing), the explored places around, and the ways into the map.
+ */
+function buildHudDrawer(store, scene, userName, participants) {
+    const drawer = document.createElement('div');
+    drawer.className = 'il-hud-drawer';
+    const inner = document.createElement('div');
+    inner.className = 'il-hud-drawer-inner';
+    drawer.append(inner);
+    const explored = store ? exploredPlaces(context().chat, store, userName, scene) : null;
+    const around = describeSurroundings(store, scene, userName, explored);
+    const states = new Map(Object.values(store?.entities || {})
+        .filter(entity => entity?.type === 'character')
+        .map(entity => [canonicalNameKey(entity.name), cleanString(entity.currentState, 220)]));
+
+    const section = title => {
+        const element = document.createElement('section');
+        element.className = 'il-hud-section';
+        const heading = document.createElement('h4');
+        heading.textContent = title;
+        const list = document.createElement('ul');
+        list.className = 'il-hud-list';
+        element.append(heading, list);
+        inner.append(element);
+        return { element, list };
+    };
+    const row = (list, { badge, title, detail, recent = false, onClick }) => {
+        const item = document.createElement('li');
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'il-hud-row' + (recent ? ' is-recent' : '');
+        const marker = document.createElement('span');
+        if (badge) {
+            marker.className = 'il-hud-face';
+            marker.style.setProperty('--hue', String(badge.hue));
+            marker.textContent = badge.initials;
+        } else {
+            marker.className = 'il-hud-place-dot';
+        }
+        const text = document.createElement('span');
+        text.className = 'il-hud-row-text';
+        const name = document.createElement('b');
+        name.textContent = title;
+        const small = document.createElement('small');
+        small.textContent = detail;
+        text.append(name, small);
+        button.append(marker, text);
+        button.addEventListener('click', onClick);
+        item.append(button);
+        list.append(item);
+    };
+    const empty = (element, message) => {
+        const note = document.createElement('p');
+        note.className = 'il-hud-empty';
+        note.textContent = message;
+        element.append(note);
+    };
+
+    const people = section('With you');
+    for (const person of participants) {
+        row(people.list, {
+            badge: personBadge(person.name),
+            title: person.name,
+            detail: states.get(canonicalNameKey(person.name)) || (person.recent ? 'Seen recently' : 'In the scene'),
+            recent: person.recent,
+            onClick: () => showEntityCard(person.name, 'details'),
+        });
+    }
+    if (!participants.length) empty(people.element, 'No one else is here.');
+
+    const places = section(around.here ? `Around ${around.here}` : 'Around here');
+    for (const nearby of around.nearby) {
+        row(places.list, {
+            title: nearby.name,
+            detail: nearby.people ? `${nearby.people} ${nearby.people === 1 ? 'person' : 'people'} there` : 'Explored',
+            onClick: () => openWorldMap('scene'),
+        });
+    }
+    if (!around.nearby.length) empty(places.element, 'Nothing else explored nearby yet.');
+    if (around.hiddenNearby) {
+        const note = document.createElement('p');
+        note.className = 'il-hud-note';
+        note.textContent = `${around.hiddenNearby} unexplored ${around.hiddenNearby === 1 ? 'place' : 'places'} nearby`;
+        places.element.append(note);
+    }
+
+    const links = document.createElement('div');
+    links.className = 'il-hud-links';
+    for (const [label, icon, view] of [['World map', HUD_SVG.map, 'world'], ['Around you', HUD_SVG.compass, 'scene']]) {
+        const link = document.createElement('button');
+        link.type = 'button';
+        link.className = 'il-hud-link';
+        link.innerHTML = icon;
+        link.append(label);
+        link.addEventListener('click', () => openWorldMap(view));
+        links.append(link);
+    }
+    inner.append(links);
+    return drawer;
+}
+
+function openWorldMap(view = 'world') {
+    if (!runtime.mapPanel) runtime.mapPanel = createMapPanel({ onPerson: name => showEntityCard(name, 'details') });
+    runtime.mapPanel.open(view);
+    const userName = cleanString(context().name1, 100) || 'You';
+    const render = attempt => {
+        const store = getChatStore();
+        runtime.mapPanel.refresh(store, runtime.lastCompilation?.scene || null, userName);
+        if (!store && attempt < 6) setTimeout(() => render(attempt + 1), 1_000);
+    };
+    render(0);
 }
 
 // Rotating or unfolding the screen, switching theme, or the dock wrapping onto

@@ -155,7 +155,23 @@ Seeds are applied once, when a chat with no existing InnerLore world gets its st
 
 The curator records where every character and creature is with `current_location`, reusing a canonical location name and updating it whenever someone arrives, leaves, or follows the player. A place named as a recorded part of a known location (a garden or fountain in a house's spatial record) anchors to that location. Without an explicit claim, a replaced `current_state` that names a known place moves the record there. Omission never clears a location; `unknown` does.
 
-The HUD location panel, the world map, and the scene view all place NPCs from that record. Until the curator has processed the newest reply, an NPC the scene compiler finds present in it stands at the scene's location, so the map moves the moment a reply lands. Summaries and history never place anyone. A place reached in play before it has a location record gets a provisional map node, and when the newest turn names no place, the scene settles where the present cast is recorded to be.
+The HUD, the world map, and the scene view all place NPCs from that record. Until the curator has processed the newest reply, an NPC the scene compiler finds present in it stands at the scene's location, so the map moves the moment a reply lands. Summaries and history never place anyone. A place reached in play before it has a location record gets a provisional map node, and when the newest turn names no place, the scene settles where the present cast is recorded to be. A place named inside a longer known place name ("Highmarket" in "Highmarket Gate") is not counted as named, so the scene settles on the specific place.
+
+**The HUD** is one row under SillyTavern's top bar, placed at the top bar's real bottom edge for any theme or screen:
+- **Place and story time:** tap them to open the map around you.
+- **Portraits:** you first, then everyone in the scene, then people seen recently (dimmed). Tap a portrait to open that person's card.
+- **Buttons:** the world map, and an expand button for the drawer.
+
+**The drawer** lists who is with you and what each person is doing, plus the explored places around you, with shortcuts into the map. Whether it is open is remembered per browser.
+
+**The map** opens on the region you have explored, with you in view:
+- **Moving:** one finger pans and two fingers pinch-zoom around their midpoint. The wheel zooms around the cursor, double-click zooms in, and the buttons zoom around the centre or re-centre on you.
+- **Readable at any zoom:** markers and labels keep their screen size, so crowded places spread apart as you zoom in.
+- **Places:** tap one for a details sheet with what is known and who is there.
+- **Elsewhere:** people at unknown or unexplored places are listed here instead of on the map.
+- **Here view:** shows the current place, the place containing it, and the explored places inside it.
+
+**Fog of war:** unexplored areas stay hidden. A place is explored once a reply puts you there (by naming it or by explicit movement), when it is the current scene, or when the curator records you there; the places containing it count as explored too. Exploration is worked out from the chat itself, so swipes, edits and rebuilds never leave a stale record. Fog lifts in a circle around each explored place. Places inside that circle are shown as seen but not yet visited, and everything else stays hidden until you get there.
 
 ## Private minds
 

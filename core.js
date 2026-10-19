@@ -230,10 +230,14 @@ export function contextTokens(value, maximum = 160) {
     return result;
 }
 
-/** Lexical containment score in the range 0–1; deliberately local and model-free. */
+/**
+ * Lexical containment score in the range 0–1; deliberately local and
+ * model-free. Either side may be a Set from contextTokens, so a caller
+ * comparing one passage against many records tokenizes the passage once.
+ */
 export function contextSimilarity(left, right) {
-    const leftTokens = new Set(contextTokens(left));
-    const rightTokens = new Set(contextTokens(right));
+    const leftTokens = left instanceof Set ? left : new Set(contextTokens(left));
+    const rightTokens = right instanceof Set ? right : new Set(contextTokens(right));
     if (!leftTokens.size || !rightTokens.size) return 0;
     let intersection = 0;
     for (const token of leftTokens) if (rightTokens.has(token)) intersection++;
@@ -2935,7 +2939,11 @@ function escapeRegExp(value) {
 }
 
 export function textMentions(text, names) {
-    const source = cleanString(text, 200_000);
+    return cleanTextMentions(cleanString(text, 200_000), names);
+}
+
+/** textMentions for text that has already been through cleanString. */
+export function cleanTextMentions(source, names) {
     if (!source) return false;
     return uniqueStrings(names, 40).some(name => {
         const escaped = escapeRegExp(name);

@@ -8,7 +8,7 @@ import {
     resolveLocationReference,
 } from '../core.js?v=47';
 import { deriveSceneState } from '../scene.js?v=5';
-import { buildMapModel, buildSceneModel, placeCharacters } from '../map-view.js?v=4';
+import { buildMapModel, buildSceneModel, placeCharacters } from '../map-view.js?v=5';
 
 function worldStore() {
     const store = createEmptyStore('npc-location');
@@ -86,7 +86,7 @@ test('the map places NPCs where they are, not where their background says', () =
     const chipsAt = name => model.nodes.find(node => node.name === name)?.npcs.map(chip => chip.name) || [];
     assert.deepEqual(chipsAt('Saltmere'), ['Wren Halloway']);
     assert.deepEqual(chipsAt('Highmarket'), [], 'a summary mention never places anyone');
-    assert.deepEqual(chipsAt('Whereabouts unknown'), ['Tobin']);
+    assert.deepEqual(model.elsewhere.map(person => person.name), ['Tobin'], 'no known place: listed elsewhere, not on the map');
     assert.equal(model.player?.node.name, 'Saltmere');
     assert.ok(!model.nodes.some(node => node.npcs.some(chip => chip.name === 'Jet')), 'the player is not an NPC chip');
 });

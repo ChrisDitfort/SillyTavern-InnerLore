@@ -1,11 +1,11 @@
 /**
  * InnerLore world map: a full-screen SVG view of the chat's living world.
  * Locations render from the store's entities (card seeds carry canonical
- * coordinates; discovered places auto-place near their parent), NPCs line up
- * with their location from the curator's containment records and current
- * state, and the player's position follows the compiled scene focus. The map
- * is a view over InnerLore state - it never generates or stores anything of
- * its own.
+ * coordinates; discovered places auto-place near their parent), NPCs stand at
+ * the place the curator last recorded them, and the player's position follows
+ * the compiled scene focus. Places the player has not explored stay under fog.
+ * The map is a view over InnerLore state - it never generates or stores
+ * anything of its own.
  */
 
 import {
@@ -14,9 +14,19 @@ import {
     curatedLocationOf,
     resolveLocationReference,
 } from './core.js?v=47';
+import { deriveSceneState } from './scene.js?v=5';
 
 const MAP_VIEWBOX = { width: 1000, height: 700 };
-const MAX_NODE_CHIPS = 6;
+const MAX_NODE_CHIPS = 4;
+// World units around a visited place that the fog lifts from; a place inside
+// that circle is seen, though not yet visited.
+const REVEAL_RADIUS = 120;
+const MIN_SCALE = 0.6;
+const MAX_SCALE = 8;
+// Scene locations a reply establishes on its own. "Where the present cast is"
+// and curated-state matches lean on today's records, so for past replies they
+// would mark places the player never went.
+const EXPLORING_SOURCES = new Set(['explicit movement in latest turn', 'named in latest turn']);
 
 /**
  * Self-injected styles: extension CSS loads without a cache-buster, so a
@@ -24,66 +34,90 @@ const MAX_NODE_CHIPS = 6;
  * the (cache-busted) JavaScript runs the newest logic. Injecting the styles
  * from the module guarantees markup and styling always match.
  */
-const MAP_STYLE_ID = 'il_map_inline_styles';
+const MAP_STYLE_ID = 'il_map_inline_styles_v2';
 const MAP_STYLES = `
-#il_map_overlay{position:fixed;inset:0;width:100vw;height:100vh;height:100dvh;z-index:31000;background:rgba(8,10,14,.96);display:flex;flex-direction:column;padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);box-sizing:border-box}
-.il-map-header{display:flex;align-items:center;gap:10px;padding:8px 12px;border-bottom:1px solid #333;flex-wrap:wrap;min-height:44px}
-.il-map-title{font-weight:600;letter-spacing:.04em;color:#cfd8e6;white-space:nowrap}
-.il-map-hint{flex:1 1 160px;font-size:.75em;color:#7a8494;min-width:140px}
-.il-map-views{display:inline-flex;gap:4px}
-.il-map-view-btn{padding:6px 12px;border-radius:8px;border:1px solid #5a5a66;background:rgba(22,22,28,.9);color:#9aa3b0;font-size:.85em;cursor:pointer;min-height:30px}
-.il-map-view-btn.is-active{border-color:#c8b78a;color:#e2c99a}
-.il-map-zoom{display:inline-flex;gap:4px}
-.il-map-zoom-btn{width:34px;height:34px;border-radius:8px;border:1px solid #5a5a66;background:rgba(22,22,28,.9);color:#c8b78a;font-size:16px;line-height:1;cursor:pointer;display:inline-flex;align-items:center;justify-content:center}
-.il-map-close{min-height:34px}
-.il-map-body{flex:1 1 auto;display:flex;min-height:0;position:relative}
-#il_map_svg{flex:1 1 auto;width:100%;height:100%;min-width:0;cursor:grab;touch-action:none;display:block}
-#il_map_svg:active{cursor:grabbing}
+#il_map_overlay{--il-gold:#ecd9ac;--il-gold-dim:rgba(226,201,154,.16);--il-line:rgba(255,255,255,.09);--il-muted:#8f99a8;position:fixed;inset:0;width:100vw;height:100vh;height:100dvh;z-index:31000;background:#070a0f;display:flex;flex-direction:column;color:#d6dbe4;font-size:14px;line-height:1.35;padding:env(safe-area-inset-top) env(safe-area-inset-right) 0 env(safe-area-inset-left);box-sizing:border-box}
+#il_map_overlay *{box-sizing:border-box}
+.il-map-header{display:flex;align-items:center;gap:10px;padding:8px 10px;background:linear-gradient(180deg,rgba(17,20,27,.98),rgba(11,13,18,.96));border-bottom:1px solid rgba(226,201,154,.14);flex:none}
+.il-map-iconbtn{flex:none;width:40px;height:40px;border-radius:12px;border:1px solid var(--il-line);background:rgba(255,255,255,.04);color:#cfd6e0;display:grid;place-items:center;cursor:pointer;padding:0}
+.il-map-iconbtn:hover{border-color:rgba(226,201,154,.45);color:var(--il-gold)}
+.il-map-iconbtn svg{width:18px;height:18px}
+.il-map-heading{flex:1 1 auto;min-width:0;display:flex;flex-direction:column}
+.il-map-kicker{font-size:.66em;letter-spacing:.18em;text-transform:uppercase;color:#7d8796}
+.il-map-where{font-weight:600;color:var(--il-gold);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.il-map-views{flex:none;display:inline-flex;padding:3px;border-radius:12px;background:rgba(255,255,255,.04);border:1px solid var(--il-line)}
+.il-map-view-btn{border:0;background:none;color:#9aa3b0;padding:7px 12px;border-radius:9px;font:inherit;font-size:.85em;cursor:pointer;white-space:nowrap}
+.il-map-view-btn.is-active{background:var(--il-gold-dim);color:var(--il-gold)}
+.il-map-body{flex:1 1 auto;position:relative;min-height:0;display:flex;overflow:hidden}
+#il_map_svg{flex:1 1 auto;width:100%;height:100%;min-width:0;display:block;touch-action:none;cursor:grab;background:#0a1524;user-select:none;-webkit-user-select:none}
+#il_map_svg.is-dragging{cursor:grabbing}
+.il-map-controls{position:absolute;right:12px;bottom:calc(14px + env(safe-area-inset-bottom,0px));display:flex;flex-direction:column;gap:8px;z-index:2}
+.il-map-ctl{width:46px;height:46px;border-radius:14px;border:1px solid rgba(255,255,255,.12);background:rgba(13,16,22,.92);color:var(--il-gold);display:grid;place-items:center;cursor:pointer;box-shadow:0 6px 16px rgba(0,0,0,.45);padding:0}
+.il-map-ctl svg{width:20px;height:20px}
+.il-map-ctl:hover{border-color:rgba(226,201,154,.5)}
+.il-map-legend{position:absolute;left:12px;bottom:calc(14px + env(safe-area-inset-bottom,0px));right:72px;display:flex;flex-wrap:wrap;gap:6px;z-index:2;pointer-events:none}
+.il-map-pill{pointer-events:auto;display:inline-flex;align-items:center;gap:6px;padding:7px 11px;border-radius:999px;background:rgba(13,16,22,.92);border:1px solid var(--il-line);font:inherit;font-size:.78em;color:#aab3c0;box-shadow:0 4px 12px rgba(0,0,0,.35)}
+button.il-map-pill{cursor:pointer}
+button.il-map-pill:hover{border-color:rgba(226,201,154,.45);color:var(--il-gold)}
+.il-map-key{width:9px;height:9px;border-radius:50%;flex:none}
+.il-map-key.is-you{background:#8fb7e8;box-shadow:0 0 0 3px rgba(143,183,232,.25)}
+.il-map-key.is-visited{background:#e2c99a}
+.il-map-key.is-seen{border:1.5px solid #9fb0c2}
+.il-map-sheet{position:absolute;top:0;right:0;bottom:0;width:340px;max-width:88vw;background:#0c0e13;border-left:1px solid rgba(226,201,154,.14);box-shadow:-12px 0 28px rgba(0,0,0,.45);display:flex;flex-direction:column;z-index:3}
+.il-map-sheet-head{display:flex;align-items:flex-start;gap:10px;padding:14px 14px 10px;border-bottom:1px solid var(--il-line)}
+.il-map-sheet-title{flex:1;min-width:0}
+.il-map-sheet-title h3{margin:2px 0 0;font-size:1.12em;color:var(--il-gold);font-weight:650;overflow-wrap:anywhere}
+.il-map-tags{display:flex;flex-wrap:wrap;gap:5px}
+.il-map-tag{font-size:.66em;letter-spacing:.12em;text-transform:uppercase;padding:2px 7px;border-radius:999px;border:1px solid var(--il-line);color:#9fb0c2}
+.il-map-tag.is-you{border-color:rgba(143,183,232,.5);color:#cfe3f7}
+.il-map-tag.is-visited{border-color:rgba(226,201,154,.4);color:var(--il-gold)}
+.il-map-sheet-body{flex:1;overflow-y:auto;padding:12px 14px calc(18px + env(safe-area-inset-bottom,0px))}
+.il-map-sheet-body p{margin:0 0 10px;font-size:.92em}
+.il-map-now{color:#a9dcb3}
+.il-map-facts{margin:0 0 12px;padding-left:18px;font-size:.88em;color:#aab3c0}
+.il-map-section{margin:14px 0 6px;font-size:.68em;letter-spacing:.16em;text-transform:uppercase;color:#7d8796;font-weight:600}
+.il-map-people{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:5px}
+.il-map-person{display:flex;align-items:center;gap:9px;width:100%;padding:7px 9px;border-radius:11px;border:1px solid var(--il-line);background:rgba(255,255,255,.03);color:inherit;font:inherit;font-size:.9em;text-align:left;cursor:pointer}
+.il-map-person:hover{border-color:rgba(226,201,154,.4)}
+.il-map-person small{display:block;color:var(--il-muted);font-size:.82em}
+.il-map-person.is-dormant{opacity:.6}
+.il-map-face{flex:none;width:28px;height:28px;border-radius:50%;display:grid;place-items:center;font-size:.72em;font-weight:700;color:#0d1016;background:hsl(var(--hue,210) 34% 64%)}
+.il-map-empty{color:#6d7684;font-style:italic;font-size:.88em}
 .il-map-hit{fill:transparent}
+.il-map-mark{transform:scale(var(--il-map-k,1))}
 .il-map-node{cursor:pointer}
-.il-map-dot{fill:#9db4a4;stroke:#1b211c;stroke-width:1.5}
-.il-map-place .il-map-dot{fill:#c8b78a}
-.il-map-discovered .il-map-dot{fill:#7fa9c9}
-.il-map-region .il-map-dot{fill:none;stroke:#8fa3b8;stroke-dasharray:3 3}
-.il-map-label{fill:#d8dee8;font-size:12px;font-family:serif;paint-order:stroke;stroke:rgba(10,14,18,.85);stroke-width:3px}
-.il-map-region .il-map-label{font-style:italic;letter-spacing:2px;fill:#9fb0c2}
-.il-map-link{stroke:rgba(140,160,180,.25);stroke-width:1.2;stroke-dasharray:4 5}
-.il-map-npc-ring{fill:none;stroke:rgba(156,142,238,.6);stroke-width:1.5}
-.il-map-player-halo{fill:none;stroke:#8fb7e8;stroke-width:2;opacity:.8}
-.il-map-player-dot{fill:#8fb7e8;stroke:#e8f2ff;stroke-width:2}
-.il-map-player-label{fill:#cfe3f7;font-size:13px;font-weight:600;paint-order:stroke;stroke:rgba(10,14,18,.85);stroke-width:3px}
+.il-map-pin{fill:#e2c99a;stroke:#1a1f17;stroke-width:2}
+.il-map-node.is-seen .il-map-pin{fill:#101722;stroke:#9fb0c2;stroke-width:1.8}
+.il-map-node.is-provisional .il-map-pin{fill:#7fa9c9}
+.il-map-node.is-region .il-map-pin{fill:none;stroke:#8fa3b8;stroke-dasharray:3 3}
+.il-map-node.is-selected .il-map-pin{stroke:#fff6dc;stroke-width:3}
+.il-map-label{fill:#e4e8ef;font-size:13px;font-family:serif;font-weight:600;paint-order:stroke;stroke:rgba(8,11,16,.92);stroke-width:3.5px;stroke-linejoin:round}
+.il-map-node.is-seen .il-map-label{fill:#9fb0c2;font-weight:400;font-style:italic}
+.il-map-node.is-region .il-map-label{font-style:italic;letter-spacing:2px;fill:#9fb0c2;font-weight:400}
+.il-map-count circle{fill:#9c8eee;stroke:#0d1016;stroke-width:2}
+.il-map-count text{fill:#0d1016;font-size:10px;font-weight:700;font-family:sans-serif}
+.il-map-link{stroke:rgba(200,183,138,.32);stroke-width:1.4;stroke-dasharray:3 5;fill:none}
 .il-map-chips{display:flex;flex-wrap:wrap;gap:3px;justify-content:center;pointer-events:none}
-.il-map-chip{font-size:10px;line-height:1;padding:2px 5px;border-radius:6px;border:1px solid #5a5a66;background:rgba(22,22,28,.85);color:#b9bec8;white-space:nowrap}
-.il-map-chip.is-active{border-color:#8ee6a2;color:#b9f0c6}
+.il-map-chip{font:600 10px/1 sans-serif;padding:3px 6px;border-radius:999px;background:rgba(13,16,22,.88);border:1px solid rgba(255,255,255,.14);color:#c9cfd9;white-space:nowrap}
+.il-map-chip.is-active{border-color:#8ee6a2;color:#c4f2cf}
 .il-map-chip.is-recent{border-color:#f5d77d;color:#f0e2b0}
-.il-map-chip.is-dormant{opacity:.55}
-.il-map-detail{width:300px;max-width:46vw;border-left:1px solid #333;background:rgba(16,18,24,.96);padding:14px 16px;overflow-y:auto;color:#c9cfd9;box-sizing:border-box}
-.il-map-detail h3{margin:0 0 8px;color:#e2c99a}
-.il-map-detail-summary{font-size:.9em}
-.il-map-detail-state{font-size:.85em;color:#9fd6a8}
-.il-map-detail-facts{margin:8px 0;padding-left:18px;font-size:.85em;color:#a8b0bc}
-.il-map-detail-npcs ul{list-style:none;margin:6px 0 0;padding:0;display:flex;flex-direction:column;gap:4px}
-.il-map-detail-npcs li{font-size:.85em;padding:3px 8px;border-radius:6px;border:1px solid #444}
-.il-map-detail-npcs li.is-active{border-color:#8ee6a2;color:#b9f0c6}
-.il-map-detail-npcs li.is-recent{border-color:#f5d77d;color:#f0e2b0}
-.il-map-detail-npcs li.is-dormant{opacity:.55}
-.il-map-toggle{pointer-events:auto;display:inline-flex;align-items:center;padding:4px 8px;border-radius:9px;border:1px solid #5a5a66;background:rgba(22,22,28,.88);color:#c8b78a;cursor:pointer}
-.il-map-toggle svg{width:16px;height:16px;display:block}
-#il_cast_bar.il-dock #il_minimap{position:static;width:auto;min-width:180px;max-width:280px;flex:1 1 180px;margin-left:auto;border:none;background:transparent;box-shadow:none;padding:0;cursor:default;color:#a8b0bc}
-#il_cast_bar.il-dock #il_minimap .il-minimap-head{padding:0 0 3px;border-bottom:1px solid #2c313c}
-#il_cast_bar.il-dock #il_minimap .il-minimap-body{padding:3px 0 0}
-#il_minimap{position:fixed;right:12px;top:calc(env(safe-area-inset-top,0px) + 54px);z-index:40000;width:190px;border:1px solid #5a5a66;border-radius:12px;background:rgba(16,18,24,.92);box-shadow:0 4px 14px rgba(0,0,0,.4);color:#c9cfd9;font-size:.8em;cursor:grab;touch-action:none}
-.il-minimap-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:7px 10px 4px;border-bottom:1px solid #333}
-.il-minimap-loc{font-weight:600;color:#e2c99a}
-.il-minimap-expand{cursor:pointer;color:#8fb7e8;padding:2px 4px}
-.il-minimap-body{padding:6px 10px 8px}
-.il-minimap-near{display:flex;flex-direction:column;gap:3px;color:#a8b0bc}
-.il-minimap-near.is-empty{font-style:italic;color:#6d7684}
-.il-minimap-here{margin-top:5px;color:#b9f0c6;font-size:.92em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.il-scene-link{stroke:rgba(156,142,238,.4);stroke-width:1.6;stroke-dasharray:none}
-.il-scene-dot{stroke-width:2.5;filter:drop-shadow(0 0 6px rgba(200,183,138,.45))}
-@media (max-width:720px){.il-map-hint{display:none}.il-map-title{font-size:.92em}.il-map-detail{position:absolute;left:0;right:0;bottom:0;width:auto;max-width:none;max-height:46%;border-left:none;border-top:1px solid #333;border-radius:14px 14px 0 0}#il_minimap{width:156px;right:8px;top:calc(env(safe-area-inset-top,0px) + 60px);font-size:.75em}}
-@media (max-width:400px){.il-map-header{gap:6px;padding:6px 8px}.il-map-zoom-btn{width:30px;height:30px}}
+.il-map-chip.is-dormant{opacity:.6}
+#il_map_svg.is-far .il-map-chips-wrap,#il_map_svg.is-far .il-map-node.is-seen .il-map-label{display:none}
+.il-map-count{display:none}
+#il_map_svg.is-far .il-map-count{display:inline}
+.il-map-you-ring{fill:none;stroke:#8fb7e8;stroke-width:2.5;transform-box:fill-box;transform-origin:center;animation:il-map-pulse 2.4s ease-out infinite}
+.il-map-you-dot{fill:#8fb7e8;stroke:#eef6ff;stroke-width:2.5}
+@keyframes il-map-pulse{0%{transform:scale(.6);opacity:.95}100%{transform:scale(1.9);opacity:0}}
+@media (prefers-reduced-motion:reduce){.il-map-you-ring{animation:none;opacity:.6}}
+.il-scene-link{stroke:rgba(156,142,238,.38);stroke-width:1.6;stroke-dasharray:none}
+@media (max-width:720px){
+.il-map-header{gap:8px;padding:6px 8px}
+.il-map-iconbtn{width:38px;height:38px}
+.il-map-view-btn{padding:7px 10px}
+.il-map-sheet{top:auto;left:0;right:0;width:auto;max-width:none;max-height:58%;border-left:0;border-top:1px solid rgba(226,201,154,.18);border-radius:18px 18px 0 0;box-shadow:0 -12px 28px rgba(0,0,0,.5)}
+.il-map-sheet::before{content:'';display:block;width:42px;height:4px;border-radius:2px;background:rgba(255,255,255,.18);margin:8px auto 0}
+.il-map-ctl{width:44px;height:44px}
+}
 `;
 
 function ensureInlineStyles() {
@@ -109,21 +143,30 @@ function hashStringLite(value) {
     return Math.abs(hash);
 }
 
+/** Initials and a stable hue for a person's portrait. */
+export function personBadge(name) {
+    const words = cleanString(name, 160).split(/\s+/).filter(word => /\p{L}/u.test(word));
+    const initials = words.slice(0, 2).map(word => word.match(/\p{L}/u)[0].toUpperCase()).join('') || '?';
+    return { initials, hue: hashStringLite(canonicalNameKey(name)) % 360 };
+}
+
+const ICON = {
+    close: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg>',
+    plus: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>',
+    minus: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><line x1="5" y1="12" x2="19" y2="12"/></svg>',
+    locate: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="2.5" fill="currentColor"/><line x1="12" y1="1.5" x2="12" y2="4.5"/><line x1="12" y1="19.5" x2="12" y2="22.5"/><line x1="1.5" y1="12" x2="4.5" y2="12"/><line x1="19.5" y1="12" x2="22.5" y2="12"/></svg>',
+};
+
 /** Continent art: sea, coastline, and softly tinted regions with labels. */
 function worldArt() {
     return `
-<defs>
-    <radialGradient id="il-map-sea" cx="50%" cy="50%" r="75%">
-        <stop offset="0%" stop-color="#12233a"/>
-        <stop offset="100%" stop-color="#0a1524"/>
-    </radialGradient>
-    <filter id="il-map-glow" x="-60%" y="-60%" width="220%" height="220%">
-        <feGaussianBlur stdDeviation="3" result="blur"/>
-        <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
-    </filter>
-</defs>
+<radialGradient id="il-map-sea" cx="50%" cy="50%" r="75%">
+    <stop offset="0%" stop-color="#12233a"/>
+    <stop offset="100%" stop-color="#0a1524"/>
+</radialGradient>
+<rect x="-2000" y="-2000" width="5000" height="4700" fill="#0a1524"/>
 <rect x="0" y="0" width="1000" height="700" fill="url(#il-map-sea)"/>
-<g opacity="0.5" stroke="#1d3450" stroke-width="1">
+<g opacity="0.45" stroke="#1d3450" stroke-width="1">
     ${Array.from({ length: 12 }, (_, i) => `<line x1="0" y1="${i * 60}" x2="1000" y2="${i * 60}"/>`).join('')}
     ${Array.from({ length: 17 }, (_, i) => `<line x1="${i * 60}" y1="0" x2="${i * 60}" y2="700"/>`).join('')}
 </g>
@@ -146,6 +189,32 @@ function worldArt() {
 </g>`;
 }
 
+/**
+ * Fog over everything the player has not explored: a hatched shroud with
+ * soft-edged holes around each visited place. Overlapping holes only clear
+ * more fog, never less.
+ */
+function fogLayer(reveals) {
+    const holes = reveals
+        .map(point => `<circle cx="${point.x}" cy="${point.y}" r="${point.radius}" fill="url(#il-fog-hole)"/>`)
+        .join('');
+    return `
+<pattern id="il-fog-hatch" width="12" height="12" patternUnits="userSpaceOnUse" patternTransform="rotate(35)">
+    <rect width="12" height="12" fill="#090c12"/>
+    <line x1="0" y1="0" x2="0" y2="12" stroke="#121823" stroke-width="2"/>
+</pattern>
+<radialGradient id="il-fog-hole">
+    <stop offset="0%" stop-color="#000" stop-opacity="1"/>
+    <stop offset="62%" stop-color="#000" stop-opacity="1"/>
+    <stop offset="100%" stop-color="#000" stop-opacity="0"/>
+</radialGradient>
+<mask id="il-fog-mask" maskUnits="userSpaceOnUse" x="-2000" y="-2000" width="5000" height="4700">
+    <rect x="-2000" y="-2000" width="5000" height="4700" fill="#fff"/>
+    ${holes}
+</mask>
+<rect class="il-map-fog" x="-2000" y="-2000" width="5000" height="4700" fill="url(#il-fog-hatch)" mask="url(#il-fog-mask)"/>`;
+}
+
 /** Locations and tracked NPCs (the player's own record excluded). */
 function worldRecords(store, playerName) {
     const entities = Object.values(store?.entities || {});
@@ -157,6 +226,17 @@ function worldRecords(store, playerName) {
     };
 }
 
+function playerRecordOf(store, playerName) {
+    const playerKey = canonicalNameKey(playerName);
+    if (!playerKey) return null;
+    return Object.values(store?.entities || {}).find(entity => entity?.type === 'character' && entity.enabled !== false
+        && [entity.name, ...(entity.aliases || [])].some(name => canonicalNameKey(name) === playerKey)) || null;
+}
+
+function placeKeys(record) {
+    return [record?.name, ...(record?.aliases || [])].map(canonicalNameKey).filter(Boolean);
+}
+
 /** The scene's location as a known record, or its raw name for a new place. */
 export function resolveSceneLocation(store, scene) {
     const location = scene?.location;
@@ -165,6 +245,64 @@ export function resolveSceneLocation(store, scene) {
     const record = (byId?.type === 'location' ? byId : null)
         || resolveLocationReference(store?.entities, location.name);
     return { record, name: record?.name || location.name };
+}
+
+const explorationCache = new Map();
+
+/**
+ * The places the player has explored, as canonical name keys: every scene
+ * location a completed reply establishes (named there, or reached by explicit
+ * movement), the current scene's location, and where the curator last
+ * recorded the player - together with every place that contains them.
+ * Derived from the chat itself, so swipes, edits and rebuilds never leave a
+ * stale record behind; per-reply results are cached by content.
+ */
+export function exploredPlaces(messages, store, playerName = '', scene = null) {
+    const entities = store?.entities || {};
+    const signature = hashStringLite(Object.values(entities)
+        .filter(entity => entity?.type === 'location' && entity.enabled !== false)
+        .map(entity => entity.id).sort().join('|'));
+    const keys = new Set();
+    const explore = name => {
+        let record = resolveLocationReference(entities, name);
+        if (!record) {
+            const key = canonicalNameKey(name);
+            if (key) keys.add(key);
+            return;
+        }
+        const visited = new Set();
+        while (record && !visited.has(record.id)) {
+            visited.add(record.id);
+            for (const key of placeKeys(record)) keys.add(key);
+            record = record.parentLocationName ? resolveLocationReference(entities, record.parentLocationName) : null;
+        }
+    };
+    const list = Array.isArray(messages) ? messages : [];
+    for (let index = 0; index < list.length; index++) {
+        const message = list[index];
+        if (!message || message.is_user || (message.is_system && message.extra?.sc_ghosted !== true)) continue;
+        const text = cleanString(message.mes);
+        if (!text) continue;
+        const cacheKey = `${signature}:${index}:${text.length}:${hashStringLite(text)}`;
+        if (!explorationCache.has(cacheKey)) {
+            // The scene reads only the last few messages, so hand it just those:
+            // the whole history before each reply made a long chat quadratic.
+            const location = deriveSceneState(list.slice(Math.max(0, index - 11), index + 1), store, {
+                currentIndex: index,
+                playerName,
+                lookbackMessages: 4,
+            }).location;
+            if (explorationCache.size > 5_000) explorationCache.clear();
+            explorationCache.set(cacheKey, location?.name && EXPLORING_SOURCES.has(location.source) ? location.name : '');
+        }
+        const name = explorationCache.get(cacheKey);
+        if (name) explore(name);
+    }
+    if (scene?.location?.name) explore(scene.location.name);
+    const player = playerRecordOf(store, playerName);
+    const playerAt = curatedLocationOf(entities, player || {})?.name || cleanString(player?.currentLocationName, 160);
+    if (playerAt) explore(playerAt);
+    return keys;
 }
 
 /**
@@ -206,7 +344,12 @@ export function placeCharacters(store, scene, playerName = '') {
 
 function npcChip(character, chatLength) {
     const age = chatLength - (Number.isFinite(character.lastSeenMessage) ? character.lastSeenMessage : -1);
-    return { name: character.name, active: age <= 8, recent: age <= 24 };
+    return {
+        name: character.name,
+        state: cleanString(character.currentState, 240),
+        active: age <= 8,
+        recent: age <= 24,
+    };
 }
 
 /** Nudge auto-placed nodes off their neighbours so labels stay readable. */
@@ -226,15 +369,49 @@ function separateAutoPlaced(nodes) {
 }
 
 /**
+ * Fog of war over a built model. Visited places and those inside their
+ * revealed circle stay; everything else - and anyone standing there - is
+ * hidden. Without exploration data the whole map is shown.
+ */
+function applyFog(model, explored) {
+    if (!(explored instanceof Set)) {
+        for (const node of model.nodes) node.visited = true;
+        model.reveals = null;
+        return model;
+    }
+    const isVisited = node => node.provisional === true || node === model.player?.node
+        || [node.name, ...(node.aliases || [])].some(name => explored.has(canonicalNameKey(name)));
+    const visited = model.nodes.filter(isVisited);
+    for (const node of visited) node.visited = true;
+    model.reveals = visited.map(node => ({
+        x: node.x, y: node.y, radius: node === model.player?.node ? REVEAL_RADIUS * 1.15 : REVEAL_RADIUS,
+    }));
+    const kept = [];
+    for (const node of model.nodes) {
+        const seen = !node.visited && visited.some(other => Math.hypot(other.x - node.x, other.y - node.y) <= REVEAL_RADIUS * 0.85);
+        if (node.visited || seen) {
+            kept.push(node);
+            continue;
+        }
+        for (const chip of node.npcs) model.elsewhere.push({ ...chip, reason: 'unexplored' });
+    }
+    model.nodes = kept;
+    return model;
+}
+
+/**
  * Build the render model: nodes from location entities, NPC chips from where
  * each NPC currently is (see placeCharacters), and the player marker from the
- * compiled scene.
+ * compiled scene. With `explored` (see exploredPlaces) the unexplored world
+ * stays under fog; people at hidden or unknown places are listed in
+ * `elsewhere` instead of on the map.
  */
-export function buildMapModel(store, scene, playerName = '') {
+export function buildMapModel(store, scene, playerName = '', options = {}) {
     const { locations } = worldRecords(store, playerName);
     const nodes = locations.map(location => ({
         id: location.id,
         name: location.name,
+        aliases: location.aliases || [],
         region: location.map?.region === true,
         x: location.map?.x,
         y: location.map?.y,
@@ -280,7 +457,7 @@ export function buildMapModel(store, scene, playerName = '') {
         if (!provisional.has(key)) {
             const seedHash = hashStringLite(name);
             const node = {
-                id: `provisional:${key}`, name, region: false,
+                id: `provisional:${key}`, name, aliases: [], region: false,
                 x: 300 + (seedHash % 400), y: 180 + ((seedHash >> 3) % 340), importance: 40, parent: '',
                 summary: 'Reached in the story; not yet recorded as a location.', description: '', facts: [],
                 currentState: '', npcs: [], autoPlaced: true, provisional: true,
@@ -292,74 +469,71 @@ export function buildMapModel(store, scene, playerName = '') {
     };
 
     const chatLength = Number.isFinite(scene?.chatLength) ? scene.chatLength : 1_000_000;
-    let elsewhere = null;
+    const elsewhere = [];
     for (const placement of placeCharacters(store, scene, playerName)) {
         const chip = npcChip(placement.character, chatLength);
         const host = placement.location ? nodeById.get(placement.location.id)
             : placement.name ? provisionalNode(placement.name) : null;
-        if (host) {
-            host.npcs.push(chip);
-            continue;
-        }
-        if (!elsewhere) {
-            elsewhere = {
-                id: '__elsewhere__', name: 'Whereabouts unknown', region: false,
-                x: 500, y: 660, importance: 0, parent: '', summary: 'NPCs with no known location yet.',
-                description: '', facts: [], currentState: '', npcs: [], autoPlaced: true,
-            };
-            nodes.push(elsewhere);
-        }
-        elsewhere.npcs.push(chip);
+        if (host) host.npcs.push(chip);
+        else elsewhere.push({ ...chip, reason: 'unknown' });
     }
 
     const sceneLocation = resolveSceneLocation(store, scene);
     const playerNode = sceneLocation.record ? nodeById.get(sceneLocation.record.id)
         : sceneLocation.name ? provisionalNode(sceneLocation.name) : null;
     separateAutoPlaced(nodes);
-    return {
+    const model = {
         nodes,
+        elsewhere,
         player: playerNode ? { name: playerName || 'You', x: playerNode.x, y: playerNode.y, node: playerNode } : null,
     };
+    return applyFog(model, options.explored);
 }
 
 /**
  * Scene view model: the local bubble around the current scene - the location
  * itself, its parent, the places it contains, and the NPCs at each of them,
- * laid out as a "you are here" cluster.
+ * laid out as a "you are here" cluster. Contained places the player has not
+ * explored are only counted (`hiddenNearby`).
  */
-export function buildSceneModel(store, scene, playerName = '', chatLength = 1_000_000) {
+export function buildSceneModel(store, scene, playerName = '', chatLength = 1_000_000, options = {}) {
     const { locations } = worldRecords(store, playerName);
     const sceneLocation = resolveSceneLocation(store, scene);
     const focus = sceneLocation.record;
     const hostName = sceneLocation.name || 'Somewhere';
+    const explored = options.explored instanceof Set ? options.explored : null;
 
     const node = (name, x, y, extra = {}) => ({
-        id: 'scene:' + canonicalNameKey(name), name, region: false, x, y, importance: 50,
+        id: 'scene:' + canonicalNameKey(name), name, aliases: [], region: false, x, y, importance: 50,
         parent: '', summary: '', description: '', facts: [], currentState: '',
-        npcs: [], ...extra,
+        npcs: [], visited: true, ...extra,
     });
 
     const center = node(hostName, 500, 340, {
         importance: 90, summary: focus?.summary || '', currentState: focus?.currentState || '', facts: focus?.facts || [],
     });
-    const model = { nodes: [center], player: { name: playerName || 'You', x: 500, y: 340, node: center } };
+    const model = { nodes: [center], elsewhere: [], hiddenNearby: 0, player: { name: playerName || 'You', x: 500, y: 340, node: center } };
     const nodeByLocationId = new Map(focus ? [[focus.id, center]] : []);
 
     const parent = focus?.parentLocationName ? resolveLocationReference(store?.entities, focus.parentLocationName) : null;
     if (parent && parent.id !== focus.id) {
-        const parentNode = node(parent.name, 500, 160, {
+        const parentNode = node(parent.name, 500, 140, {
             region: true, summary: parent.summary || '', currentState: parent.currentState || '', facts: parent.facts || [],
         });
         model.nodes.push(parentNode);
         nodeByLocationId.set(parent.id, parentNode);
     }
-    const children = focus
+    const allChildren = focus
         ? locations.filter(location => location.id !== focus.id
-            && resolveLocationReference(store?.entities, location.parentLocationName)?.id === focus.id).slice(0, 8)
+            && resolveLocationReference(store?.entities, location.parentLocationName)?.id === focus.id)
         : [];
-    children.forEach((child, index) => {
-        const angle = (Math.PI * 2 * index) / Math.max(4, children.length) - Math.PI / 2;
-        const childNode = node(child.name, 500 + Math.cos(angle) * 190, 340 + Math.sin(angle) * 150, {
+    const children = explored
+        ? allChildren.filter(child => placeKeys(child).some(key => explored.has(key)))
+        : allChildren;
+    model.hiddenNearby = allChildren.length - children.length;
+    children.slice(0, 8).forEach((child, index, shown) => {
+        const angle = (Math.PI * 2 * index) / Math.max(4, shown.length) - Math.PI / 2;
+        const childNode = node(child.name, 500 + Math.cos(angle) * 200, 340 + Math.sin(angle) * 155, {
             summary: child.summary || '', currentState: child.currentState || '', facts: child.facts || [],
             importance: child.importance || 50,
         });
@@ -377,24 +551,55 @@ export function buildSceneModel(store, scene, playerName = '', chatLength = 1_00
     return model;
 }
 
+/**
+ * What the HUD needs about the player's surroundings: who is here, the
+ * explored places around (inside this one, or sharing its parent), and how
+ * many unexplored ones are still hidden.
+ */
+export function describeSurroundings(store, scene, playerName = '', explored = null) {
+    const sceneLocation = resolveSceneLocation(store, scene);
+    const focus = sceneLocation.record;
+    const here = sceneLocation.name || '';
+    if (!store) return { here, withYou: [], nearby: [], hiddenNearby: 0 };
+    const { locations } = worldRecords(store, playerName);
+    const parentId = location => resolveLocationReference(store.entities, location?.parentLocationName)?.id || '';
+    const focusParent = focus ? parentId(focus) : '';
+    const around = focus
+        ? locations.filter(location => location.id !== focus.id
+            && (parentId(location) === focus.id || (focusParent && parentId(location) === focusParent)))
+        : [];
+    const known = explored instanceof Set
+        ? around.filter(location => placeKeys(location).some(key => explored.has(key)))
+        : around;
+    const placements = placeCharacters(store, scene, playerName);
+    const peopleAt = location => placements.filter(placement => placement.location?.id === location.id).length;
+    const withYou = placements
+        .filter(placement => (focus ? placement.location?.id === focus.id
+            : placement.name && canonicalNameKey(placement.name) === canonicalNameKey(here)))
+        .map(placement => ({ name: placement.character.name, state: cleanString(placement.character.currentState, 240) }));
+    return {
+        here,
+        withYou,
+        nearby: known.map(location => ({ name: location.name, people: peopleAt(location) })),
+        hiddenNearby: around.length - known.length,
+    };
+}
+
 /** Scene-view backdrop: a focused spotlight instead of the continent art. */
 function sceneArt() {
     return `
-<defs>
-    <radialGradient id="il-scene-spot" cx="50%" cy="46%" r="65%">
-        <stop offset="0%" stop-color="#2a3140"/>
-        <stop offset="55%" stop-color="#171d28"/>
-        <stop offset="100%" stop-color="#0b0f16"/>
-    </radialGradient>
-</defs>
-<rect x="0" y="0" width="1000" height="700" fill="url(#il-scene-spot)"/>
-<circle cx="500" cy="340" r="240" fill="none" stroke="#3a4356" stroke-width="1.5" stroke-dasharray="2 6" opacity="0.8"/>
-<circle cx="500" cy="340" r="330" fill="none" stroke="#2c3342" stroke-width="1" stroke-dasharray="2 8" opacity="0.6"/>
-<text x="500" y="668" text-anchor="middle" fill="#5f6a7a" font-size="14" font-family="serif" font-style="italic">current scene</text>`;
+<radialGradient id="il-scene-spot" gradientUnits="userSpaceOnUse" cx="500" cy="340" r="620">
+    <stop offset="0%" stop-color="#252c3a"/>
+    <stop offset="55%" stop-color="#151a24"/>
+    <stop offset="100%" stop-color="#0a0d13"/>
+</radialGradient>
+<rect x="-2000" y="-2000" width="5000" height="4700" fill="url(#il-scene-spot)"/>
+<circle cx="500" cy="340" r="250" fill="none" stroke="#3a4356" stroke-width="1.5" stroke-dasharray="2 6" opacity="0.8"/>
+<circle cx="500" cy="340" r="340" fill="none" stroke="#2c3342" stroke-width="1" stroke-dasharray="2 8" opacity="0.6"/>`;
 }
 
 /** Render the map model into the overlay's SVG element. */
-function renderModel(container, model, callbacks, options = {}) {
+function renderModel(container, model, options = {}) {
     const sceneMode = options.scene === true;
     const links = [];
     for (const node of model.nodes) {
@@ -404,75 +609,185 @@ function renderModel(container, model, callbacks, options = {}) {
         if (parent && !parent.region) links.push([node, parent]);
     }
     const linkMarkup = links.map(([node, parent]) =>
-        `<line class="il-map-link${sceneMode ? ' il-scene-link' : ''}" x1="${node.x}" y1="${node.y}" x2="${parent.x}" y2="${parent.y}"/>`).join('')
+        `<line class="il-map-link" vector-effect="non-scaling-stroke" x1="${node.x}" y1="${node.y}" x2="${parent.x}" y2="${parent.y}"/>`).join('')
         + (sceneMode
-            ? model.nodes.filter(node => node !== model.nodes[0])
-                .map(node => `<line class="il-scene-link" x1="500" y1="340" x2="${node.x}" y2="${node.y}"/>`).join('')
+            ? model.nodes.slice(1).map(node => `<line class="il-map-link il-scene-link" vector-effect="non-scaling-stroke" x1="500" y1="340" x2="${node.x}" y2="${node.y}"/>`).join('')
             : '');
 
     const nodeMarkup = model.nodes.map(node => {
-        const classes = ['il-map-node', node.region ? 'il-map-region' : 'il-map-place'];
-        if (node.autoPlaced) classes.push('il-map-discovered');
+        const classes = ['il-map-node', node.visited ? 'is-visited' : 'is-seen'];
+        if (node.region) classes.push('is-region');
+        if (node.provisional) classes.push('is-provisional');
+        if (node.id === options.selectedId) classes.push('is-selected');
         const npcs = [...node.npcs].sort((a, b) => Number(b.active) - Number(a.active) || Number(b.recent) - Number(a.recent));
         const overflow = npcs.length - MAX_NODE_CHIPS;
         const chips = npcs.slice(0, MAX_NODE_CHIPS)
             .map(chip => `<span class="il-map-chip ${chip.active ? 'is-active' : chip.recent ? 'is-recent' : 'is-dormant'}">${svgEscape(chip.name)}</span>`)
             .join('') + (overflow > 0 ? `<span class="il-map-chip is-dormant">+${overflow}</span>` : '');
-        const isPlayerHere = model.player?.node === node;
-        return `<g class="${classes.join(' ')}" data-node-id="${svgEscape(node.id)}" transform="translate(${node.x}, ${node.y})">
-            <circle class="il-map-hit" r="26"/>
-            ${isPlayerHere ? `<circle class="il-map-player-halo" r="26"/>` : ''}
-            <circle class="il-map-dot${sceneMode ? ' il-scene-dot' : ''}" r="${sceneMode ? (node === model.nodes[0] ? 14 : node.region ? 6 : 11) : (node.region ? 5 : 9)}"/>
-            ${!node.region && node.npcs.length ? `<circle class="il-map-npc-ring" r="14"/>` : ''}
-            <text class="il-map-label" y="${node.region ? -10 : -16}" text-anchor="middle">${svgEscape(node.name)}</text>
-            ${chips ? `<foreignObject x="-90" y="10" width="180" height="52"><div class="il-map-chips" xmlns="http://www.w3.org/1999/xhtml">${chips}</div></foreignObject>` : ''}
-        </g>`;
+        const isCenter = sceneMode && node === model.nodes[0];
+        const pinRadius = sceneMode ? (isCenter ? 15 : node.region ? 7 : 11) : (node.region ? 6 : node.visited ? 8 : 6);
+        return `<g class="${classes.join(' ')}" data-node-id="${svgEscape(node.id)}" transform="translate(${node.x}, ${node.y})"><g class="il-map-mark">
+            <circle class="il-map-hit" r="24"/>
+            <circle class="il-map-pin" r="${pinRadius}"/>
+            ${node.npcs.length && !node.region ? `<g class="il-map-count" transform="translate(${pinRadius + 4}, ${pinRadius + 4})"><circle r="8"/><text text-anchor="middle" dy="3.5">${node.npcs.length}</text></g>` : ''}
+            <text class="il-map-label" y="${-pinRadius - 8}" text-anchor="middle">${svgEscape(node.name)}</text>
+            ${chips ? `<foreignObject class="il-map-chips-wrap" x="-95" y="${pinRadius + 5}" width="190" height="48"><div class="il-map-chips" xmlns="http://www.w3.org/1999/xhtml">${chips}</div></foreignObject>` : ''}
+        </g></g>`;
     }).join('');
 
-    const playerMarkup = model.player
-        ? `<g class="il-map-player" transform="translate(${model.player.x}, ${model.player.y})">
-            <circle class="il-map-player-dot" r="7" filter="url(#il-map-glow)"/>
-            <text class="il-map-player-label" y="-30" text-anchor="middle">${svgEscape(model.player.name)}</text>
-        </g>`
+    const youMarkup = model.player
+        ? `<g class="il-map-you" transform="translate(${model.player.x}, ${model.player.y})" pointer-events="none"><g class="il-map-mark">
+            <circle class="il-map-you-ring" r="16"/>
+            <circle class="il-map-you-dot" r="6"/>
+        </g></g>`
         : '';
 
-    if (sceneMode && model.nodes.length <= 2) {
-        const hint = `<text x="500" y="560" text-anchor="middle" fill="#8fa3b8" font-size="16" font-family="serif" font-style="italic">No discovered places inside yet - explore to reveal them</text>`;
-        container.innerHTML = `${sceneArt()}${linkMarkup}${nodeMarkup}${playerMarkup}${hint}`;
-    } else {
-        container.innerHTML = `${(sceneMode ? sceneArt() : worldArt())}${linkMarkup}${nodeMarkup}${playerMarkup}`;
+    const art = sceneMode ? sceneArt() : worldArt();
+    const fog = !sceneMode && Array.isArray(model.reveals) ? fogLayer(model.reveals) : '';
+    container.innerHTML = `${art}${fog}${linkMarkup}${nodeMarkup}${youMarkup}`;
+}
+
+/* View geometry. The view is a centre point and a zoom in world units; the
+ * SVG viewBox always has the element's own aspect ratio, so one world unit is
+ * the same size on both axes and screen and world points convert exactly.
+ * At scale 1 the whole world fits the element. */
+
+function unitsPerPixel(view, size) {
+    return Math.max(MAP_VIEWBOX.width / size.width, MAP_VIEWBOX.height / size.height) / view.scale;
+}
+
+export function clampScale(scale) {
+    return Math.min(MAX_SCALE, Math.max(MIN_SCALE, Number(scale) || 1));
+}
+
+/** The viewBox for a view on an element of `size` ({ width, height } in px). */
+export function viewBoxFor(view, size) {
+    const units = unitsPerPixel(view, size);
+    const width = size.width * units;
+    const height = size.height * units;
+    return { x: view.cx - width / 2, y: view.cy - height / 2, width, height };
+}
+
+/** The world point under `point` (px from the element's top-left corner). */
+export function screenToWorld(view, size, point) {
+    const box = viewBoxFor(view, size);
+    const units = unitsPerPixel(view, size);
+    return { x: box.x + point.x * units, y: box.y + point.y * units };
+}
+
+/** Move the view so the world point `anchor` sits under screen `point`. */
+export function anchorView(view, size, anchor, point) {
+    const units = unitsPerPixel(view, size);
+    return {
+        ...view,
+        cx: anchor.x - (point.x - size.width / 2) * units,
+        cy: anchor.y - (point.y - size.height / 2) * units,
+    };
+}
+
+/** Zoom to `scale` keeping the world point under screen `point` in place. */
+export function zoomAround(view, size, point, scale) {
+    const anchor = screenToWorld(view, size, point);
+    return anchorView({ ...view, scale: clampScale(scale) }, size, anchor, point);
+}
+
+/** A view showing `bounds` ({ x, y, width, height } in world units) whole. */
+export function fitView(bounds, size, maximumScale = 3) {
+    const fitAll = Math.max(MAP_VIEWBOX.width / size.width, MAP_VIEWBOX.height / size.height);
+    const needed = Math.max(bounds.width / size.width, bounds.height / size.height, 1e-6);
+    return {
+        cx: bounds.x + bounds.width / 2,
+        cy: bounds.y + bounds.height / 2,
+        scale: clampScale(Math.min(maximumScale, fitAll / needed)),
+    };
+}
+
+function keepInWorld(view) {
+    const margin = 150;
+    return {
+        scale: clampScale(view.scale),
+        cx: Math.min(MAP_VIEWBOX.width + margin, Math.max(-margin, view.cx)),
+        cy: Math.min(MAP_VIEWBOX.height + margin, Math.max(-margin, view.cy)),
+    };
+}
+
+/** The explored part of the world, or the whole world when nothing is fogged. */
+function explorationBounds(model) {
+    if (!Array.isArray(model?.reveals) || !model.reveals.length) {
+        return { x: 0, y: 0, width: MAP_VIEWBOX.width, height: MAP_VIEWBOX.height };
     }
-    for (const element of container.querySelectorAll('[data-node-id]')) {
-        element.addEventListener('click', () => {
-            const node = model.nodes.find(candidate => candidate.id === element.dataset.nodeId);
-            if (node) callbacks.onSelect?.(node);
-        });
-    }
+    const xs = model.reveals.flatMap(point => [point.x - point.radius, point.x + point.radius]);
+    const ys = model.reveals.flatMap(point => [point.y - point.radius, point.y + point.radius]);
+    return { x: Math.min(...xs), y: Math.min(...ys), width: Math.max(...xs) - Math.min(...xs), height: Math.max(...ys) - Math.min(...ys) };
+}
+
+function personRow(person) {
+    const badge = personBadge(person.name);
+    const status = person.active ? 'here recently' : person.recent ? 'seen lately' : 'not seen for a while';
+    return `<li><button type="button" class="il-map-person${person.active || person.recent ? '' : ' is-dormant'}" data-person="${svgEscape(person.name)}">
+        <span class="il-map-face" style="--hue:${badge.hue}">${svgEscape(badge.initials)}</span>
+        <span><b>${svgEscape(person.name)}</b><small>${svgEscape(person.state || status)}</small></span>
+    </button></li>`;
 }
 
 /**
- * Create the panel object: { open(), refresh(store, scene, playerName), close() }.
- * The overlay is created lazily on first open.
+ * Create the panel object: { open(view), refresh(store, scene, playerName), close() }.
+ * `onPerson(name)` opens a person's card. The overlay is created lazily on
+ * first open.
  */
-export function createMapPanel() {
+export function createMapPanel({ onPerson } = {}) {
     let overlay = null;
     let svg = null;
-    let detail = null;
-    let view = { x: 0, y: 0, scale: 1 };
-    let drag = null;
-    let lastModel = null;
+    let sheet = null;
+    let view = null;
     let activeView = 'world';
     let lastInputs = null;
+    let lastModel = null;
+    let selectedId = '';
+    let frame = 0;
+
+    const size = () => {
+        const rect = svg.getBoundingClientRect();
+        return { width: rect.width, height: rect.height, left: rect.left, top: rect.top };
+    };
+    const measurable = () => svg && size().width > 2 && size().height > 2;
 
     const applyView = () => {
-        if (!svg) return;
-        const { width, height } = MAP_VIEWBOX;
-        if (activeView === 'scene') {
-            svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
-            return;
-        }
-        svg.setAttribute('viewBox', `${view.x} ${view.y} ${width / view.scale} ${height / view.scale}`);
+        if (!measurable()) return;
+        const current = size();
+        if (!view) view = initialView(current);
+        view = keepInWorld(view);
+        const box = viewBoxFor(view, current);
+        svg.setAttribute('viewBox', `${box.x} ${box.y} ${box.width} ${box.height}`);
+        svg.style.setProperty('--il-map-k', String(unitsPerPixel(view, current)));
+        svg.classList.toggle('is-far', activeView === 'world' && view.scale < 1.4);
     };
+    const scheduleView = () => {
+        cancelAnimationFrame(frame);
+        frame = requestAnimationFrame(applyView);
+    };
+
+    // The world view opens on the explored region with the player in it; the
+    // scene view is laid out for the whole frame.
+    function initialView(current) {
+        if (activeView === 'scene') return { cx: 500, cy: 350, scale: 1 };
+        const fitted = fitView(explorationBounds(lastModel), current);
+        if (!lastModel?.player) return fitted;
+        const shown = viewBoxFor(fitted, current);
+        const { x, y } = lastModel.player;
+        const inside = x > shown.x + 40 && x < shown.x + shown.width - 40 && y > shown.y + 40 && y < shown.y + shown.height - 40;
+        return inside ? fitted : { cx: x, cy: y, scale: Math.max(fitted.scale, 1.8) };
+    }
+
+    function recenter() {
+        if (!measurable()) return;
+        if (activeView === 'world' && lastModel?.player) {
+            view = { cx: lastModel.player.x, cy: lastModel.player.y, scale: Math.max(view?.scale || 1, 2.2) };
+        } else {
+            view = null;
+        }
+        applyView();
+    }
 
     const ensureOverlay = () => {
         ensureInlineStyles();
@@ -480,139 +795,256 @@ export function createMapPanel() {
         overlay = document.createElement('div');
         overlay.id = 'il_map_overlay';
         overlay.className = 'displayNone';
+        overlay.setAttribute('role', 'dialog');
+        overlay.setAttribute('aria-label', 'InnerLore map');
         overlay.innerHTML = `
             <div class="il-map-header">
-                <span class="il-map-title">InnerLore — map</span>
-                <span class="il-map-views">
-                    <button type="button" class="il-map-view-btn is-active" data-view="world">World</button>
-                    <button type="button" class="il-map-view-btn" data-view="scene">Scene</button>
+                <button type="button" class="il-map-iconbtn il-map-close" aria-label="Close the map" title="Close">${ICON.close}</button>
+                <div class="il-map-heading">
+                    <span class="il-map-kicker">World map</span>
+                    <span class="il-map-where"></span>
+                </div>
+                <span class="il-map-views" role="tablist">
+                    <button type="button" class="il-map-view-btn is-active" data-view="world" role="tab">World</button>
+                    <button type="button" class="il-map-view-btn" data-view="scene" role="tab">Here</button>
                 </span>
-                <span class="il-map-hint">drag to pan · pinch or wheel to zoom · tap a place for details</span>
-                <span class="il-map-zoom">
-                    <button type="button" class="il-map-zoom-btn" data-zoom="out" aria-label="Zoom out">−</button>
-                    <button type="button" class="il-map-zoom-btn" data-zoom="reset" aria-label="Reset view">⌖</button>
-                    <button type="button" class="il-map-zoom-btn" data-zoom="in" aria-label="Zoom in">+</button>
-                </span>
-                <button type="button" class="il-map-close menu_button">Close</button>
             </div>
             <div class="il-map-body">
                 <svg id="il_map_svg" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMidYMid meet"></svg>
-                <aside class="il-map-detail displayNone"></aside>
+                <div class="il-map-legend"></div>
+                <div class="il-map-controls">
+                    <button type="button" class="il-map-ctl" data-zoom="in" aria-label="Zoom in" title="Zoom in">${ICON.plus}</button>
+                    <button type="button" class="il-map-ctl" data-zoom="out" aria-label="Zoom out" title="Zoom out">${ICON.minus}</button>
+                    <button type="button" class="il-map-ctl" data-zoom="recenter" aria-label="Centre on you" title="Centre on you">${ICON.locate}</button>
+                </div>
+                <aside class="il-map-sheet displayNone" aria-live="polite"></aside>
             </div>`;
         document.body.appendChild(overlay);
         svg = overlay.querySelector('#il_map_svg');
-        detail = overlay.querySelector('.il-map-detail');
+        sheet = overlay.querySelector('.il-map-sheet');
         overlay.querySelector('.il-map-close').addEventListener('click', close);
+        overlay.addEventListener('keydown', event => {
+            if (event.key === 'Escape') close();
+        });
+        sheet.addEventListener('click', event => {
+            const person = event.target.closest('[data-person]');
+            if (person) onPerson?.(person.dataset.person);
+            if (event.target.closest('.il-map-sheet-close')) hideSheet();
+        });
+        overlay.querySelector('.il-map-legend').addEventListener('click', event => {
+            if (event.target.closest('[data-elsewhere]')) showElsewhere();
+        });
+
+        // One finger pans, two pinch around their midpoint, the wheel zooms
+        // around the cursor. Each gesture pins a world point to the fingers
+        // (or cursor), so the map under them never drifts.
         const pointers = new Map();
-        let pinch = null;
+        let gesture = null;
+        const pointOf = event => {
+            const current = size();
+            return { x: event.clientX - current.left, y: event.clientY - current.top };
+        };
+        const startPan = point => {
+            gesture = { kind: 'pan', anchor: screenToWorld(view, size(), point), from: point, moved: false };
+        };
         svg.addEventListener('pointerdown', event => {
-            pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
-            svg.setPointerCapture(event.pointerId);
+            if (!view) return;
+            const point = pointOf(event);
+            pointers.set(event.pointerId, point);
             if (pointers.size === 1) {
-                drag = { x: event.clientX, y: event.clientY, viewX: view.x, viewY: view.y };
+                startPan(point);
+                gesture.node = event.target.closest?.('[data-node-id]')?.dataset.nodeId || '';
             } else if (pointers.size === 2) {
                 const [a, b] = [...pointers.values()];
-                drag = null;
-                pinch = {
-                    distance: Math.hypot(a.x - b.x, a.y - b.y),
+                const middle = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+                gesture = {
+                    kind: 'pinch',
+                    anchor: screenToWorld(view, size(), middle),
                     scale: view.scale,
-                    cx: (a.x + b.x) / 2, cy: (a.y + b.y) / 2,
-                    viewX: view.x, viewY: view.y,
+                    distance: Math.max(1, Math.hypot(a.x - b.x, a.y - b.y)),
+                    moved: true,
                 };
             }
+            svg.setPointerCapture?.(event.pointerId);
         });
         svg.addEventListener('pointermove', event => {
-            if (!pointers.has(event.pointerId)) return;
-            pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
-            if (pinch && pointers.size >= 2) {
+            if (!pointers.has(event.pointerId) || !gesture) return;
+            const point = pointOf(event);
+            pointers.set(event.pointerId, point);
+            const current = size();
+            if (gesture.kind === 'pinch' && pointers.size >= 2) {
                 const [a, b] = [...pointers.values()];
-                const distance = Math.hypot(a.x - b.x, a.y - b.y);
-                const rect = svg.getBoundingClientRect();
-                const nextScale = Math.min(6, Math.max(0.7, pinch.scale * (distance / Math.max(1, pinch.distance))));
-                // Keep the pinch midpoint anchored while zooming.
-                const factor = (MAP_VIEWBOX.width / rect.width);
-                const cxMap = pinch.viewX + (pinch.cx - rect.left) * factor / view.scale;
-                const cyMap = pinch.viewY + (pinch.cy - rect.top) * (MAP_VIEWBOX.height / rect.height) / view.scale;
-                view.scale = nextScale;
-                view.x = cxMap - (pinch.cx - rect.left) * factor / nextScale;
-                view.y = cyMap - (pinch.cy - rect.top) * (MAP_VIEWBOX.height / rect.height) / nextScale;
-                applyView();
-            } else if (drag) {
-                const rect = svg.getBoundingClientRect();
-                const factor = (MAP_VIEWBOX.width / rect.width) / view.scale;
-                view.x = drag.viewX - (event.clientX - drag.x) * factor;
-                view.y = drag.viewY - (event.clientY - drag.y) * factor;
-                applyView();
+                const middle = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+                const scale = clampScale(gesture.scale * Math.hypot(a.x - b.x, a.y - b.y) / gesture.distance);
+                view = anchorView({ ...view, scale }, current, gesture.anchor, middle);
+            } else if (gesture.kind === 'pan') {
+                if (!gesture.moved && Math.hypot(point.x - gesture.from.x, point.y - gesture.from.y) < 6) return;
+                gesture.moved = true;
+                svg.classList.add('is-dragging');
+                view = anchorView(view, current, gesture.anchor, point);
             }
+            scheduleView();
         });
-        const releasePointer = event => {
+        const release = event => {
+            if (!pointers.has(event.pointerId)) return;
+            const tapped = event.type === 'pointerup' && pointers.size === 1 && gesture?.kind === 'pan'
+                && !gesture.moved && gesture.node;
+            const tappedNode = tapped ? gesture.node : '';
             pointers.delete(event.pointerId);
-            if (pointers.size < 2) pinch = null;
-            if (pointers.size === 0) drag = null;
+            svg.classList.remove('is-dragging');
+            if (pointers.size === 1) startPan([...pointers.values()][0]);
+            else if (pointers.size === 0) gesture = null;
+            if (tappedNode) {
+                const node = lastModel?.nodes.find(candidate => candidate.id === tappedNode);
+                if (node) showDetail(node);
+            }
         };
-        svg.addEventListener('pointerup', releasePointer);
-        svg.addEventListener('pointercancel', releasePointer);
+        svg.addEventListener('pointerup', release);
+        svg.addEventListener('pointercancel', release);
         svg.addEventListener('wheel', event => {
             event.preventDefault();
-            view.scale = Math.min(6, Math.max(0.7, view.scale * (event.deltaY < 0 ? 1.15 : 0.87)));
-            applyView();
+            if (!view) return;
+            view = zoomAround(view, size(), pointOf(event), view.scale * (event.deltaY < 0 ? 1.2 : 1 / 1.2));
+            scheduleView();
         }, { passive: false });
+        svg.addEventListener('dblclick', event => {
+            if (!view) return;
+            view = zoomAround(view, size(), pointOf(event), view.scale * 2);
+            scheduleView();
+        });
         for (const button of overlay.querySelectorAll('.il-map-view-btn')) {
-            button.addEventListener('click', () => {
-                activeView = button.dataset.view === 'scene' ? 'scene' : 'world';
-                for (const other of overlay.querySelectorAll('.il-map-view-btn')) {
-                    other.classList.toggle('is-active', other === button);
-                }
-                view = { x: 0, y: 0, scale: 1 };
-                if (lastInputs) refresh(lastInputs.store, lastInputs.scene, lastInputs.playerName);
-            });
+            button.addEventListener('click', () => setView(button.dataset.view));
         }
-        for (const button of overlay.querySelectorAll('.il-map-zoom-btn')) {
+        for (const button of overlay.querySelectorAll('.il-map-ctl')) {
             button.addEventListener('click', () => {
-                if (button.dataset.zoom === 'reset') {
-                    view = { x: 0, y: 0, scale: 1 };
-                } else {
-                    view.scale = Math.min(6, Math.max(0.7, view.scale * (button.dataset.zoom === 'in' ? 1.3 : 0.77)));
-                }
+                if (button.dataset.zoom === 'recenter') return recenter();
+                if (!view || !measurable()) return;
+                const current = size();
+                const middle = { x: current.width / 2, y: current.height / 2 };
+                view = zoomAround(view, current, middle, view.scale * (button.dataset.zoom === 'in' ? 1.5 : 1 / 1.5));
                 applyView();
             });
         }
+        if (typeof window !== 'undefined') window.addEventListener('resize', scheduleView);
     };
 
+    function setView(next) {
+        activeView = next === 'scene' ? 'scene' : 'world';
+        if (!overlay) return;
+        for (const button of overlay.querySelectorAll('.il-map-view-btn')) {
+            button.classList.toggle('is-active', button.dataset.view === activeView);
+        }
+        overlay.querySelector('.il-map-kicker').textContent = activeView === 'scene' ? 'Around you' : 'World map';
+        view = null;
+        hideSheet();
+        if (lastInputs) refresh(lastInputs.store, lastInputs.scene, lastInputs.playerName);
+    }
+
+    function hideSheet() {
+        sheet?.classList.add('displayNone');
+        if (selectedId) {
+            selectedId = '';
+            svg?.querySelector('.is-selected')?.classList.remove('is-selected');
+        }
+    }
+
+    function showSheet(html) {
+        sheet.innerHTML = html;
+        sheet.classList.remove('displayNone');
+    }
+
     function showDetail(node) {
-        if (!detail) return;
-        const npcs = node.npcs.length
-            ? node.npcs.map(chip => `<li class="${chip.active ? 'is-active' : chip.recent ? 'is-recent' : 'is-dormant'}">${svgEscape(chip.name)}</li>`).join('')
-            : '<li class="is-dormant">(no tracked NPCs presently here)</li>';
-        const facts = node.facts.length ? node.facts.map(fact => `<li>${svgEscape(typeof fact === 'string' ? fact : fact?.statement || '')}</li>`).join('') : '';
-        detail.innerHTML = `
-            <h3>${svgEscape(node.name)}</h3>
-            ${node.summary ? `<p class="il-map-detail-summary">${svgEscape(node.summary)}</p>` : ''}
-            ${node.currentState ? `<p class="il-map-detail-state"><b>Now:</b> ${svgEscape(node.currentState)}</p>` : ''}
-            ${facts ? `<ul class="il-map-detail-facts">${facts}</ul>` : ''}
-            <div class="il-map-detail-npcs"><b>Present</b><ul>${npcs}</ul></div>`;
-        detail.classList.remove('displayNone');
+        if (!sheet) return;
+        selectedId = node.id;
+        svg.querySelector('.is-selected')?.classList.remove('is-selected');
+        svg.querySelector(`[data-node-id="${CSS.escape(node.id)}"]`)?.classList.add('is-selected');
+        const here = lastModel?.player?.node === node;
+        const tags = [
+            here ? '<span class="il-map-tag is-you">You are here</span>' : '',
+            node.visited ? '<span class="il-map-tag is-visited">Explored</span>' : '<span class="il-map-tag">Seen from afar</span>',
+            node.provisional ? '<span class="il-map-tag">Not yet recorded</span>' : '',
+        ].join('');
+        const facts = node.facts.slice(0, 6)
+            .map(fact => `<li>${svgEscape(typeof fact === 'string' ? fact : fact?.statement || '')}</li>`).join('');
+        const people = node.npcs.length
+            ? `<ul class="il-map-people">${node.npcs.map(personRow).join('')}</ul>`
+            : '<p class="il-map-empty">No one we know of is here.</p>';
+        showSheet(`
+            <div class="il-map-sheet-head">
+                <div class="il-map-sheet-title"><div class="il-map-tags">${tags}</div><h3>${svgEscape(node.name)}</h3></div>
+                <button type="button" class="il-map-iconbtn il-map-sheet-close" aria-label="Close details">${ICON.close}</button>
+            </div>
+            <div class="il-map-sheet-body">
+                ${node.summary ? `<p>${svgEscape(node.summary)}</p>` : ''}
+                ${node.currentState ? `<p class="il-map-now"><b>Now:</b> ${svgEscape(node.currentState)}</p>` : ''}
+                ${facts ? `<ul class="il-map-facts">${facts}</ul>` : ''}
+                <div class="il-map-section">People here</div>
+                ${people}
+            </div>`);
+    }
+
+    function showElsewhere() {
+        const people = lastModel?.elsewhere || [];
+        const unknown = people.filter(person => person.reason === 'unknown');
+        const hidden = people.filter(person => person.reason !== 'unknown');
+        const list = items => `<ul class="il-map-people">${items.map(personRow).join('')}</ul>`;
+        hideSheet();
+        showSheet(`
+            <div class="il-map-sheet-head">
+                <div class="il-map-sheet-title"><div class="il-map-tags"><span class="il-map-tag">Off the map</span></div><h3>Elsewhere</h3></div>
+                <button type="button" class="il-map-iconbtn il-map-sheet-close" aria-label="Close">${ICON.close}</button>
+            </div>
+            <div class="il-map-sheet-body">
+                ${hidden.length ? `<div class="il-map-section">Somewhere unexplored</div>${list(hidden)}` : ''}
+                ${unknown.length ? `<div class="il-map-section">Whereabouts unknown</div>${list(unknown)}` : ''}
+                ${!people.length ? '<p class="il-map-empty">Everyone we know of is on the map.</p>' : ''}
+            </div>`);
+    }
+
+    function renderLegend() {
+        const legend = overlay.querySelector('.il-map-legend');
+        const away = lastModel?.elsewhere?.length || 0;
+        if (activeView === 'scene') {
+            const hidden = lastModel?.hiddenNearby || 0;
+            const inside = (lastModel?.nodes || []).filter(node => !node.region).length - 1;
+            legend.innerHTML = hidden
+                ? `<span class="il-map-pill">${hidden} unexplored place${hidden === 1 ? '' : 's'} nearby</span>`
+                : (inside > 0 ? '' : '<span class="il-map-pill">Nothing discovered inside yet - explore to reveal it</span>');
+            return;
+        }
+        legend.innerHTML = (lastModel?.nodes.length
+            ? '<span class="il-map-pill"><span class="il-map-key is-you"></span>You<span class="il-map-key is-visited"></span>Explored<span class="il-map-key is-seen"></span>Seen</span>'
+            : '<span class="il-map-pill">Nothing explored yet - the map fills in as you travel</span>')
+            + (away ? `<button type="button" class="il-map-pill" data-elsewhere="1">Elsewhere · ${away}</button>` : '');
     }
 
     function refresh(store, scene, playerName) {
         ensureOverlay();
         lastInputs = { store, scene, playerName };
+        overlay.querySelector('.il-map-where').textContent = resolveSceneLocation(store, scene).name || scene?.location?.name || 'Somewhere';
         if (!store) {
-            if (svg) svg.innerHTML = '<text x="500" y="350" text-anchor="middle" fill="#8fa3b8" font-size="18" font-family="serif" font-style="italic">World state is still loading…</text>';
+            svg.innerHTML = '<text x="500" y="350" text-anchor="middle" fill="#8fa3b8" font-size="18" font-family="serif" font-style="italic">World state is still loading…</text>';
             return;
         }
         const chat = (typeof window !== 'undefined' && window.SillyTavern?.getContext?.()?.chat) || [];
+        const explored = exploredPlaces(chat, store, playerName, scene);
         const enrichedScene = { ...scene, chatLength: chat.length };
         lastModel = activeView === 'scene'
-            ? buildSceneModel(store, enrichedScene, playerName, chat.length)
-            : buildMapModel(store, enrichedScene, playerName);
-        renderModel(svg, lastModel, { onSelect: showDetail }, { scene: activeView === 'scene' });
+            ? buildSceneModel(store, enrichedScene, playerName, chat.length, { explored })
+            : buildMapModel(store, enrichedScene, playerName, { explored });
+        if (selectedId && !lastModel.nodes.some(node => node.id === selectedId)) hideSheet();
+        renderModel(svg, lastModel, { scene: activeView === 'scene', selectedId });
+        renderLegend();
         applyView();
     }
 
-    function open() {
+    function open(next) {
         ensureOverlay();
+        if (next && next !== activeView) setView(next);
         overlay.classList.remove('displayNone');
+        overlay.tabIndex = -1;
+        overlay.focus?.({ preventScroll: true });
+        scheduleView();
     }
 
     function close() {
@@ -620,182 +1052,4 @@ export function createMapPanel() {
     }
 
     return { open, refresh, close };
-}
-
-/**
- * Floating minimap: a small draggable widget showing the current location,
- * its nearest neighbors, and NPC activity dots. Clicking it opens the full
- * map on the scene view. Its position persists in localStorage.
- */
-export function createMinimap(openFullMap, versionText = '') {
-    let element = null;
-    let drag = null;
-    // The location panel is always shown; the hide preference from the old
-    // toggle era is deliberately ignored.
-    let hiddenByUser = false;
-
-    const restorePosition = () => {
-        try {
-            const saved = JSON.parse(globalThis.localStorage?.getItem('innerlore:minimap:pos') || 'null');
-            if (saved && Number.isFinite(saved.x) && Number.isFinite(saved.y)) {
-                element.style.right = 'auto';
-                element.style.bottom = 'auto';
-                element.style.left = Math.max(8, Math.min(saved.x, window.innerWidth - 200)) + 'px';
-                element.style.top = Math.max(8, Math.min(saved.y, window.innerHeight - 160)) + 'px';
-            }
-        } catch { /* no storage */ }
-    };
-
-    const persistPosition = () => {
-        try {
-            const rect = element.getBoundingClientRect();
-            globalThis.localStorage?.setItem('innerlore:minimap:pos', JSON.stringify({ x: rect.left, y: rect.top }));
-        } catch { /* no storage */ }
-    };
-
-    const ensure = () => {
-        ensureInlineStyles();
-        if (element) return;
-        element = document.createElement('div');
-        element.id = 'il_minimap';
-        element.className = 'displayNone';
-        // Critical placement lives on the element itself: no stylesheet,
-        // stale or missing, can make the panel invisible.
-        element.style.position = 'fixed';
-        element.style.right = '12px';
-        // Top-right: the bottom edge is crowded on mobile browsers (floating
-        // toolbars) and SillyTavern's send form; the top-right corner under
-        // the cast bar is the only reliably clear mobile real estate.
-        element.style.top = 'calc(env(safe-area-inset-top, 0px) + 54px)';
-        element.style.zIndex = '40000';
-        element.style.width = '190px';
-        element.style.border = '1px solid #8fb7e8';
-        element.style.borderRadius = '12px';
-        element.style.background = 'rgba(16, 18, 24, 0.95)';
-        element.style.boxShadow = '0 4px 14px rgba(0, 0, 0, 0.5)';
-        element.style.color = '#e2c99a';
-        element.style.fontSize = '0.85em';
-        element.style.padding = '8px 10px';
-        element.innerHTML = `
-            <div class="il-minimap-head">
-                <span class="il-minimap-loc"></span>
-                <span class="il-minimap-expand" title="Open the full map" role="button" tabindex="0">⤢</span>
-            </div>
-            <div class="il-minimap-body"></div>`;
-        document.body.appendChild(element);
-        restorePosition();
-        element.querySelector('.il-minimap-expand').addEventListener('click', event => {
-            event.stopPropagation();
-            openFullMap?.();
-        });
-        element.addEventListener('pointerdown', event => {
-            if (element.dataset.docked === '1') return;
-            if (event.target.closest('.il-minimap-expand')) return;
-            drag = { x: event.clientX, y: event.clientY, left: element.offsetLeft, top: element.offsetTop };
-            element.setPointerCapture(event.pointerId);
-        });
-        element.addEventListener('pointermove', event => {
-            if (!drag) return;
-            element.style.right = 'auto';
-            element.style.bottom = 'auto';
-            element.style.left = Math.max(4, drag.left + event.clientX - drag.x) + 'px';
-            element.style.top = Math.max(4, drag.top + event.clientY - drag.y) + 'px';
-        });
-        const release = () => {
-            if (drag) {
-                drag = null;
-                persistPosition();
-            }
-        };
-        element.addEventListener('pointerup', release);
-        element.addEventListener('pointercancel', release);
-    };
-
-    ensure();
-    if (hiddenByUser) element.classList.add('displayNone');
-
-    const dockInto = container => {
-        ensure();
-        element.dataset.docked = '1';
-        for (const key of ['position', 'top', 'right', 'bottom', 'left', 'zIndex', 'width', 'border', 'borderRadius', 'background', 'boxShadow', 'padding']) {
-            element.style[key] = '';
-        }
-        if (container && element.parentElement !== container) container.appendChild(element);
-    };
-
-    return {
-        dockInto,
-        toggle() {
-            try {
-                ensure();
-            } catch (error) {
-                console.error('[InnerLore] Could not create the location panel:', error);
-                (globalThis.toastr?.error?.('InnerLore could not create the location panel: ' + (error?.message || error), 'InnerLore'));
-                return false;
-            }
-            const nowVisible = element.classList.toggle('displayNone') === false;
-            hiddenByUser = !nowVisible;
-            try {
-                globalThis.localStorage?.setItem('innerlore:minimap:hidden', nowVisible ? '0' : '1');
-            } catch { /* no storage */ }
-            const suffix = versionText ? ` (${versionText})` : '';
-            (globalThis.toastr?.info?.((nowVisible ? 'Location panel shown' : 'Location panel hidden') + suffix, 'InnerLore', { timeOut: 4_000 }));
-            return nowVisible;
-        },
-        refresh(store, scene, playerName = '') {
-            try {
-                ensure();
-            } catch (error) {
-                console.error('[InnerLore] Could not create the location panel:', error);
-                return;
-            }
-            if (hiddenByUser) {
-                element.classList.add('displayNone');
-                return;
-            }
-            // Show the shell even before the store attaches: the scene's
-            // location name is enough for the panel to be useful, and a
-            // visible shell prevents refresh cycles from hiding a panel the
-            // user just toggled on.
-            element.classList.remove('displayNone');
-            if (!store) {
-                const fallback = scene?.location?.name;
-                element.querySelector('.il-minimap-loc').textContent = fallback || 'Loading world…';
-                element.querySelector('.il-minimap-body').innerHTML = '<div class="il-minimap-near is-empty">World state is loading…</div>';
-                return;
-            }
-            const { locations } = worldRecords(store, playerName);
-            const sceneLocation = resolveSceneLocation(store, scene);
-            const focus = sceneLocation.record;
-            const here = sceneLocation.name || 'Somewhere';
-            const parentOf = location => resolveLocationReference(store.entities, location?.parentLocationName)?.id || '';
-            const focusParent = focus ? parentOf(focus) : '';
-            const neighbors = focus
-                ? locations
-                    .filter(location => location.id !== focus.id)
-                    .filter(location => {
-                        const parentId = parentOf(location);
-                        return parentId === focus.id || (focusParent && parentId === focusParent);
-                    })
-                    .slice(0, 4)
-                : [];
-            const withYou = placeCharacters(store, scene, playerName)
-                .filter(placement => (focus ? placement.location?.id === focus.id
-                    : placement.name && canonicalNameKey(placement.name) === canonicalNameKey(here)))
-                .map(placement => placement.character.name);
-            const shown = withYou.slice(0, 4).map(name => svgEscape(name)).join(', ');
-            element.querySelector('.il-minimap-loc').textContent = here;
-            element.querySelector('.il-minimap-body').innerHTML =
-                (neighbors.length
-                    ? `<div class="il-minimap-near">${neighbors.map(n => `<span>${svgEscape(n.name)}</span>`).join('')}</div>`
-                    : '<div class="il-minimap-near is-empty">No nearby places discovered yet</div>')
-                + (withYou.length
-                    ? `<div class="il-minimap-here">Here: ${shown}${withYou.length > 4 ? ` +${withYou.length - 4}` : ''}</div>`
-                    : '');
-            element.classList.remove('displayNone');
-        },
-        hide() {
-            element?.classList.add('displayNone');
-        },
-    };
 }
