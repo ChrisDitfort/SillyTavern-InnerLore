@@ -131,7 +131,7 @@ const PROMPT_KEY = 'inner_lore_context';
 const TURN_CONTRACT_PROMPT_KEY = 'inner_lore_latest_turn_contract';
 const TRIGGER_DELIVERY_PROMPT_KEY = 'inner_lore_trigger_delivery';
 const DISPLAY_NAME = 'InnerLore';
-const EXTENSION_VERSION = '0.23.0';
+const EXTENSION_VERSION = '0.23.1';
 const LOG_PREFIX = '[InnerLore]';
 
 /**
@@ -1583,7 +1583,7 @@ function ensureDockStyles() {
     style.id = DOCK_STYLE_ID;
     style.textContent = `
 #il_cast_bar{position:fixed;top:6px;left:52px;display:flex;gap:6px;z-index:30000;max-width:min(46vw,620px);pointer-events:none}
-#il_cast_bar.il-dock{position:fixed;top:calc(env(safe-area-inset-top,0px) + 44px);left:0;right:0;max-width:none;padding:5px 10px;background:rgba(9,11,16,.92);border-bottom:1px solid #262b34;backdrop-filter:blur(5px);z-index:1000;flex-wrap:wrap;align-items:center}
+#il_cast_bar.il-dock{position:fixed;top:var(--il-dock-top,calc(env(safe-area-inset-top,0px) + 44px));left:0;right:0;max-width:none;padding:5px 10px;background:rgba(9,11,16,.92);border-bottom:1px solid #262b34;backdrop-filter:blur(5px);z-index:1000;flex-wrap:wrap;align-items:center}
 #il_cast_bar.il-dock .il-cast-card{border-color:#3a4150;background:rgba(24,27,34,.85);color:#c3cad6}
 #il_cast_bar.il-dock .il-cast-user{border-color:#5f87b5;color:#cfe3f7}
 #il_cast_bar.il-dock .il-map-toggle{border-color:#3a4150;background:rgba(24,27,34,.85)}
@@ -1927,11 +1927,47 @@ function updateCastCards() {
         }));
     }
     bar.classList.remove('displayNone');
-    // Push story text below the dock's real bottom edge (wraps included),
-    // so no message text is ever covered on phone or Fold screens.
+    positionDock();
+    watchDockPlacement();
+}
+
+/**
+ * The dock sits directly below SillyTavern's top bar, whose height depends on
+ * the theme and screen (a phone theme can make it far taller than the
+ * desktop's), and story text starts below the dock's real bottom edge (wraps
+ * included), so neither the dock nor any message is covered.
+ */
+function positionDock() {
+    const bar = document.getElementById('il_cast_bar');
+    if (!bar || bar.classList.contains('displayNone')) return;
+    const root = document.documentElement;
+    const topBarBottom = Math.max(0, ...['#top-bar', '#top-settings-holder']
+        .map(selector => document.querySelector(selector)?.getBoundingClientRect().bottom || 0));
+    if (topBarBottom > 0) root.style.setProperty('--il-dock-top', `${Math.ceil(topBarBottom)}px`);
     const barBottom = bar.getBoundingClientRect().bottom;
-    if (Number.isFinite(barBottom) && barBottom > 0) {
-        document.documentElement.style.setProperty('--il-dock-clearance', Math.ceil(barBottom + 10) + 'px');
+    if (!Number.isFinite(barBottom) || barBottom <= 0) return;
+    // The padding sits inside #chat, which itself starts below the top bar.
+    const chatTop = document.getElementById('chat')?.getBoundingClientRect().top || 0;
+    root.style.setProperty('--il-dock-clearance', `${Math.ceil(Math.max(0, barBottom - chatTop) + 10)}px`);
+}
+
+// Rotating or unfolding the screen, switching theme, or the dock wrapping onto
+// another line all move these edges without a new reply to redraw the dock.
+function watchDockPlacement() {
+    if (runtime.dockPlacementWatched) return;
+    runtime.dockPlacementWatched = true;
+    let frame = 0;
+    const schedule = () => {
+        cancelAnimationFrame(frame);
+        frame = requestAnimationFrame(positionDock);
+    };
+    window.addEventListener('resize', schedule);
+    if (typeof ResizeObserver === 'function') {
+        const observer = new ResizeObserver(schedule);
+        for (const selector of ['#top-bar', '#top-settings-holder', '#il_cast_bar']) {
+            const element = document.querySelector(selector);
+            if (element) observer.observe(element);
+        }
     }
 }
 
