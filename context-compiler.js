@@ -5,11 +5,11 @@
  * World Progression into one bounded prompt without adding an LLM call.
  */
 
-import { cleanString, compilePromptInjection } from './core.js';
+import { cleanString, compilePromptInjection } from './core.js?v=47';
 import { contextProfileOverrides } from './context-config.js';
 import { collectRecentStoryExpressions } from './expression-cooldown.js';
 import { compileProgressionInjection } from './progression.js';
-import { deriveSceneState, renderSceneState } from './scene.js?v=4';
+import { deriveSceneState, renderSceneState } from './scene.js?v=5';
 
 function reasonText(reasons) {
     return Array.isArray(reasons) && reasons.length ? reasons.join(', ') : 'not active in current scene';

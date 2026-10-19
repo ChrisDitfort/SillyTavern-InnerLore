@@ -12,9 +12,11 @@ import {
     clipAtBoundary,
     contextSimilarity,
     contextTokens,
+    curatedLocationOf,
+    shortCharacterReferences,
     textMentions,
     uniqueStrings,
-} from './core.js';
+} from './core.js?v=47';
 
 const ABSENT_STATE = /\b(?:absent|away|departed|elsewhere|left\s+(?:the|this|that|the\s+scene)|gone\s+home|went\s+home|headed\s+home|returned\s+home|on\s+(?:his|her|their|its)\s+way\s+home|no\s+longer\s+(?:here|present)|not\s+present|off[ -]?screen|outside\s+the\s+scene)\b/iu;
 const PLACE_HEAD_NOUNS = new Set([
@@ -61,6 +63,20 @@ function relevantMessages(messages, maximum = 6) {
 
 function recordReferences(record) {
     return uniqueStrings([record?.name, ...(record?.aliases || []), ...(record?.keys || [])], 40);
+}
+
+/**
+ * Whether text names a character: full name, alias, or key, or - matched
+ * case-sensitively - an unshared given name or surname ("Wren" for "Wren
+ * Halloway"), which is how narration usually refers to someone present.
+ */
+function mentionsCharacter(text, record, characters) {
+    if (textMentions(text, recordReferences(record))) return true;
+    const source = cleanString(text, 200_000);
+    return shortCharacterReferences(record, characters).some(name => {
+        const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        return new RegExp(`(^|[^\\p{L}\\p{N}])${escaped}(?=$|[^\\p{L}\\p{N}])`, 'u').test(source);
+    });
 }
 
 function referenceMatch(candidate, record) {
@@ -177,7 +193,11 @@ function explicitMovementLocation(text, entities) {
     return result;
 }
 
-function locationRanking(store, latestText, focusText, participantNames, currentIndex) {
+function locationRanking(store, latestText, focusText, participantNames, currentIndex, castRecords = [], playerRecord = null) {
+    const castLocations = castRecords.map(record => ({
+        location: curatedLocationOf(store?.entities, record),
+        weight: record === playerRecord ? 2 : 1,
+    })).filter(item => item.location);
     return Object.values(store?.entities || {})
         .filter(record => record?.type === 'location' && record.enabled !== false)
         .map(record => {
@@ -190,15 +210,21 @@ function locationRanking(store, latestText, focusText, participantNames, current
             const participantMatches = participantNames.filter(name => textMentions(state, [name])).length;
             const age = Math.max(0, currentIndex - (Number(record.lastSeenMessage) || 0));
             const dormant = DORMANT_LOCATION.test(state);
+            // Where the present cast is curated to be: the fallback when the
+            // newest prose names no place at all.
+            const castHere = castLocations
+                .filter(item => item.location.id === record.id)
+                .reduce((sum, item) => sum + item.weight, 0);
             const score = (latestMention ? 1_400 : 0)
                 + (focusMention ? 700 : 0)
                 + stateSimilarity * 700
                 + focusSimilarity * 300
                 + participantMatches * 180
+                + castHere * 450
                 + Math.max(0, 100 - age * 12)
                 + (Number(record.importance) || 50)
                 - (dormant ? 1_200 : 0);
-            return { record, latestMention, focusMention, stateSimilarity, participantMatches, dormant, score };
+            return { record, latestMention, focusMention, stateSimilarity, participantMatches, castHere, dormant, score };
         })
         .sort((a, b) => b.score - a.score || a.record.name.localeCompare(b.record.name));
 }
@@ -231,14 +257,13 @@ export function deriveSceneState(messages, store, options = {}) {
     else if (playerName && playerName !== 'Player') addParticipant({ name: playerName }, 'player character', 1);
 
     for (const record of characters) {
-        const references = recordReferences(record);
         // A curated away-state ("gone home", "departed") outranks mere name
         // mentions: narration often names an absent character (writing their
         // testimony, recalling them) without them being in the room.
         const curatedAway = ABSENT_STATE.test(record.currentState || '');
-        if (textMentions(latestText, references) && !curatedAway) addParticipant(record, 'named in latest turn', 1);
-        else if (textMentions(exchangeText, references) && !curatedAway) addParticipant(record, 'named in latest exchange', 0.95);
-        else if (textMentions(focusText, references) && !curatedAway) {
+        if (mentionsCharacter(latestText, record, characters) && !curatedAway) addParticipant(record, 'named in latest turn', 1);
+        else if (mentionsCharacter(exchangeText, record, characters) && !curatedAway) addParticipant(record, 'named in latest exchange', 0.95);
+        else if (mentionsCharacter(focusText, record, characters) && !curatedAway) {
             addParticipant(record, 'active in recent scene', 0.78);
         }
     }
@@ -252,31 +277,41 @@ export function deriveSceneState(messages, store, options = {}) {
         latest?.message?.is_user || MOVEMENT_CONFIRMED.test(latestText) || !MOVEMENT_REJECTED.test(latestText)
     ) ? directedLocation : null);
     if (!location) {
-        const ranked = locationRanking(store, latestText || exchangeText, focusText, participantNames, currentIndex);
+        const castRecords = characters.filter(record => participantMap.has(record.id));
+        const ranked = locationRanking(
+            store, latestText || exchangeText, focusText, participantNames, currentIndex, castRecords, playerRecord,
+        );
         const best = ranked[0];
-        if (best && (best.latestMention || best.focusMention || best.stateSimilarity >= 0.18 || best.participantMatches >= 2)) {
+        if (best && (best.latestMention || best.focusMention || best.stateSimilarity >= 0.18
+            || best.participantMatches >= 2 || best.castHere >= 1)) {
+            const castOnly = !best.latestMention && !best.focusMention && best.stateSimilarity < 0.18
+                && best.participantMatches < 2;
             location = {
                 id: best.record.id,
                 name: best.record.name,
-                source: best.latestMention ? 'named in latest turn' : 'curated current-scene state',
+                source: best.latestMention ? 'named in latest turn'
+                    : castOnly ? 'where the present cast is' : 'curated current-scene state',
                 confidence: best.latestMention ? 1 : Math.min(0.9, 0.62 + best.stateSimilarity),
             };
         }
     }
 
     // A character not named in the recent focus may still be present when its
-    // objective current-state text explicitly places it at the selected place.
+    // curated current location, or its objective current-state text, places
+    // it at the selected place.
     if (location?.name) {
         for (const record of characters) {
             if (participantMap.has(record.id) || ABSENT_STATE.test(record.currentState || '')) continue;
-            if (textMentions(record.currentState || '', [location.name])) {
-                addParticipant(record, 'curated at current location', 0.72);
-            }
+            const curated = curatedLocationOf(store?.entities, record);
+            const atLocation = curated
+                ? (curated.id === location.id || canonicalNameKey(curated.name) === canonicalNameKey(location.name))
+                : textMentions(record.currentState || '', [location.name]);
+            if (atLocation) addParticipant(record, 'curated at current location', 0.72);
         }
     }
 
     const addressed = characters
-        .filter(record => !referenceMatch(playerName, record) && textMentions(latestUserText, recordReferences(record)))
+        .filter(record => !referenceMatch(playerName, record) && mentionsCharacter(latestUserText, record, characters))
         .map(record => ({ id: record.id, name: record.name }));
     const objects = Object.values(store?.entities || {})
         .filter(record => record?.type === 'item' && record.enabled !== false)

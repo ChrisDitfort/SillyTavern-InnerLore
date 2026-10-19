@@ -1,4 +1,4 @@
-import { cleanString, hashString, renderLoreContent } from './core.js';
+import { cleanString, hashString, renderLoreContent } from './core.js?v=47';
 
 const AUTOMATION_ID = 'inner-lore-v1';
 const LOREBOOK_OWNER_KEY = 'innerLore';

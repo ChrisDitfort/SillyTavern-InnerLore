@@ -1,4 +1,4 @@
-import { canonicalNameKey, cleanString } from './core.js';
+import { canonicalNameKey, cleanString } from './core.js?v=47';
 import { extractDeterministicElapsedAnchors, progressionAgentSnapshot } from './progression.js';
 
 function clip(value, maximum) {

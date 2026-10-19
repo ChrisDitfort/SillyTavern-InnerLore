@@ -6,7 +6,7 @@
  * those records here prevents speculative state from leaking into World Info.
  */
 
-import { canonicalNameKey, clamp, cleanString, contextSimilarity, uniqueStrings } from './core.js';
+import { canonicalNameKey, clamp, cleanString, contextSimilarity, uniqueStrings } from './core.js?v=47';
 import {
     evaluateTriggerEvents,
     getTriggerEventStats,

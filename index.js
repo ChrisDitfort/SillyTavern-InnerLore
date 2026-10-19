@@ -29,10 +29,10 @@ import {
     snapshotMessageRange,
     summaryceptionRecallText,
     uniqueStrings,
-} from './core.js?v=46';
+} from './core.js?v=47';
 import { compileContext } from './context-compiler.js?v=5';
-import { deriveSceneState } from './scene.js?v=4';
-import { createMapPanel, createMinimap } from './map-view.js?v=3';
+import { deriveSceneState } from './scene.js?v=5';
+import { createMapPanel, createMinimap } from './map-view.js?v=4';
 import {
     applyContextProfileToSettings,
     deriveContextBudgets,
@@ -50,6 +50,10 @@ import { collectRecentStoryExpressions } from './expression-cooldown.js';
 import {
     backgroundInFlightCount,
     chooseDefaultProfileId,
+    getTelemetry,
+    nextTelemetryTurn,
+    providerConcurrency,
+    recordTelemetryEntry,
     setPeerBackgroundInFlight,
     setSlotListener,
     isTransientRequestError,
@@ -58,7 +62,7 @@ import {
     waitForBackgroundIdle,
     testInnerLoreConnection,
     setStoryIdleGate,
-} from './llm-client.js?v=14';
+} from './llm-client.js?v=15';
 import {
     deleteInnerLorebooksForChat,
     openInnerLorebook,
@@ -71,7 +75,7 @@ import {
     formatTranscript,
     insufficientResponseCap,
     planNarratorPromptDelivery,
-} from './prompts.js?v=7';
+} from './prompts.js?v=8';
 import { compileTriggerEventDeliveryPreview } from './event-delivery.js?v=2';
 import { requestEventDirectorProposal } from './event-director-client.js';
 import { buildEventDirectorMessages } from './event-director-prompts.js';
@@ -127,7 +131,7 @@ const PROMPT_KEY = 'inner_lore_context';
 const TURN_CONTRACT_PROMPT_KEY = 'inner_lore_latest_turn_contract';
 const TRIGGER_DELIVERY_PROMPT_KEY = 'inner_lore_trigger_delivery';
 const DISPLAY_NAME = 'InnerLore';
-const EXTENSION_VERSION = '0.22.5';
+const EXTENSION_VERSION = '0.23.0';
 const LOG_PREFIX = '[InnerLore]';
 
 /**
@@ -279,6 +283,7 @@ function restoreNarratorPromptSwap() {
 let narratorPillTimer = null;
 
 function narratorPill() {
+    if (typeof document === 'undefined' || typeof document.createElement !== 'function') return null;
     let pill = document.getElementById('il_narrator_pill');
     if (!pill) {
         pill = document.createElement('div');
@@ -299,6 +304,7 @@ function narratorPill() {
 
 function showNarratorPill(label) {
     const pill = narratorPill();
+    if (!pill) return;
     pill.querySelector('span').textContent = label;
     pill.style.display = 'flex';
 }
@@ -311,6 +317,7 @@ function hideNarratorPill() {
 
 function trackNarrationStreamingStart() {
     clearInterval(narratorPillTimer);
+    if (typeof document === 'undefined' || typeof document.querySelector !== 'function') return;
     narratorPillTimer = setInterval(() => {
         // Watch the rendered DOM, not the chat array: the pill should vanish
         // exactly when the reader can see story text. The chat array decides
@@ -458,6 +465,7 @@ const defaultSettings = Object.freeze({
     connectionSource: 'profile',
     connectionProfileId: '',
     fallbackConnectionProfileId: '',
+    providerConcurrency: 1,
     maximumResponseTokens: 12_000,
     requestTimeoutSeconds: 90,
     requestCircuitBreakerSeconds: 90,
@@ -523,6 +531,8 @@ const runtime = {
     foundationPromise: null,
     foundationChatId: '',
     foundationTimer: null,
+    afterStory: new Map(),
+    afterStoryWaiter: null,
     storyGenerationBlock: null,
     blockedGenerationCancellation: false,
     cutoffRecovery: false,
@@ -686,6 +696,7 @@ function getSettings() {
     settings.pendingStorageCleanups = normalizeStorageRegistry(settings.pendingStorageCleanups);
     if (!['automatic', 'macro'].includes(settings.contextDeliveryMode)) settings.contextDeliveryMode = 'automatic';
     if (!['json', 'dsl'].includes(settings.maintenanceOutputFormat)) settings.maintenanceOutputFormat = 'dsl';
+    settings.providerConcurrency = providerConcurrency(settings);
     settings.contextProfileId = cleanString(settings.contextProfileId, 64).toLocaleLowerCase();
     if (!/^[a-z0-9][a-z0-9_-]{0,63}$/u.test(settings.contextProfileId)) settings.contextProfileId = 'balanced';
     // Derived budgets are the always-on behavior; the mode is pinned and the
@@ -1878,7 +1889,12 @@ function updateCastCards() {
         // bar.innerHTML='' above drops the docked panel on every refresh;
         // re-dock it each pass (idempotent) and refresh in place.
         runtime.minimap.dockInto(rightSide);
-        runtime.minimap.refresh(getChatStore(), runtime.lastCompilation?.scene || null);
+        runtime.minimap.refresh(getChatStore(), runtime.lastCompilation?.scene || null, userName);
+    }
+    // An open full map follows the same refreshes as the HUD: a landed reply,
+    // a committed curator pass, and every injection build.
+    if (runtime.mapPanel && !document.getElementById('il_map_overlay')?.classList.contains('displayNone')) {
+        runtime.mapPanel.refresh(getChatStore(), runtime.lastCompilation?.scene || null, userName);
     }
     const mapToggle = document.createElement('button');
     mapToggle.type = 'button';
@@ -2148,9 +2164,6 @@ function updateInjection({ isContinue = false } = {}) {
         compilation.scene = resolveSceneLocationForDisplay(compilation.scene);
     }
     updateCastCards();
-    if (runtime.mapPanel && !document.getElementById('il_map_overlay')?.classList.contains('displayNone')) {
-        runtime.mapPanel.refresh(promptStore, compilation?.scene || null, cleanString(ctx.name1, 100) || 'You');
-    }
     // A continue extends an already-written reply. The latest-turn contract is
     // a "produce THIS reply" directive full of mandatory-outcome and required-
     // expression gates that the existing text already satisfies, so injecting
@@ -2402,6 +2415,7 @@ function applySettingsToUI() {
         il_connection_source: settings.connectionSource,
         il_connection_profile: settings.connectionProfileId,
         il_fallback_connection_profile: settings.fallbackConnectionProfileId,
+        il_provider_concurrency: String(settings.providerConcurrency),
         il_maximum_response_tokens: settings.maximumResponseTokens,
         il_temperature: settings.temperature,
         il_request_timeout: settings.requestTimeoutSeconds,
@@ -3693,6 +3707,42 @@ function throwForSubsystemFailure(result) {
     throw error;
 }
 
+// The story's claim on its request slot, with an expiry so a generation that
+// never reports back (typically a quiet one) cannot hold it forever.
+function storyClaimFresh() {
+    return Boolean(runtime.storyRequestInFlight)
+        && Date.now() - (runtime.storyRequestInFlightAt || 0) < (
+            runtime.storyClaimIsQuiet ? 90_000 : 480_000);
+}
+
+function releaseStaleStoryClaim() {
+    if (runtime.storyRequestInFlight && !storyClaimFresh()) {
+        console.warn('[InnerLore] A story-slot claim went stale (likely a quiet generation with no message event); releasing it.');
+        runtime.storyRequestInFlight = false;
+        runtime.announceStoryState?.(false);
+    }
+}
+
+/**
+ * With two request slots the story never waits for InnerLore, so a pass that
+ * would begin while a reply is still being written would read that reply
+ * half-finished. It is held here under `key` and starts once the reply is
+ * done. A pass that was already running simply carries on in the second slot.
+ */
+function deferWhileStoryWrites(key, start) {
+    if (providerConcurrency(getSettings()) < 2 || !storyClaimFresh()) return false;
+    runtime.afterStory.set(key, start);
+    runtime.afterStoryWaiter ??= (async () => {
+        while (storyClaimFresh()) await new Promise(resolve => setTimeout(resolve, 1_000));
+        releaseStaleStoryClaim();
+        runtime.afterStoryWaiter = null;
+        const deferred = [...runtime.afterStory.values()];
+        runtime.afterStory.clear();
+        for (const run of deferred) run();
+    })();
+    return true;
+}
+
 async function processPending({ force = false, silent = false } = {}) {
     const settings = getSettings();
     if (!settings.enabled || (!settings.innerSelfEnabled && !settings.autoLoreEnabled && !settings.worldProgressionEnabled)) return;
@@ -3700,6 +3750,7 @@ async function processPending({ force = false, silent = false } = {}) {
         runtime.queued = true;
         return;
     }
+    if (deferWhileStoryWrites(force ? 'pass:forced' : 'pass', () => processPending({ force, silent }))) return;
     const store = getChatStore();
     const ctx = context();
     if (!store || !ctx.chat.length) return;
@@ -4117,7 +4168,7 @@ async function runQueuedHistoryRebuild() {
         runtime.historyRebuildQueued = true;
         return;
     }
-    if (runtime.deferHistoryRebuild) {
+    if (runtime.deferHistoryRebuild || deferWhileStoryWrites('history', () => runQueuedHistoryRebuild())) {
         runtime.historyRebuildQueued = true;
         return;
     }
@@ -4390,6 +4441,7 @@ async function runExpressionFoundationWarmup() {
         scheduleExpressionFoundationWarmup(500);
         return;
     }
+    if (deferWhileStoryWrites('foundation', () => scheduleExpressionFoundationWarmup(0))) return;
     const boundary = context().chat.length;
     const staging = createHistoryPrefixPromptStore(store, boundary);
     try {
@@ -4985,6 +5037,10 @@ function bindUIEvents() {
         getSettings().fallbackConnectionProfileId = event.target.value;
         saveSettings();
     });
+    document.getElementById('il_provider_concurrency')?.addEventListener('change', event => {
+        getSettings().providerConcurrency = providerConcurrency({ providerConcurrency: event.target.value });
+        saveSettings();
+    });
     document.getElementById('il_progression_profile')?.addEventListener('change', event => {
         getSettings().progressionConnectionProfileId = event.target.value;
         saveSettings();
@@ -5578,6 +5634,9 @@ function registerEvents() {
             runtime.activeStoryGenerationId = `story:pending:${Date.now().toString(36)}`;
             runtime.announceStoryState?.(true);
         }
+        // The prompt-ready hook claims the story slot and needs to know
+        // whether this is a quiet generation, which it is not told.
+        if (!isDryRun) runtime.storyGenerationType = generationType;
         runtime.userStoppedGenerationAt = 0;
         runtime.storyGenerationBlock = null;
         runtime.blockedGenerationCancellation = false;
@@ -5677,7 +5736,9 @@ function registerEvents() {
                 runtime.queued || runtime.historyRebuildQueued || runtime.foundationPromise
                 || runtime.historyTimer || runtime.preparingFoundation);
             const waitStart = Date.now();
-            if (backgroundInFlightCount() > 0 || scheduledBackground()) {
+            if (providerConcurrency(settings) >= 2) {
+                console.debug('[InnerLore] Two request slots: the story leaves now; background work keeps the other slot.');
+            } else if (backgroundInFlightCount() > 0 || scheduledBackground()) {
                 console.debug(`[InnerLore] Background-first: story waiting behind ${backgroundInFlightCount()} in-flight background request(s)${scheduledBackground() ? ' + scheduled work' : ''}.`);
                 showNarratorPill('Narrating - background work finishing first');
                 try {
@@ -5701,7 +5762,7 @@ function registerEvents() {
             runtime.storyDepartedAt = Date.now();
             runtime.storyRequestInFlight = true;
             runtime.storyRequestInFlightAt = Date.now();
-            runtime.storyClaimIsQuiet = generationType === 'quiet';
+            runtime.storyClaimIsQuiet = runtime.storyGenerationType === 'quiet';
             runtime.announceStoryState?.(true);
             if (!runtime.derivedContext) return;
             // SillyTavern 1.18 passes { chat }; older builds passed { messages }.
@@ -5778,6 +5839,7 @@ function registerEvents() {
         runtime.historyTimer = null;
         clearTimeout(runtime.foundationTimer);
         runtime.foundationTimer = null;
+        runtime.afterStory.clear();
         runtime.historyRebuildQueued = false;
         runtime.historyRevision = 0;
         runtime.queued = false;
@@ -5922,18 +5984,12 @@ function initializeServerStateAfterAppReady(ctx) {
         // request that is actually streaming (not one still waiting behind
         // background work - that ordering is the whole point). Peer stories
         // still block, with a staleness expiry so a dead tab cannot wedge it.
-        const claimFresh = () => Boolean(runtime.storyRequestInFlight)
-            && Date.now() - (runtime.storyRequestInFlightAt || 0) < (
-                runtime.storyClaimIsQuiet ? 90_000 : 480_000);
-        while (!signal?.aborted && (claimFresh()
+        // With two provider slots, llm-client skips this gate altogether.
+        while (!signal?.aborted && (storyClaimFresh()
             || Boolean(runtime.peerStoryActiveAt && Date.now() - runtime.peerStoryActiveAt < 120_000))) {
             await new Promise(resolve => setTimeout(resolve, 1_000));
         }
-        if (runtime.storyRequestInFlight && !claimFresh()) {
-            console.warn('[InnerLore] A story-slot claim went stale (likely a quiet generation with no message event); releasing it.');
-            runtime.storyRequestInFlight = false;
-            runtime.announceStoryState?.(false);
-        }
+        releaseStaleStoryClaim();
     });
     // Provider-level serialization must hold across SillyTavern tabs: a stale
     // second tab runs its own InnerLore work against the same single-request

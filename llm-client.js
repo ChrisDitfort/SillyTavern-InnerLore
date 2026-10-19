@@ -1,5 +1,5 @@
-import { cleanString } from './core.js';
-import { buildRepairMessages } from './prompts.js?v=7';
+import { cleanString } from './core.js?v=47';
+import { buildRepairMessages } from './prompts.js?v=8';
 import { CURATOR_JSON_SCHEMA } from './structured-output.js';
 import {
     OUTPUT_FORMAT_DSL,
@@ -9,7 +9,7 @@ import {
     parseInnerLoreOutput,
     prepareOutputMessages,
     structuredRequestOptions,
-} from './output-codec.js';
+} from './output-codec.js?v=2';
 
 function context() {
     return SillyTavern.getContext();
@@ -92,15 +92,37 @@ export function extractResponseText(raw) {
 }
 
 /**
- * Story/background concurrency: serialized, always. Story and background work
- * never overlap on the provider - whichever is in flight finishes first.
- * Background requests wait for any active story generation; the story request
- * waits for in-flight background work to drain before it leaves (see
+ * Story/background concurrency follows the provider's request slots
+ * (settings.providerConcurrency).
+ *
+ * One slot (the default): serialized. Story and background work never
+ * overlap on the provider - whichever is in flight finishes first. Background
+ * requests wait for any active story generation; the story request waits for
+ * in-flight background work to drain before it leaves (see
  * waitForBackgroundIdle, awaited from the prompt-ready hook, which shows
- * "Narrating - background work finishing first"). Code-level only - no
- * settings, no visible retries.
+ * "Narrating - background work finishing first").
+ *
+ * Two slots: the story owns one and background work the other. The story
+ * never waits for background work, and background requests no longer wait for
+ * the story. Background work itself stays one request at a time, and a new
+ * pass does not begin while a reply is being written (index.js defers it), so
+ * two slots are never exceeded and no pass reads a half-written reply.
  */
+export function providerConcurrency(settings = {}) {
+    return Number(settings.providerConcurrency) === 2 ? 2 : 1;
+}
+
 const CONCURRENCY_REJECTION_PATTERN = /(concurrent|locked|already generating|busy)/i;
+
+/**
+ * A provider that refuses a second simultaneous generation answers with a
+ * short error line. A full background reply naming a locked door or a busy
+ * market is not one, so only a short reply can count as a rejection.
+ */
+export function isConcurrencyRejection(text) {
+    const value = String(text || '').trim();
+    return value.length > 0 && value.length <= 200 && CONCURRENCY_REJECTION_PATTERN.test(value);
+}
 /**
  * Speed telemetry: one entry per model request (background kinds and the
  * story lifecycle events fed from the extension entry). Ring-buffered,
@@ -179,10 +201,11 @@ export async function waitForBackgroundIdle() {
     }
 }
 
-async function withBackgroundSlot(task, signal) {
-    // Story and background never overlap: a background request waits for any
-    // active story generation before leaving.
-    if (waitForStoryIdle) {
+async function withBackgroundSlot(task, signal, { waitForStory = true } = {}) {
+    // With one provider slot, story and background never overlap: a
+    // background request waits for any active story generation before leaving.
+    // With two, the story has its own slot and this request goes now.
+    if (waitForStory && waitForStoryIdle) {
         await waitForStoryIdle(signal);
     }
     serializationState.backgroundInFlight++;
@@ -211,32 +234,38 @@ async function sendViaProfile(settings, messages, signal, options = {}) {
     }
 
     const maximumTokens = Math.max(800, Math.min(32_000, Number(settings.maximumResponseTokens) || 6_000));
-    const raw = await withBackgroundSlot(() => service.sendRequest(
-        profileId,
-        messages,
-        maximumTokens,
-        {
-            // Streaming keeps bytes flowing, which mobile/proxy links between the
-            // browser and SillyTavern require: silent non-streaming requests are
-            // dropped after ~60s, while reasoning models regularly need longer.
-            stream: true,
-            signal,
-            extractData: true,
-            // Apply the selected profile's generation preset so reasoning and
-            // provider routing match that profile. The explicit values below
-            // still keep InnerLore's JSON temperature and token budget.
-            includePreset: true,
-            includeInstruct: false,
-        },
-        {
-            temperature: Number(settings.temperature) || 0.15,
-            top_p: 0.9,
-            max_tokens: maximumTokens,
-            include_reasoning: false,
-            ...(options.jsonSchema ? { json_schema: options.jsonSchema } : {}),
-        },
-    ), signal);
-    if (typeof raw === 'function') {
+    const waitForStory = providerConcurrency(settings) < 2;
+    // The slot covers the whole generation: a streamed request returns its
+    // generator immediately, so the stream is read inside the slot too.
+    // Releasing it before the body arrives would let the story start while
+    // this background reply is still generating on the provider.
+    const generate = waitForStoryFirst => withBackgroundSlot(async () => {
+        const raw = await service.sendRequest(
+            profileId,
+            messages,
+            maximumTokens,
+            {
+                // Streaming keeps bytes flowing, which mobile/proxy links between the
+                // browser and SillyTavern require: silent non-streaming requests are
+                // dropped after ~60s, while reasoning models regularly need longer.
+                stream: true,
+                signal,
+                extractData: true,
+                // Apply the selected profile's generation preset so reasoning and
+                // provider routing match that profile. The explicit values below
+                // still keep InnerLore's JSON temperature and token budget.
+                includePreset: true,
+                includeInstruct: false,
+            },
+            {
+                temperature: Number(settings.temperature) || 0.15,
+                top_p: 0.9,
+                max_tokens: maximumTokens,
+                include_reasoning: false,
+                ...(options.jsonSchema ? { json_schema: options.jsonSchema } : {}),
+            },
+        );
+        if (typeof raw !== 'function') return { raw };
         // Streaming response: an async generator whose chunks carry the
         // accumulated text. Only the final chunk's values are meaningful here.
         let text = '';
@@ -245,16 +274,58 @@ async function sendViaProfile(settings, messages, signal, options = {}) {
             if (typeof chunk?.text === 'string' && chunk.text) text = chunk.text;
             if (typeof chunk?.state?.reasoning === 'string' && chunk.state.reasoning) reasoning = chunk.state.reasoning;
         }
-        const streamed = text.trim() ? text : reasoning;
-        if (CONCURRENCY_REJECTION_PATTERN.test(text)) {
+        return { streamed: true, text, reasoning };
+    }, signal, { waitForStory: waitForStoryFirst });
+    let result = await generate(waitForStory);
+    if (result.streamed && isConcurrencyRejection(result.text) && !waitForStory) {
+        // Set to two slots, but this provider (often a fallback profile on a
+        // one-slot service) serves one at a time: go again after the story.
+        console.warn('[InnerLore] The provider refused a second simultaneous request; retrying after the story finishes.');
+        result = await generate(true);
+    }
+    if (result.streamed) {
+        const streamed = result.text.trim() ? result.text : result.reasoning;
+        if (isConcurrencyRejection(result.text)) {
             throw new Error('Provider reported a concurrent generation lock despite serialized scheduling.');
         }
-        if (!streamed.trim()) throw new Error('The selected connection profile returned no visible text.');
+        if (!streamed.trim()) throw await describeEmptyStream(service, profileId, signal, waitForStory);
         return streamed;
     }
-    const text = extractResponseText(raw);
+    const text = extractResponseText(result.raw);
     if (!text.trim()) throw new Error('The selected connection profile returned no visible text.');
     return text;
+}
+
+/**
+ * SillyTavern's stream reader drops a provider error that arrives as a plain
+ * JSON body (an expired key answers `{"statusCode":401,"message":
+ * "Unauthorized"}`), so a rejected request looks exactly like an empty reply
+ * and was retried as transient forever. A tiny non-streaming probe gets the
+ * provider's real error, which SillyTavern does raise, and reports it as an
+ * actionable failure instead.
+ */
+async function describeEmptyStream(service, profileId, signal, waitForStory = true) {
+    try {
+        await withBackgroundSlot(() => service.sendRequest(
+            profileId,
+            [{ role: 'user', content: 'Reply with OK.' }],
+            16,
+            { stream: false, signal, extractData: true, includePreset: false, includeInstruct: false },
+            { max_tokens: 16 },
+        ), signal, { waitForStory });
+    } catch (error) {
+        if (error?.name === 'AbortError' || signal?.aborted) throw error;
+        const detail = cleanString(error?.message, 300);
+        if (detail && !isTransientRequestError(error)) {
+            const name = listConnectionProfiles().find(profile => profile.id === profileId)?.name?.trim() || profileId;
+            return new Error(
+                `The provider rejected InnerLore's connection profile "${name}": ${detail}. `
+                + 'Check that profile\'s API key, model, and endpoint under Connection Profiles.',
+                { cause: error },
+            );
+        }
+    }
+    return new Error('The selected connection profile returned no visible text.');
 }
 
 async function sendViaActiveConnection(settings, messages, signal, options = {}) {
@@ -271,6 +342,7 @@ async function sendViaActiveConnection(settings, messages, signal, options = {})
         .map(message => `${message.role.toUpperCase()}:\n${message.content}`)
         .join('\n\n');
     const maximumTokens = Math.max(800, Math.min(32_000, Number(settings.maximumResponseTokens) || 6_000));
+    const slot = { waitForStory: providerConcurrency(settings) < 2 };
 
     let raw;
     if (generateRaw.length <= 1) {
@@ -280,9 +352,9 @@ async function sendViaActiveConnection(settings, messages, signal, options = {})
             responseLength: maximumTokens,
             signal,
             ...(options.jsonSchema ? { jsonSchema: options.jsonSchema } : {}),
-        }), signal);
+        }), signal, slot);
     } else {
-        raw = await withBackgroundSlot(() => generateRaw(prompt, systemPrompt), signal);
+        raw = await withBackgroundSlot(() => generateRaw(prompt, systemPrompt), signal, slot);
     }
     const text = extractResponseText(raw);
     if (!text.trim()) throw new Error('The active SillyTavern connection returned no visible text.');

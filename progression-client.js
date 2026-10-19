@@ -1,5 +1,5 @@
-import { canonicalNameKey } from './core.js';
-import { sendInnerLoreRequest } from './llm-client.js?v=13';
+import { canonicalNameKey } from './core.js?v=47';
+import { sendInnerLoreRequest } from './llm-client.js?v=15';
 import { buildProgressionRepairMessages } from './progression-prompts.js';
 import { PROGRESSION_JSON_SCHEMA } from './structured-output.js';
 import {
@@ -10,7 +10,7 @@ import {
     parseInnerLoreOutput,
     prepareOutputMessages,
     structuredRequestOptions,
-} from './output-codec.js';
+} from './output-codec.js?v=2';
 
 function progressionRequestSettings(settings) {
     const dedicatedProfile = settings.progressionConnectionProfileId || settings.connectionProfileId;

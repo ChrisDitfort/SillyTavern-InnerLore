@@ -8,7 +8,7 @@
  * observable events until completed narration establishes them.
  */
 
-import { canonicalNameKey, cleanString, contextTokens } from './core.js';
+import { canonicalNameKey, cleanString, contextTokens } from './core.js?v=47';
 import { listTriggerEventRecords, triggerEventTimeThreshold } from './trigger-events.js';
 
 const MAX_PREVIEW_SECONDS = 10 * 365 * 24 * 60 * 60;

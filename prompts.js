@@ -7,7 +7,7 @@ import {
     renderCompactEntity,
     selectRelevantBrains,
     selectRelevantEntities,
-} from './core.js';
+} from './core.js?v=47';
 
 const DETAIL_TARGETS = Object.freeze({
     compact: 'For a new entity with enough evidence, aim for roughly 80–160 words across its summary, description, and lists.',
@@ -148,6 +148,7 @@ function buildEntitySnapshot(store, transcript, currentIndex, maximumEntities) {
         relationships: record.relationships || [],
         history: record.history || [],
         current_state: record.currentState,
+        current_location: record.currentLocationName || undefined,
         parent_location: record.parentLocationName || undefined,
         spatial: record.type === 'location' ? {
             invariants: Object.values(record.spatial?.invariants || {}).map(invariant => ({
@@ -285,6 +286,7 @@ ENTITY PATCH RULES
 - Every spatial assertion must be a compact subject-relation-object triple plus a readable statement. Reuse the exact existing key. Prefer relations shape, entrance_at, door_at, opens, fixed_to, located_at, beneath, inside, contains, connected_to, adjacent_to, oriented_to, part_of, or has_condition. Use other only when none fits.
 - "remove_facts", "remove_relationships", "remove_history", and "resolve_threads" must quote the old list item closely enough to match it. Use them sparingly.
 - Before returning a patch for an existing entity, audit its old present-tense state, possession/custody/location associations, status, and open threads against the new passage. When the passage explicitly moves, transfers, releases, destroys, kills, answers, supersedes, or resolves something, update the replacement field and remove or resolve the now-obsolete entry in the same patch. Do not preserve contradictory present states for safety.
+- WHEREABOUTS: for every character or creature the passage physically places somewhere, set current_location to the canonical location where they are at the end of PASSAGE. Reuse the exact location name from EXISTING_STATE; for a new significant place, also return it as a location record (with parent_location when it sits inside a known place). Update current_location whenever they arrive, leave, follow someone, or are shown elsewhere, and omit it when unchanged. Use "unknown" only when they left for an unstated place. current_location is for people and creatures; parent_location is for places.
 - Objective lore must distinguish an outward statement or performed compliance from willing private acceptance. Under threat, coercion, dependency, hierarchy, fear, or lack of alternatives, record what the character publicly said or did without converting it into an unsupported objective claim that they wanted, welcomed, or sincerely accepted it. Use observable speech-act wording such as “said,” “told them,” “agreed aloud,” or “stated willingness”; do not use the unqualified narrator claim “accepted” unless independent uncoerced evidence establishes private assent.
 - importance is an integer from 0 to 100. A new record below the configured threshold will be discarded.
 - ${detail} Be information-dense and specific, but never pad with inventions. Sparse evidence should produce a sparse record.
@@ -372,6 +374,7 @@ OUTPUT SCHEMA
       "relationships": ["new association"],
       "history": ["new durable event involving this entity"],
       "current_state": "replaceable present condition or location",
+      "current_location": "characters and creatures only: canonical location where they are at the end of PASSAGE, or unknown",
       "parent_location": "canonical containing location for a room, fixture-area, well, or other sublocation",
       "spatial": {
         "set": [{

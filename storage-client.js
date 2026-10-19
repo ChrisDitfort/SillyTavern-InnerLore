@@ -1,4 +1,4 @@
-import { cleanString } from './core.js?v=1';
+import { cleanString } from './core.js?v=47';
 const DEFAULT_API_ROOT = '/api/plugins/airpg-storage/v1';
 
 function apiRoot() {

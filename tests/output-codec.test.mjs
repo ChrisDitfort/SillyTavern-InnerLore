@@ -535,3 +535,26 @@ test('the curator field reference carries entity coverage and per-field semantic
     assert.match(contract, /importance 0-100/u);
     assert.match(contract, /unresolved \(new open question, promise, threat, task, mystery, or uncertain detail\)/u);
 });
+
+test('a stream cut inside a record never becomes an entity', () => {
+    // Cut mid-header: no record was closed, so repair runs instead of
+    // storing a half-written place named "House beside".
+    assert.throws(
+        () => parseInnerLoreOutput(
+            'INNERLORE CURATOR 1\nLOCATION House beside',
+            { format: 'dsl', task: 'curator', salvageTruncated: true },
+        ),
+        /DONE marker|END/u,
+    );
+
+    // Cut mid-value: the closed record survives, the open one is dropped
+    // rather than kept with importance 9 instead of 90.
+    const truncated = parseInnerLoreOutput(
+        'INNERLORE CURATOR 1\nLOCATION Ben Tavern\nimportance = 60\nEND\nCHARACTER Freesia\nimportance = 9',
+        { format: 'dsl', task: 'curator', salvageTruncated: true },
+    );
+    assert.deepEqual(truncated.entities.map(entity => entity.name), ['Ben Tavern']);
+    assert.deepEqual(outputParseDiagnostics(truncated), [{
+        code: 'truncated_tail_dropped', droppedLines: 2, totalLines: 5,
+    }]);
+});

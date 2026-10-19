@@ -1,4 +1,4 @@
-import { extractJsonObject } from './core.js';
+import { extractJsonObject } from './core.js?v=47';
 
 export const OUTPUT_FORMAT_JSON = 'json';
 export const OUTPUT_FORMAT_DSL = 'dsl';
@@ -676,10 +676,13 @@ function salvageTruncatedDsl(value, requestedTask, originalError) {
     const allLines = stripReasoningAndFences(value).split('\n');
     const headerIndex = allLines.findIndex(line => DSL_HEADER_PATTERN.test(line.trim()));
     if (headerIndex < 0) throw originalError;
-    const candidates = [
-        // First assume only the DONE marker is missing and nothing was lost.
-        { lines: allLines, code: 'missing_done_salvaged' },
-    ];
+    // Only DONE is missing when the document ends on a closed record. A
+    // stream cut inside a record (even mid-name, "LOCATION House beside")
+    // would otherwise be closed implicitly and stored as a real entity.
+    const lastLine = allLines.slice(headerIndex + 1).map(line => line.trim()).filter(Boolean).at(-1);
+    const candidates = lastLine === 'END'
+        ? [{ lines: allLines, code: 'missing_done_salvaged' }]
+        : [];
     let cut = -1;
     for (let index = allLines.length - 1; index > headerIndex; index--) {
         if (allLines[index].trim() === 'END') {
@@ -868,6 +871,10 @@ statement = Ben Tavern's entrance is in its east wall.
 confidence = confirmed
 END
 END
+CHARACTER Freesia
+current_location = Ben Tavern
+current_state = Waiting by the east door for the inspection.
+END
 MIND Freesia
 ITEM relationships
 target = Rowan
@@ -918,7 +925,7 @@ function dslFieldReference(task) {
         return `DSL FIELD REFERENCE
 Entity record header: LOCATION|ITEM|CHARACTER|FACTION|ORGANIZATION|CREATURE|EVENT|CONCEPT canonical proper name or specific story-established descriptor
 Apply the upstream selection rules and emit one record for every individually significant entity in the newest passage; do not stop after the most prominent one or two.
-Entity scalar fields: identity_kind (descriptor|public_name, characters only), promote_name, importance 0-100, summary (complete short identity if new or meaningfully changed), description (grounded detailed description if new or meaningfully changed), current_state (replaceable present condition or location), parent_location (canonical containing sublocation), status (active|inactive|destroyed|lost|unknown)
+Entity scalar fields: identity_kind (descriptor|public_name, characters only), promote_name, importance 0-100, summary (complete short identity if new or meaningfully changed), description (grounded detailed description if new or meaningfully changed), current_state (replaceable present condition or location), current_location (characters and creatures only: canonical location where they are now, or unknown), parent_location (canonical containing sublocation), status (active|inactive|destroyed|lost|unknown)
 Entity text lists using +=: aliases (alternate trigger), keys (useful exact trigger), facts (new atomic established fact), relationships (new association), history (new durable event involving this entity), unresolved (new open question, promise, threat, task, mystery, or uncertain detail), remove_facts / remove_relationships / remove_history (obsolete exact prior value), resolve_threads (resolved exact prior unresolved item), spatial.delete (conclusively obsolete spatial key)
 Entity map-list block: ITEM spatial.set — keyed spatial invariants
   fields: key (stable_lower_snake_case), kind (topology|entrance|connection|fixture|containment|placement|orientation|condition|other), subject (canonical place, fixture, opening, or object), relation (shape|entrance_at|door_at|opens|fixed_to|located_at|beneath|inside|contains|connected_to|adjacent_to|oriented_to|part_of|has_condition|other), object (canonical counterpart, position, direction, or value), statement (compact objective spatial assertion), confidence (confirmed|inferred)

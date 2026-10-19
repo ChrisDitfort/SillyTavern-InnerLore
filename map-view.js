@@ -8,7 +8,15 @@
  * its own.
  */
 
+import {
+    canonicalNameKey,
+    cleanString,
+    curatedLocationOf,
+    resolveLocationReference,
+} from './core.js?v=47';
+
 const MAP_VIEWBOX = { width: 1000, height: 700 };
+const MAX_NODE_CHIPS = 6;
 
 /**
  * Self-injected styles: extension CSS loads without a cache-buster, so a
@@ -61,11 +69,9 @@ const MAP_STYLES = `
 .il-map-detail-npcs li.is-dormant{opacity:.55}
 .il-map-toggle{pointer-events:auto;display:inline-flex;align-items:center;padding:4px 8px;border-radius:9px;border:1px solid #5a5a66;background:rgba(22,22,28,.88);color:#c8b78a;cursor:pointer}
 .il-map-toggle svg{width:16px;height:16px;display:block}
-body.il-dock-active #chat{padding-top:34px}
 #il_cast_bar.il-dock #il_minimap{position:static;width:auto;min-width:180px;max-width:280px;flex:1 1 180px;margin-left:auto;border:none;background:transparent;box-shadow:none;padding:0;cursor:default;color:#a8b0bc}
 #il_cast_bar.il-dock #il_minimap .il-minimap-head{padding:0 0 3px;border-bottom:1px solid #2c313c}
 #il_cast_bar.il-dock #il_minimap .il-minimap-body{padding:3px 0 0}
-body.il-dock-active #chat{padding-top:34px}
 #il_minimap{position:fixed;right:12px;top:calc(env(safe-area-inset-top,0px) + 54px);z-index:40000;width:190px;border:1px solid #5a5a66;border-radius:12px;background:rgba(16,18,24,.92);box-shadow:0 4px 14px rgba(0,0,0,.4);color:#c9cfd9;font-size:.8em;cursor:grab;touch-action:none}
 .il-minimap-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:7px 10px 4px;border-bottom:1px solid #333}
 .il-minimap-loc{font-weight:600;color:#e2c99a}
@@ -73,9 +79,7 @@ body.il-dock-active #chat{padding-top:34px}
 .il-minimap-body{padding:6px 10px 8px}
 .il-minimap-near{display:flex;flex-direction:column;gap:3px;color:#a8b0bc}
 .il-minimap-near.is-empty{font-style:italic;color:#6d7684}
-.il-minimap-dots{display:flex;gap:4px;margin-top:6px}
-.il-minimap-dots i{width:7px;height:7px;border-radius:50%;background:#5a5a66}
-.il-minimap-dots i.is-on{background:#8ee6a2;box-shadow:0 0 6px rgba(142,230,162,.7)}
+.il-minimap-here{margin-top:5px;color:#b9f0c6;font-size:.92em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .il-scene-link{stroke:rgba(156,142,238,.4);stroke-width:1.6;stroke-dasharray:none}
 .il-scene-dot{stroke-width:2.5;filter:drop-shadow(0 0 6px rgba(200,183,138,.45))}
 @media (max-width:720px){.il-map-hint{display:none}.il-map-title{font-size:.92em}.il-map-detail{position:absolute;left:0;right:0;bottom:0;width:auto;max-width:none;max-height:46%;border-left:none;border-top:1px solid #333;border-radius:14px 14px 0 0}#il_minimap{width:156px;right:8px;top:calc(env(safe-area-inset-top,0px) + 60px);font-size:.75em}}
@@ -142,25 +146,92 @@ function worldArt() {
 </g>`;
 }
 
-/**
- * Build the render model: nodes from location entities, NPC chips from
- * character entities (containment first, then current-state text matching),
- * and the player marker from the compiled scene.
- */
-export function buildMapModel(store, scene, playerName = '') {
+/** Locations and tracked NPCs (the player's own record excluded). */
+function worldRecords(store, playerName) {
     const entities = Object.values(store?.entities || {});
-    const locations = entities.filter(entity => entity?.type === 'location' && entity.enabled !== false);
-    const characters = entities.filter(entity => entity?.type === 'character' && entity.enabled !== false);
-    const keyOf = name => String(name || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    const playerKey = canonicalNameKey(playerName);
+    return {
+        locations: entities.filter(entity => entity?.type === 'location' && entity.enabled !== false),
+        characters: entities.filter(entity => entity?.type === 'character' && entity.enabled !== false
+            && !(playerKey && [entity.name, ...(entity.aliases || [])].some(name => canonicalNameKey(name) === playerKey))),
+    };
+}
 
-    const byKey = new Map();
-    for (const location of locations) {
-        for (const candidate of [location.name, ...(location.aliases || []), ...(location.keys || [])]) {
-            const key = keyOf(candidate);
-            if (key && !byKey.has(key)) byKey.set(key, location);
+/** The scene's location as a known record, or its raw name for a new place. */
+export function resolveSceneLocation(store, scene) {
+    const location = scene?.location;
+    if (!location?.name) return { record: null, name: '' };
+    const byId = location.id && store?.entities?.[location.id];
+    const record = (byId?.type === 'location' ? byId : null)
+        || resolveLocationReference(store?.entities, location.name);
+    return { record, name: record?.name || location.name };
+}
+
+/**
+ * Where every tracked NPC is right now, best evidence first. The curator's
+ * current_location is the authority; until the curator has processed the
+ * newest reply, an NPC the scene compiler finds present in it stands at the
+ * scene location, so the map moves the moment a reply lands. Without either,
+ * the most specific known place named in the curated current state is used.
+ * Background text (summary, history) never places anyone: it says where a
+ * person comes from, not where they are.
+ */
+export function placeCharacters(store, scene, playerName = '') {
+    const { characters } = worldRecords(store, playerName);
+    const sceneLocation = resolveSceneLocation(store, scene);
+    const processedIndex = Number.isInteger(store?.lastProcessedIndex) ? store.lastProcessedIndex : -1;
+    const curatorBehind = Number.isInteger(scene?.latestMessageIndex) && processedIndex < scene.latestMessageIndex;
+    const present = new Map((scene?.participants || [])
+        .filter(item => Number(item?.confidence) >= 0.9 || item?.reason === 'curated at current location')
+        .map(item => [canonicalNameKey(item?.name), item]));
+    const placements = [];
+    for (const character of characters) {
+        const curated = curatedLocationOf(store?.entities, character);
+        const curatedName = curated?.name || cleanString(character.currentLocationName, 160);
+        const inScene = sceneLocation.name && [character.name, ...(character.aliases || [])]
+            .some(name => present.has(canonicalNameKey(name)));
+        let placement = null;
+        if (inScene && (curatorBehind || !curatedName)) {
+            placement = { location: sceneLocation.record, name: sceneLocation.name, source: 'scene' };
+        } else if (curatedName) {
+            placement = { location: curated, name: curatedName, source: 'curated' };
+        } else {
+            const stated = resolveLocationReference(store?.entities, character.currentState);
+            if (stated) placement = { location: stated, name: stated.name, source: 'current state' };
+        }
+        placements.push({ character, ...(placement || { location: null, name: '', source: 'unknown' }) });
+    }
+    return placements;
+}
+
+function npcChip(character, chatLength) {
+    const age = chatLength - (Number.isFinite(character.lastSeenMessage) ? character.lastSeenMessage : -1);
+    return { name: character.name, active: age <= 8, recent: age <= 24 };
+}
+
+/** Nudge auto-placed nodes off their neighbours so labels stay readable. */
+function separateAutoPlaced(nodes) {
+    for (const node of nodes) {
+        if (!node.autoPlaced) continue;
+        const seed = hashStringLite(node.name);
+        for (let attempt = 0; attempt < 8; attempt++) {
+            const crowded = nodes.some(other => other !== node
+                && Number.isFinite(other.x) && Math.hypot(other.x - node.x, other.y - node.y) < 26);
+            if (!crowded) break;
+            const angle = ((seed % 360) + attempt * 47) * Math.PI / 180;
+            node.x = Math.min(960, Math.max(40, node.x + Math.cos(angle) * 28));
+            node.y = Math.min(660, Math.max(40, node.y + Math.sin(angle) * 28));
         }
     }
+}
 
+/**
+ * Build the render model: nodes from location entities, NPC chips from where
+ * each NPC currently is (see placeCharacters), and the player marker from the
+ * compiled scene.
+ */
+export function buildMapModel(store, scene, playerName = '') {
+    const { locations } = worldRecords(store, playerName);
     const nodes = locations.map(location => ({
         id: location.id,
         name: location.name,
@@ -176,16 +247,21 @@ export function buildMapModel(store, scene, playerName = '') {
         lastSeenMessage: location.lastSeenMessage,
         npcs: [],
     }));
-    const nodeByKey = new Map(nodes.map(node => [keyOf(node.name), node]));
     const nodeById = new Map(nodes.map(node => [node.id, node]));
 
     // Auto-placement for discovered places without card coordinates: near the
-    // parent when known, else a deterministic scatter band across the map.
-    for (const node of nodes) {
-        if (Number.isFinite(node.x) && Number.isFinite(node.y)) continue;
-        const parent = node.parent && nodeByKey.get(keyOf(node.parent));
+    // parent when known (placing the parent first, whatever the order), else a
+    // deterministic scatter band across the map.
+    const placing = new Set();
+    const place = node => {
+        if (Number.isFinite(node.x) && Number.isFinite(node.y)) return;
+        if (placing.has(node)) return;
+        placing.add(node);
         const seedHash = hashStringLite(node.name);
-        if (parent && Number.isFinite(parent.x)) {
+        const parentRecord = node.parent ? resolveLocationReference(store?.entities, node.parent) : null;
+        const parent = parentRecord && parentRecord.id !== node.id ? nodeById.get(parentRecord.id) : null;
+        if (parent) place(parent);
+        if (parent && Number.isFinite(parent.x) && Number.isFinite(parent.y)) {
             node.x = parent.x + ((seedHash % 40) - 20);
             node.y = parent.y + 30 + (seedHash % 25);
         } else {
@@ -193,42 +269,53 @@ export function buildMapModel(store, scene, playerName = '') {
             node.y = 160 + ((seedHash >> 3) % 380);
         }
         node.autoPlaced = true;
-    }
+    };
+    for (const node of nodes) place(node);
+
+    // A place named in play that the curator has not recorded yet still gets
+    // a provisional node, so the player and the NPCs there stay on the map.
+    const provisional = new Map();
+    const provisionalNode = name => {
+        const key = canonicalNameKey(name);
+        if (!provisional.has(key)) {
+            const seedHash = hashStringLite(name);
+            const node = {
+                id: `provisional:${key}`, name, region: false,
+                x: 300 + (seedHash % 400), y: 180 + ((seedHash >> 3) % 340), importance: 40, parent: '',
+                summary: 'Reached in the story; not yet recorded as a location.', description: '', facts: [],
+                currentState: '', npcs: [], autoPlaced: true, provisional: true,
+            };
+            provisional.set(key, node);
+            nodes.push(node);
+        }
+        return provisional.get(key);
+    };
 
     const chatLength = Number.isFinite(scene?.chatLength) ? scene.chatLength : 1_000_000;
-    for (const character of characters) {
-        let host = (character.parentLocationName && nodeByKey.get(keyOf(character.parentLocationName))) || null;
-        if (!host) {
-            const haystack = `${character.currentState || ''} ${character.summary || ''} ${(character.history || []).slice(-3).map(item => typeof item === 'string' ? item : item?.statement || '').join(' ')}`;
-            for (const [key, location] of byKey.entries()) {
-                if (key.length > 3 && haystack.toLowerCase().includes(key)) {
-                    host = nodeById.get(location.id) || nodeByKey.get(key);
-                    if (host) break;
-                }
-            }
+    let elsewhere = null;
+    for (const placement of placeCharacters(store, scene, playerName)) {
+        const chip = npcChip(placement.character, chatLength);
+        const host = placement.location ? nodeById.get(placement.location.id)
+            : placement.name ? provisionalNode(placement.name) : null;
+        if (host) {
+            host.npcs.push(chip);
+            continue;
         }
-        const age = chatLength - (Number.isFinite(character.lastSeenMessage) ? character.lastSeenMessage : -1);
-        const chip = {
-            name: character.name,
-            active: age <= 8,
-            recent: age <= 24,
-        };
-        if (host) host.npcs.push(chip);
-        else if (nodeByKey.has('__unplaced__')) nodeByKey.get('__unplaced__').npcs.push(chip);
-        else {
-            const elsewhere = {
-                id: '__elsewhere__', name: 'Elsewhere', region: false,
+        if (!elsewhere) {
+            elsewhere = {
+                id: '__elsewhere__', name: 'Whereabouts unknown', region: false,
                 x: 500, y: 660, importance: 0, parent: '', summary: 'NPCs with no known location yet.',
-                description: '', facts: [], currentState: '', npcs: [chip], autoPlaced: true,
+                description: '', facts: [], currentState: '', npcs: [], autoPlaced: true,
             };
             nodes.push(elsewhere);
-            nodeById.set(elsewhere.id, elsewhere);
-            nodeByKey.set('__unplaced__', elsewhere);
         }
+        elsewhere.npcs.push(chip);
     }
 
-    const sceneKey = keyOf(scene?.location?.name || '');
-    const playerNode = sceneKey ? (nodeByKey.get(sceneKey) || null) : null;
+    const sceneLocation = resolveSceneLocation(store, scene);
+    const playerNode = sceneLocation.record ? nodeById.get(sceneLocation.record.id)
+        : sceneLocation.name ? provisionalNode(sceneLocation.name) : null;
+    separateAutoPlaced(nodes);
     return {
         nodes,
         player: playerNode ? { name: playerName || 'You', x: playerNode.x, y: playerNode.y, node: playerNode } : null,
@@ -237,60 +324,55 @@ export function buildMapModel(store, scene, playerName = '') {
 
 /**
  * Scene view model: the local bubble around the current scene - the location
- * itself, its parent region, the places it contains, and everyone present,
+ * itself, its parent, the places it contains, and the NPCs at each of them,
  * laid out as a "you are here" cluster.
  */
 export function buildSceneModel(store, scene, playerName = '', chatLength = 1_000_000) {
-    const keyOf = name => String(name || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
-    const entities = Object.values(store?.entities || {});
-    const locations = entities.filter(entity => entity?.type === 'location' && entity.enabled !== false);
-    const characters = entities.filter(entity => entity?.type === 'character' && entity.enabled !== false);
-    const byKey = new Map();
-    for (const location of locations) byKey.set(keyOf(location.name), location);
-
-    const focusKey = keyOf(scene?.location?.name || '');
-    const focus = focusKey ? byKey.get(focusKey) : null;
-    const hostName = focus?.name || scene?.location?.name || 'Somewhere';
+    const { locations } = worldRecords(store, playerName);
+    const sceneLocation = resolveSceneLocation(store, scene);
+    const focus = sceneLocation.record;
+    const hostName = sceneLocation.name || 'Somewhere';
 
     const node = (name, x, y, extra = {}) => ({
-        id: 'scene:' + keyOf(name), name, region: false, x, y, importance: 50,
+        id: 'scene:' + canonicalNameKey(name), name, region: false, x, y, importance: 50,
         parent: '', summary: '', description: '', facts: [], currentState: '',
         npcs: [], ...extra,
     });
 
-    const center = node(hostName, 500, 340, { importance: 90 });
+    const center = node(hostName, 500, 340, {
+        importance: 90, summary: focus?.summary || '', currentState: focus?.currentState || '', facts: focus?.facts || [],
+    });
     const model = { nodes: [center], player: { name: playerName || 'You', x: 500, y: 340, node: center } };
+    const nodeByLocationId = new Map(focus ? [[focus.id, center]] : []);
 
-    const parentName = focus?.parentLocationName || '';
-    if (parentName && byKey.has(keyOf(parentName))) {
-        const parent = byKey.get(keyOf(parentName));
-        model.nodes.push(node(parent.name, 500, 160, {
+    const parent = focus?.parentLocationName ? resolveLocationReference(store?.entities, focus.parentLocationName) : null;
+    if (parent && parent.id !== focus.id) {
+        const parentNode = node(parent.name, 500, 160, {
             region: true, summary: parent.summary || '', currentState: parent.currentState || '', facts: parent.facts || [],
-        }));
+        });
+        model.nodes.push(parentNode);
+        nodeByLocationId.set(parent.id, parentNode);
     }
-    const children = locations
-        .filter(location => keyOf(location.parentLocationName) === keyOf(hostName) && keyOf(location.name) !== focusKey)
-        .slice(0, 8);
+    const children = focus
+        ? locations.filter(location => location.id !== focus.id
+            && resolveLocationReference(store?.entities, location.parentLocationName)?.id === focus.id).slice(0, 8)
+        : [];
     children.forEach((child, index) => {
         const angle = (Math.PI * 2 * index) / Math.max(4, children.length) - Math.PI / 2;
-        model.nodes.push(node(child.name, 500 + Math.cos(angle) * 190, 340 + Math.sin(angle) * 150, {
+        const childNode = node(child.name, 500 + Math.cos(angle) * 190, 340 + Math.sin(angle) * 150, {
             summary: child.summary || '', currentState: child.currentState || '', facts: child.facts || [],
             importance: child.importance || 50,
-        }));
+        });
+        model.nodes.push(childNode);
+        nodeByLocationId.set(child.id, childNode);
     });
 
-    // Everyone present: scene participants first, then containment and
-    // current-state matching, exactly like the world map.
-    const sceneNames = new Set((scene?.participants || []).map(item => keyOf(item?.name)));
-    for (const character of characters) {
-        const age = chatLength - (Number.isFinite(character.lastSeenMessage) ? character.lastSeenMessage : -1);
-        const chip = { name: character.name, active: age <= 8, recent: age <= 24 };
-        let hosted = sceneNames.has(keyOf(character.name));
-        if (!hosted && focus) {
-            hosted = keyOf(character.parentLocationName) === keyOf(hostName);
-        }
-        if (hosted) center.npcs.push(chip);
-        else if (model.nodes.length > 1) model.nodes[1].npcs.push(chip);
+    // Everyone here, and everyone in the places around it; NPCs elsewhere in
+    // the world belong to the world view, not this one.
+    for (const placement of placeCharacters(store, scene, playerName)) {
+        const host = placement.location ? nodeByLocationId.get(placement.location.id)
+            : (!focus && placement.name && canonicalNameKey(placement.name) === canonicalNameKey(hostName) ? center : null);
+        if (host) host.npcs.push(npcChip(placement.character, chatLength));
     }
     return model;
 }
@@ -317,9 +399,8 @@ function renderModel(container, model, callbacks, options = {}) {
     const links = [];
     for (const node of model.nodes) {
         if (!node.parent) continue;
-        const parentKey = node.parent.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
-        const parent = model.nodes.find(candidate => candidate !== node
-            && candidate.name.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim() === parentKey);
+        const parentKey = canonicalNameKey(node.parent);
+        const parent = model.nodes.find(candidate => candidate !== node && canonicalNameKey(candidate.name) === parentKey);
         if (parent && !parent.region) links.push([node, parent]);
     }
     const linkMarkup = links.map(([node, parent]) =>
@@ -333,7 +414,10 @@ function renderModel(container, model, callbacks, options = {}) {
         const classes = ['il-map-node', node.region ? 'il-map-region' : 'il-map-place'];
         if (node.autoPlaced) classes.push('il-map-discovered');
         const npcs = [...node.npcs].sort((a, b) => Number(b.active) - Number(a.active) || Number(b.recent) - Number(a.recent));
-        const chips = npcs.map(chip => `<span class="il-map-chip ${chip.active ? 'is-active' : chip.recent ? 'is-recent' : 'is-dormant'}">${svgEscape(chip.name)}</span>`).join('');
+        const overflow = npcs.length - MAX_NODE_CHIPS;
+        const chips = npcs.slice(0, MAX_NODE_CHIPS)
+            .map(chip => `<span class="il-map-chip ${chip.active ? 'is-active' : chip.recent ? 'is-recent' : 'is-dormant'}">${svgEscape(chip.name)}</span>`)
+            .join('') + (overflow > 0 ? `<span class="il-map-chip is-dormant">+${overflow}</span>` : '');
         const isPlayerHere = model.player?.node === node;
         return `<g class="${classes.join(' ')}" data-node-id="${svgEscape(node.id)}" transform="translate(${node.x}, ${node.y})">
             <circle class="il-map-hit" r="26"/>
@@ -548,7 +632,7 @@ export function createMinimap(openFullMap, versionText = '') {
     let drag = null;
     // The location panel is always shown; the hide preference from the old
     // toggle era is deliberately ignored.
-    const hiddenByUser = false;
+    let hiddenByUser = false;
 
     const restorePosition = () => {
         try {
@@ -658,7 +742,7 @@ export function createMinimap(openFullMap, versionText = '') {
             (globalThis.toastr?.info?.((nowVisible ? 'Location panel shown' : 'Location panel hidden') + suffix, 'InnerLore', { timeOut: 4_000 }));
             return nowVisible;
         },
-        refresh(store, scene) {
+        refresh(store, scene, playerName = '') {
             try {
                 ensure();
             } catch (error) {
@@ -680,30 +764,33 @@ export function createMinimap(openFullMap, versionText = '') {
                 element.querySelector('.il-minimap-body').innerHTML = '<div class="il-minimap-near is-empty">World state is loading…</div>';
                 return;
             }
-            const keyOf = name => String(name || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
-            const entities = Object.values(store.entities || {});
-            const locations = entities.filter(entity => entity?.type === 'location' && entity.enabled !== false);
-            const byKey = new Map(locations.map(location => [keyOf(location.name), location]));
-            const focusKey = keyOf(scene?.location?.name || '');
-            const focus = byKey.get(focusKey);
-            const here = focus?.name || scene?.location?.name || 'Somewhere';
-            const neighbors = locations
-                .filter(location => keyOf(location.name) !== focusKey
-                    && (keyOf(location.parentLocationName) === focusKey
-                        || (focus && keyOf(location.parentLocationName) === keyOf(focus.parentLocationName || '') && keyOf(location.parentLocationName))))
-                .slice(0, 4);
-            const chat = (typeof window !== 'undefined' && window.SillyTavern?.getContext?.()?.chat) || [];
-            const activeNearby = entities
-                .filter(entity => entity?.type === 'character' && entity.enabled !== false
-                    && chat.length - (Number.isFinite(entity.lastSeenMessage) ? entity.lastSeenMessage : -1) <= 8)
-                .slice(0, 6);
+            const { locations } = worldRecords(store, playerName);
+            const sceneLocation = resolveSceneLocation(store, scene);
+            const focus = sceneLocation.record;
+            const here = sceneLocation.name || 'Somewhere';
+            const parentOf = location => resolveLocationReference(store.entities, location?.parentLocationName)?.id || '';
+            const focusParent = focus ? parentOf(focus) : '';
+            const neighbors = focus
+                ? locations
+                    .filter(location => location.id !== focus.id)
+                    .filter(location => {
+                        const parentId = parentOf(location);
+                        return parentId === focus.id || (focusParent && parentId === focusParent);
+                    })
+                    .slice(0, 4)
+                : [];
+            const withYou = placeCharacters(store, scene, playerName)
+                .filter(placement => (focus ? placement.location?.id === focus.id
+                    : placement.name && canonicalNameKey(placement.name) === canonicalNameKey(here)))
+                .map(placement => placement.character.name);
+            const shown = withYou.slice(0, 4).map(name => svgEscape(name)).join(', ');
             element.querySelector('.il-minimap-loc').textContent = here;
             element.querySelector('.il-minimap-body').innerHTML =
                 (neighbors.length
                     ? `<div class="il-minimap-near">${neighbors.map(n => `<span>${svgEscape(n.name)}</span>`).join('')}</div>`
                     : '<div class="il-minimap-near is-empty">No nearby places discovered yet</div>')
-                + (activeNearby.length
-                    ? `<div class="il-minimap-dots">${activeNearby.map(() => '<i class="is-on"></i>').join('')}</div>`
+                + (withYou.length
+                    ? `<div class="il-minimap-here">Here: ${shown}${withYou.length > 4 ? ` +${withYou.length - 4}` : ''}</div>`
                     : '');
             element.classList.remove('displayNone');
         },

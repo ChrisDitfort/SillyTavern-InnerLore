@@ -5,7 +5,7 @@
  * completed story history, so a rebuild can safely rewind swipes and deletes.
  */
 
-import { canonicalNameKey, clamp, cleanString, contextTokens, uniqueStrings } from './core.js';
+import { canonicalNameKey, clamp, cleanString, contextTokens, uniqueStrings } from './core.js?v=47';
 
 export const TRIGGER_EVENT_VERSION = 3;
 

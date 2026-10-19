@@ -1,4 +1,4 @@
-import { cleanString } from './core.js';
+import { cleanString } from './core.js?v=47';
 
 function boundedJson(value, maximum = 45_000) {
     const copy = JSON.parse(JSON.stringify(value ?? {}));

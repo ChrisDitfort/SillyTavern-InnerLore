@@ -151,6 +151,20 @@
                         <select id="il_fallback_connection_profile" class="text_pole"></select>
                     </div>
 
+                    <label for="il_provider_concurrency">Requests the provider can run at once</label>
+                    <select id="il_provider_concurrency" class="text_pole">
+                        <option value="1">1 - background work finishes before the story</option>
+                        <option value="2">2 - the story never waits for background work</option>
+                    </select>
+                    <small class="inner-lore-hint">
+                        Counts the story and InnerLore together. With 1, a story request waits until running and
+                        scheduled background work is done, so it always sees the freshest world state. With 2, the
+                        story takes one slot and InnerLore's background work the other: the story starts at once with
+                        the last finished state, a pass already running carries on beside it, and a new pass waits
+                        for the reply to finish. Choose 2 when the provider serves two requests at once or when the story
+                        and InnerLore use different providers.
+                    </small>
+
                     <div class="inner-lore-grid two-columns">
                         <label>
                             <span>Maximum response tokens</span>

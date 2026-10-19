@@ -1,4 +1,4 @@
-import { clamp, hashString } from './core.js';
+import { clamp, hashString } from './core.js?v=47';
 
 export const CONTEXT_CONFIGURATION_VERSION = 1;
 

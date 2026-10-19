@@ -19,8 +19,11 @@ export function installMockInnerLoreStorage() {
 
     globalThis.fetch = async (input, options = {}) => {
         const url = new URL(String(input), 'http://innerlore.test');
-        const prefix = '/api/plugins/airpg-storage/v1';
-        if (!url.pathname.startsWith(prefix)) {
+        // The settings default is the bundled plugin's own route; the storage
+        // client's built-in fallback is still the legacy airpg-storage one.
+        const prefix = ['/api/plugins/innerlore-storage/v1', '/api/plugins/airpg-storage/v1']
+            .find(candidate => url.pathname.startsWith(candidate));
+        if (!prefix) {
             if (typeof originalFetch === 'function') return originalFetch(input, options);
             throw new Error(`Unexpected fetch: ${url.pathname}`);
         }

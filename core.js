@@ -1522,6 +1522,13 @@ function mergeCanonicalEntityPair(primary, duplicate) {
     if (!primary.summary || (duplicate.summary || '').length > primary.summary.length) primary.summary = duplicate.summary || primary.summary;
     if (!primary.description || (duplicate.description || '').length > primary.description.length) primary.description = duplicate.description || primary.description;
     if (!primary.currentState) primary.currentState = duplicate.currentState || '';
+    const locationSince = record => (Number.isFinite(record.locationSince) ? record.locationSince : -1);
+    if (duplicate.currentLocationName && (!primary.currentLocationName
+        || locationSince(duplicate) > locationSince(primary))) {
+        primary.currentLocationName = duplicate.currentLocationName;
+        primary.currentLocationId = duplicate.currentLocationId || '';
+        primary.locationSince = duplicate.locationSince ?? -1;
+    }
     primary.facts = mergeStrings(primary.facts || [], duplicate.facts || [], [], ENTITY_ARRAY_LIMITS.facts);
     primary.relationships = mergeStrings(primary.relationships || [], duplicate.relationships || [], [], ENTITY_ARRAY_LIMITS.relationships);
     primary.history = mergeStrings(primary.history || [], duplicate.history || [], [], ENTITY_ARRAY_LIMITS.history);
@@ -1679,6 +1686,116 @@ function inferParentLocation(store, record, operation, messageIndex) {
     }, { messageIndex });
 }
 
+const UNKNOWN_LOCATION = /^(?:unknown|none|null|n\/?a|nowhere|unclear|elsewhere)$/iu;
+const MOBILE_ENTITY_TYPES = new Set(['character', 'creature']);
+
+/**
+ * Resolve a place reference to a known location record. An exact name or
+ * alias wins; otherwise the most specific (longest) known place named inside
+ * the text is chosen, so "the kitchen of Saltmere Dock House" prefers the
+ * dock house over the town. A capitalized name only matches capitalized text,
+ * which keeps a town called "Anvil" from claiming every anvil in the prose.
+ */
+export function resolveLocationReference(entities, value) {
+    const text = cleanString(value, 3_000);
+    if (!text) return null;
+    const stripArticle = key => key.replace(/^(?:the|a|an)\s+/u, '');
+    const wanted = stripArticle(canonicalNameKey(text));
+    let best = null;
+    for (const record of Object.values(entities || {})) {
+        if (normalizeEntityType(record?.type) !== 'location' || record.enabled === false) continue;
+        for (const reference of uniqueStrings([record.name, ...(record.aliases || [])], 40)) {
+            const key = stripArticle(canonicalNameKey(reference));
+            if (!key) continue;
+            if (key === wanted) return record;
+            if (key.length < 4 || (best && key.length <= best.length)) continue;
+            const phrase = normalizeName(reference).replace(/^(?:the|a|an)\s+/iu, '');
+            const flags = /\p{Lu}/u.test(phrase) ? 'u' : 'iu';
+            let found = false;
+            try {
+                found = new RegExp(`(^|[^\\p{L}\\p{N}])${escapeRegExp(phrase)}(?=$|[^\\p{L}\\p{N}])`, flags).test(text);
+            } catch {
+                found = (` ${canonicalNameKey(text)} `).includes(` ${key} `);
+            }
+            if (found) best = { record, length: key.length };
+        }
+    }
+    return best?.record || null;
+}
+
+/**
+ * A place named as a recorded part of a location rather than a location of
+ * its own ("Walled garden fountain", when a house's spatial invariants
+ * record its walled garden and fountain) resolves to that location. Every
+ * word of a part must appear in the name, and only a single clear winner
+ * counts: a shared "back door" must not pick a house at random.
+ */
+function containingLocationFor(entities, value) {
+    const wanted = new Set(canonicalNameKey(value).split(' ').filter(word => word.length >= 3));
+    if (wanted.size < 2) return null;
+    const scored = [];
+    for (const record of Object.values(entities || {})) {
+        if (normalizeEntityType(record?.type) !== 'location' || record.enabled === false) continue;
+        const parts = uniqueStrings(Object.values(record.spatial?.invariants || {})
+            .flatMap(invariant => [invariant.subject, invariant.object]), 80)
+            .filter(part => canonicalNameKey(part) !== canonicalNameKey(record.name));
+        let score = 0;
+        for (const part of parts) {
+            const words = canonicalNameKey(part).split(' ').filter(word => word.length >= 3);
+            if (words.length && words.every(word => wanted.has(word))) score += words.length;
+        }
+        if (score >= 2) scored.push({ record, score });
+    }
+    scored.sort((a, b) => b.score - a.score);
+    if (!scored.length || scored[1]?.score === scored[0].score) return null;
+    return scored[0].record;
+}
+
+/** The known location record a character's curated current location points at. */
+export function curatedLocationOf(entities, record) {
+    const byId = record?.currentLocationId && entities?.[record.currentLocationId];
+    if (byId && normalizeEntityType(byId.type) === 'location' && byId.enabled !== false) return byId;
+    return record?.currentLocationName ? resolveLocationReference(entities, record.currentLocationName) : null;
+}
+
+/**
+ * Track where a character or creature is right now. The curator's explicit
+ * current_location wins (parent_location is accepted as the same claim for a
+ * person); without one, a replaced current_state that names a known place
+ * moves the record there. Omission never clears an established location.
+ */
+function applyCurrentLocation(store, record, operation, currentState, messageIndex) {
+    if (!MOBILE_ENTITY_TYPES.has(normalizeEntityType(record.type))) return;
+    const declared = normalizeName(
+        operation.currentLocation ?? operation.current_location
+        ?? operation.parentLocation ?? operation.parent_location,
+    );
+    let location = null;
+    let name = '';
+    if (declared) {
+        if (!UNKNOWN_LOCATION.test(declared)) {
+            location = resolveLocationReference(store.entities, declared);
+            name = location?.name || declared;
+            // A recorded part of a known place keeps its specific label but
+            // is anchored to the place that contains it.
+            if (!location) location = containingLocationFor(store.entities, declared);
+        }
+    } else if (currentState) {
+        location = resolveLocationReference(store.entities, currentState);
+        if (!location) return;
+        name = location.name;
+    } else {
+        return;
+    }
+    if (canonicalNameKey(name) === canonicalNameKey(record.currentLocationName)) {
+        if (location && record.currentLocationId !== location.id) record.currentLocationId = location.id;
+        return;
+    }
+    record.currentLocationName = name;
+    record.currentLocationId = location?.id || '';
+    record.locationSince = messageIndex;
+}
+
 /**
  * Merge model-proposed entity patches without allowing omission to delete canon.
  * Explicit remove_* arrays are required to remove established list facts.
@@ -1819,6 +1936,7 @@ export function mergeEntityOperations(store, operations, options = {}) {
             record.description = description;
         }
         if (currentState) record.currentState = currentState;
+        applyCurrentLocation(store, record, operation, currentState, messageIndex);
         if (operation.map && Number.isFinite(Number(operation.map.x)) && Number.isFinite(Number(operation.map.y))) {
             record.map = { x: Number(operation.map.x), y: Number(operation.map.y), ...(operation.map.region === true ? { region: true } : {}) };
         }
@@ -2702,6 +2820,9 @@ export function renderLoreContent(record) {
     if (cleanString(record?.parentLocationName)) {
         blocks.push(`Contained by location: ${cleanString(record.parentLocationName, 240)}`);
     }
+    if (cleanString(record?.currentLocationName)) {
+        blocks.push(`Current location: ${cleanString(record.currentLocationName, 240)}`);
+    }
     if (cleanString(record?.currentState)) blocks.push(`Current state: ${cleanString(record.currentState)}`);
     const unresolved = section('Unresolved or uncertain', record?.unresolved);
     if (unresolved) blocks.push(unresolved);
@@ -2781,6 +2902,9 @@ export function renderCompactEntity(record, maximumLength = 1_800, options = {})
     );
 
     append('', `${record.name} (${record.type})`, { always: true });
+    // Always-on and unregistered: a short place name in the claim registry
+    // would make every longer state line that mentions it look duplicated.
+    if (record.currentLocationName) append('Location', record.currentLocationName, { always: true });
     if (record.currentState && !options.suppressCurrentState) {
         const currentBudget = record.unresolved?.length
             ? Math.max(80, Math.floor(maximum * 0.4))
@@ -2831,6 +2955,28 @@ const GENERIC_IDENTITY_PREFIXES = new Set([
     'master', 'mistress', 'mother', 'prince', 'princess', 'professor', 'queen', 'saint',
     'ser', 'sir', 'sister', 'st',
 ]);
+
+/**
+ * The given name and surname a story uses on their own ("Wren" for "Wren
+ * Halloway"), kept only when no other character shares that word, so a partial
+ * mention still identifies who is present. Descriptor identities have none.
+ * Callers match these case-sensitively: "Will" the name, not the verb.
+ */
+export function shortCharacterReferences(record, characters = []) {
+    if (normalizeEntityType(record?.type) !== 'character' || record.identityKind === 'descriptor') return [];
+    const words = normalizeName(record.name).split(/\s+/u).filter(Boolean);
+    if (words.length < 2) return [];
+    const given = words.find(word => !word.includes('-') && !GENERIC_IDENTITY_PREFIXES.has(canonicalNameKey(word)));
+    const counts = new Map();
+    for (const other of characters) {
+        for (const word of new Set(canonicalNameKey(other?.name).split(' '))) counts.set(word, (counts.get(word) || 0) + 1);
+    }
+    return uniqueStrings([given, words.at(-1)].filter(word => {
+        const key = canonicalNameKey(word);
+        return key.length >= 3 && /^\p{Lu}/u.test(word || '') && !GENERIC_IDENTITY_PREFIXES.has(key)
+            && (counts.get(key) || 0) <= 1;
+    }), 2);
+}
 
 function identityReferenceUses(source, reference) {
     const core = normalizeName(reference).replace(/^(?:the|a|an)\s+/iu, '');
