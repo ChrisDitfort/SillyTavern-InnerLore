@@ -67,3 +67,15 @@ test('failed generated-book deletion is reported for persistent retry', async ()
     assert.deepEqual(result.deleted, []);
     assert.deepEqual(result.failed, [generatedName]);
 });
+
+test('a remembered book that SillyTavern no longer lists counts as cleaned instead of pending for ever', async () => {
+    const chatId = 'The Fracture - 2026-10-07@19h00m00s000ms';
+    const books = new Map([['Shared campaign lore', { entries: {} }]]);
+    globalThis.SillyTavern = { getContext: () => ({ getWorldInfoNames: () => [...books.keys()], loadWorldInfo: async name => { if (!books.has(name)) throw new Error('404'); return books.get(name); } }) };
+    const result = await deleteInnerLorebooksForChat(chatId, {
+        registeredNames: ['InnerLore - The Fracture - 07c75de09b'],
+        deleteWorldInfo: async () => { throw new Error('should not be called for a missing book'); },
+    });
+    assert.deepEqual(result.failed, []);
+    assert.deepEqual(result.deleted, ['InnerLore - The Fracture - 07c75de09b']);
+});

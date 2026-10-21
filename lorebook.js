@@ -36,6 +36,12 @@ function markLorebookOwnership(data, chatId) {
     return changed;
 }
 
+/** The chat an InnerLore-managed lorebook belongs to, or '' when it is not one of ours. */
+export function lorebookOwnerChatId(data) {
+    const owner = data?.extensions?.[LOREBOOK_OWNER_KEY];
+    return owner?.managed === true ? cleanString(owner.chatId, 300) : '';
+}
+
 function isLorebookOwnedByChat(data, chatId) {
     const owner = data?.extensions?.[LOREBOOK_OWNER_KEY];
     return owner?.managed === true && cleanString(owner.chatId, 300) === cleanString(chatId, 300);
@@ -290,7 +296,11 @@ export async function deleteInnerLorebooksForChat(chatId, options = {}) {
 
     const deleted = [];
     const failed = [];
+    // A remembered name that is no longer in SillyTavern's list is already
+    // gone; retrying its deletion for ever would keep the cleanup pending.
+    const present = new Set(knownNames.map(name => cleanString(name, 180)));
     for (const name of candidates) {
+        if (present.size && !present.has(name)) { deleted.push(name); continue; }
         try {
             if (await deleteWorldInfo(name)) deleted.push(name);
             else failed.push(name);

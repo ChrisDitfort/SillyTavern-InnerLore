@@ -87,6 +87,7 @@ import {
     openInnerLorebook,
     removeLoreRecord,
     syncLorebook as syncNativeLorebook,
+    lorebookOwnerChatId,
 } from './lorebook.js';
 import {
     buildAnalysisMessages,
@@ -1035,6 +1036,64 @@ async function cleanupDeletedChat(chatId, { silent = false } = {}) {
     saveSettings();
     log('Cleaned deleted chat state', id, { ...loreResult, storage: storageResult });
     return { ...loreResult, storage: storageResult, storageError: storageError?.message || '' };
+}
+
+/**
+ * Chats that no longer exist but still have InnerLore state: lorebooks and
+ * SQLite worlds left by deletions InnerLore never saw (a character deleted
+ * with its chats, a file removed by hand, an older version). Every
+ * character's chats are listed; a registered chat outside that list, or a
+ * managed lorebook whose chat is outside it, is cleaned up. A failed listing
+ * cancels the sweep, so nothing is removed on a guess.
+ */
+async function sweepOrphanedChatState() {
+    const ctx = context();
+    const settings = getSettings();
+    const existing = new Set();
+    for (const character of ctx.characters || []) {
+        if (!character?.avatar) continue;
+        const response = await fetch('/api/characters/chats', {
+            method: 'POST',
+            headers: ctx.getRequestHeaders(),
+            body: JSON.stringify({ avatar_url: character.avatar, simple: true }),
+        });
+        if (!response.ok) throw new Error(`chat listing failed for ${character.name}: HTTP ${response.status}`);
+        const list = await response.json();
+        for (const item of Array.isArray(list) ? list : []) {
+            const id = cleanString(item?.file_id || item?.file_name, 300).replace(/\.jsonl$/u, '');
+            if (id) existing.add(id);
+        }
+    }
+    for (const group of ctx.groups || []) for (const chatId of group?.chats || []) existing.add(cleanString(chatId, 300));
+    // Nothing to compare against (no characters loaded): sweep nothing.
+    if (!(ctx.characters || []).length && !(ctx.groups || []).length) return { swept: [], existing: 0, skipped: 'no characters' };
+    const current = currentChatId();
+    const alive = id => !id || id === current || existing.has(id);
+    const orphans = new Set([
+        ...Object.keys(settings.storageRegistry),
+        ...Object.keys(settings.lorebookRegistry),
+        ...Object.keys(settings.pendingChatCleanups),
+        ...Object.keys(settings.pendingStorageCleanups),
+    ].filter(id => !alive(id)));
+    // Managed lorebooks the registries forgot.
+    for (const name of ctx.getWorldInfoNames?.() || []) {
+        if (!name.startsWith('InnerLore - ')) continue;
+        let data = null;
+        try { data = await ctx.loadWorldInfo?.(name); } catch { continue; }
+        const owner = lorebookOwnerChatId(data);
+        if (owner && !alive(owner)) orphans.add(owner);
+    }
+    const swept = [];
+    for (const id of orphans) {
+        try {
+            await cleanupDeletedChat(id, { silent: true });
+            swept.push(id);
+        } catch (error) {
+            console.warn(`${LOG_PREFIX} Orphan sweep could not clean ${id}:`, error);
+        }
+    }
+    if (swept.length) console.info(`${LOG_PREFIX} Removed InnerLore state of ${swept.length} deleted chat(s): ${swept.join(', ')}`);
+    return { swept, existing: existing.size };
 }
 
 async function retryPendingChatCleanups() {
@@ -7541,6 +7600,11 @@ async function initializeServerState() {
         } catch (error) {
             console.error(`${LOG_PREFIX} Deferred cleanup retry failed:`, error);
         }
+    }
+    try {
+        runtime.lastOrphanSweep = await sweepOrphanedChatState();
+    } catch (error) {
+        console.warn(`${LOG_PREFIX} Orphan sweep skipped:`, error);
     }
     updateInjection();
     void prepareServerContext();
