@@ -6,8 +6,8 @@ import {
     mergeEntityOperations,
     renderLoreContent,
     resolveLocationReference,
-} from '../core.js?v=47';
-import { deriveSceneState } from '../scene.js?v=5';
+} from '../core.js?v=48';
+import { deriveSceneState } from '../scene.js?v=7';
 import { buildMapModel, buildSceneModel, placeCharacters } from '../map-view.js?v=5';
 
 function worldStore() {
@@ -57,6 +57,26 @@ test('a replaced current_state moves a character to the most specific place it n
     const tobin = character(store, 'Tobin');
     assert.equal(tobin.currentLocationName, 'Saltmere Dock House');
     assert.match(renderLoreContent(tobin), /Current location: Saltmere Dock House/u);
+});
+
+test('a current_state only moves a character to the place it opens with', () => {
+    const store = worldStore();
+    mergeEntityOperations(store, [
+        { type: 'location', name: 'Salt Lantern', importance: 70, summary: 'A harbour inn.', parent_location: 'Saltmere' },
+        { type: 'location', name: 'Room Two', importance: 40, summary: 'A guest room.', parent_location: 'Salt Lantern' },
+        { type: 'character', name: 'Mara', importance: 60, current_location: 'Salt Lantern' },
+        { type: 'character', name: 'Dunstan', importance: 60, current_location: 'Saltmere Dock House' },
+    ], { messageIndex: 1, maximumOperations: 20 });
+    const stays = [
+        ['Mara', 'Behind the bar, having given Jet the key to Room Two, pointed out the back door.', 'Salt Lantern'],
+        ['Dunstan', 'In his office at grey morning after the storm, with black smoke visible through the window rising from behind the Salt Lantern.', 'Saltmere Dock House'],
+        ['Dunstan', 'Watching the Salt Lantern burn from the end of the quay.', 'Saltmere Dock House'],
+        ['Mara', 'At the fish market in Saltmere, arguing over herring, seen from Room Two\'s window by Jet.', 'Saltmere'],
+    ];
+    for (const [name, state, expected] of stays) {
+        mergeEntityOperations(store, [{ type: 'character', name, current_state: state }], { messageIndex: 2 });
+        assert.equal(character(store, name).currentLocationName, expected, state);
+    }
 });
 
 test('a capitalized place name only matches capitalized prose', () => {

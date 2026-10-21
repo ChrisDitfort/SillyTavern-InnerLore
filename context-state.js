@@ -5,6 +5,7 @@ export const INNERLORE_CONTEXT_MACROS = Object.freeze({
     innerlore_npc_context: 'minds',
     innerlore_lore_context: 'lore',
     innerlore_progression_context: 'progression',
+    innerlore_game_context: 'game',
 });
 
 const value = (input, fallback = '') => typeof input === 'string' ? input : fallback;
@@ -26,6 +27,7 @@ export function createLocalContextPacket(compilation, key) {
         sections: {
             scene: value(blocks.scene), minds: value(blocks.minds),
             lore: value(blocks.lore), progression: value(blocks.progression),
+            game: value(blocks.game),
         },
         state,
         diagnostics: { fallback: true },
@@ -44,6 +46,7 @@ export function normalizePreparedContext(result, key) {
         sections: {
             scene: value(sections.scene), minds: value(sections.minds),
             lore: value(sections.lore), progression: value(sections.progression),
+            game: value(sections.game),
         },
         state: result.state ?? null,
         diagnostics: result.diagnostics ?? {},
@@ -52,8 +55,23 @@ export function normalizePreparedContext(result, key) {
     };
 }
 
+/**
+ * The game ledger is compiled only in the browser. A server-prepared packet
+ * without it gets the local game section, so the narrator always sees it.
+ */
+function withLocalGame(prepared, local) {
+    const game = value(local?.sections?.game);
+    if (!game || value(prepared.sections?.game) || value(prepared.rendered).includes('<inner_lore_game_state')) return prepared;
+    return {
+        ...prepared,
+        rendered: `${prepared.rendered}\n\n${game}`,
+        compact: `${value(prepared.compact, prepared.rendered)}\n\n${game}`,
+        sections: { ...prepared.sections, game },
+    };
+}
+
 export function selectedContextPacket({ prepared, local, key }) {
-    if (prepared?.key === key && prepared.rendered) return prepared;
+    if (prepared?.key === key && prepared.rendered) return withLocalGame(prepared, local?.key === key ? local : null);
     if (local?.key === key) return local;
     return null;
 }

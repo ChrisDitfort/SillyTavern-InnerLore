@@ -94,7 +94,8 @@
                         <b>Available macros</b>
                         <code>{{user}}</code> player name ·
                         <code>{{char}}</code> character name ·
-                        <code>{{innerlore_state_context}}</code> full game state (scene, private minds, lore, progression)
+                        <code>{{innerlore_state_context}}</code> full game state (scene, game ledger, private minds, lore, progression) ·
+                        <code>{{innerlore_game_context}}</code> the game ledger alone (purse, belongings, what is here and for sale, standing, reputation, prepared places)
                     </div>
                     <div class="inner-lore-fieldset">
                         <b><i class="fa-solid fa-database"></i> Chat History in the Context Packet</b>
@@ -121,6 +122,15 @@
                         <option value="standard">Standard — two to four paragraphs (~250–400 words)</option>
                         <option value="long">Long — immersive (~500–800 words)</option>
                     </select>
+                    <label class="checkbox_label" for="il_guided_play">
+                        <input id="il_guided_play" type="checkbox" checked />
+                        <span>Guided play: next-move buttons and short commands</span>
+                    </label>
+                    <small class="inner-lore-hint">
+                        Each reply ends with 3–5 next moves, shown as buttons under it; tapping one puts it in the message box.
+                        You can play in short commands ("talk to the innkeeper"), and the narrator gives your character's
+                        spoken lines only as reported gist. Works best with the InnerLore narrator prompt enabled.
+                    </small>
                     <div class="inner-lore-actions">
                         <button id="il_narrator_prompt_preview" class="menu_button"><i class="fa-solid fa-eye"></i> Preview Expanded</button>
                         <button id="il_narrator_prompt_reset" class="menu_button"><i class="fa-solid fa-rotate-left"></i> Reset to Default</button>
@@ -149,8 +159,40 @@
                         <select id="il_connection_profile" class="text_pole"></select>
                         <label for="il_fallback_connection_profile">Fallback profile after transient failures</label>
                         <select id="il_fallback_connection_profile" class="text_pole"></select>
+                        <label for="il_minds_profile">NPC minds profile</label>
+                        <select id="il_minds_profile" class="text_pole"></select>
+                        <small class="inner-lore-hint">
+                            Choosing a profile splits the curator into two narrower requests that run side by side: people,
+                            places and whereabouts on the connection profile above, NPC minds on this one. Smaller models
+                            do better with the narrower jobs, and two providers (NovelAI and Featherless, say) run them at once.
+                        </small>
+                        <label for="il_assisted_background">Help for smaller background models</label>
+                        <select id="il_assisted_background" class="text_pole">
+                            <option value="off">Off</option>
+                            <option value="auto">Auto - on for models under 70B and for NovelAI models of unnamed size</option>
+                            <option value="on">On for every model</option>
+                        </select>
+                        <small class="inner-lore-hint">
+                            The game ledger first lists what happened in plain words, gets the amounts, tracked objects,
+                            people and custody phrases in the passage from InnerLore, and drops any record whose quoted
+                            evidence is not in the passage. The curator gets the passage's unmatched proper names, the people
+                            still known only by a descriptor, and a checklist of amounts, times and promises; world
+                            progression sweeps the commitments first, and an ungrounded trigger match is dropped instead of
+                            failing the pass.
+                        </small>
                     </div>
 
+                    <label class="checkbox_label" for="il_story_preempts_background">
+                        <input id="il_story_preempts_background" type="checkbox" />
+                        <span>The story interrupts background work on a one-request provider (NovelAI); the pass re-runs after the reply</span>
+                    </label>
+                    <label for="il_story_provider_body">Story request body on Featherless or NovelAI (YAML)</label>
+                    <textarea id="il_story_provider_body" class="text_pole" rows="3" placeholder="Blank: thinking off on Featherless, plus the preset's top_k and min_p"></textarea>
+                    <small class="inner-lore-hint">
+                        SillyTavern drops top_k, min_p and the preset's custom body on a custom connection unless the preset is
+                        bound to it. InnerLore adds them to the story request on these providers; your own YAML here replaces
+                        the defaults.
+                    </small>
                     <label for="il_provider_concurrency">Requests the provider can run at once</label>
                     <select id="il_provider_concurrency" class="text_pole">
                         <option value="1">1 - background work finishes before the story</option>
@@ -163,6 +205,18 @@
                         the last finished state, a pass already running carries on beside it, and a new pass waits
                         for the reply to finish. Choose 2 when the provider serves two requests at once or when the story
                         and InnerLore use different providers.
+                    </small>
+
+                    <label class="checkbox_label" for="il_parallel_passes">
+                        <input id="il_parallel_passes" type="checkbox" />
+                        <span>Run background passes together</span>
+                    </label>
+                    <small class="inner-lore-hint">
+                        Sends the curator, World Progression, the game ledger and the scene planner at the same time
+                        instead of one after another, so a turn's background work takes as long as its slowest pass.
+                        Turn this on with the Claude bridge's agent pool, which runs them side by side in one request
+                        slot, or with a provider that serves several requests at once. Leave it off for a provider that
+                        allows only one request at a time.
                     </small>
 
                     <div class="inner-lore-grid two-columns">
@@ -230,7 +284,7 @@
                         <input id="il_trigger_event_title" class="text_pole" type="text" placeholder="Event title" />
                         <textarea id="il_trigger_event_description" class="text_pole" rows="2" placeholder="A robbery begins at the manor; a messenger arrives with urgent news..."></textarea>
 
-                        <div class="il-step"><b>2</b><span>When it fires</span> <small>(set at least one)</span></div>
+                        <div class="il-step"><b>2</b><span>When it fires</span> <small>(set at least one)</small></div>
                         <div class="il-when-row">
                             <i class="fa-solid fa-clock"></i>
                             <input id="il_trigger_event_time_amount" class="text_pole" type="number" min="0" step="0.1" placeholder="—" aria-label="Time amount" />
@@ -544,6 +598,136 @@
 
             <div class="inline-drawer">
                 <div class="inline-drawer-toggle inline-drawer-header">
+                    <b><i class="fa-solid fa-coins"></i> Game System</b>
+                    <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+                </div>
+                <div class="inline-drawer-content">
+                    <label class="checkbox_label" for="il_game_enabled">
+                        <input id="il_game_enabled" type="checkbox" />
+                        <span>Track money, belongings, objects, prices, standing and reputation</span>
+                    </label>
+                    <small class="inner-lore-hint">
+                        The game state rides in <code>{{innerlore_state_context}}</code> (and alone in
+                        <code>{{innerlore_game_context}}</code>): the purse, what the player carries, what is here and
+                        for sale, how the people here regard the player, reputation with groups, and what the planner
+                        prepared. It is kept as a journal of changes per message, so swipes, edits and rebuilds rewind it
+                        exactly.
+                    </small>
+
+                    <label class="checkbox_label" for="il_game_ledger_enabled">
+                        <input id="il_game_ledger_enabled" type="checkbox" />
+                        <span>Game ledger: record what each reply changes</span>
+                    </label>
+                    <small class="inner-lore-hint">
+                        After each reply the ledger records purchases and payments, objects picked up, given, moved,
+                        used up or broken, prices named, and how individual people and groups now regard the player.
+                    </small>
+                    <label for="il_game_profile">Game ledger profile</label>
+                    <select id="il_game_profile" class="text_pole"></select>
+
+                    <label class="checkbox_label" for="il_scene_planner_enabled">
+                        <input id="il_scene_planner_enabled" type="checkbox" />
+                        <span>Scene planner: prepare people, objects and prices ahead of the story</span>
+                    </label>
+                    <small class="inner-lore-hint">
+                        The planner, part of the planning module, prepares where the player is (and, with prefetch, where
+                        they can go next): who is there, notable objects with their worth, what things cost, and hooks.
+                        The narrator brings them in when the scene calls for them; nothing prepared is canon until the
+                        story shows it. On a new chat it also gives the player a modest starting purse and belongings.
+                    </small>
+                    <label class="checkbox_label" for="il_scene_planner_prefetch">
+                        <input id="il_scene_planner_prefetch" type="checkbox" />
+                        <span>Also prepare the places reachable from here</span>
+                    </label>
+                    <label class="checkbox_label" for="il_scene_planner_at_send">
+                        <input id="il_scene_planner_at_send" type="checkbox" />
+                        <span>Prepare a new destination before the story arrives there</span>
+                    </label>
+                    <small class="inner-lore-hint">
+                        When your turn heads for a place with nothing prepared, the planner prepares it first and the story
+                        waits for it (up to the time below), so the arrival is narrated with the planner's people, objects
+                        and prices.
+                    </small>
+                    <label for="il_planner_profile">Scene planner profile</label>
+                    <select id="il_planner_profile" class="text_pole"></select>
+
+                    <div class="inner-lore-grid two-columns">
+                        <label>
+                            <span>Places prepared per reply</span>
+                            <input id="il_scene_planner_places" class="text_pole" type="number" min="1" max="3" step="1" />
+                        </label>
+                        <label>
+                            <span>Prepare a place again after (story hours)</span>
+                            <input id="il_scene_planner_stale_hours" class="text_pole" type="number" min="1" max="168" step="1" />
+                        </label>
+                        <label>
+                            <span>Longest wait for a destination (seconds)</span>
+                            <input id="il_scene_planner_wait" class="text_pole" type="number" min="0" max="180" step="5" />
+                        </label>
+                        <label>
+                            <span>Game block budget (characters)</span>
+                            <input id="il_game_injection_budget" class="text_pole" type="number" min="500" max="20000" step="100" />
+                        </label>
+                    </div>
+
+                    <label for="il_game_custom_instructions">Extra ledger instructions</label>
+                    <textarea id="il_game_custom_instructions" class="text_pole textarea_compact" rows="2" placeholder="For example: coins are written as gp/sp/cp."></textarea>
+                    <label for="il_planner_custom_instructions">Extra planner instructions</label>
+                    <textarea id="il_planner_custom_instructions" class="text_pole textarea_compact" rows="2" placeholder="For example: keep prices low; this is a poor fishing town."></textarea>
+
+                    <div class="flex-container">
+                        <button id="il_open_game_panel" class="menu_button">
+                            <i class="fa-solid fa-sack-dollar"></i> Open Inventory
+                        </button>
+                        <button id="il_reset_game" class="menu_button menu_button_danger">
+                            <i class="fa-solid fa-rotate-left"></i> Reset Game State
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="inline-drawer">
+                <div class="inline-drawer-toggle inline-drawer-header">
+                    <b><i class="fa-solid fa-image-portrait"></i> Portraits and Cast Cards</b>
+                    <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+                </div>
+                <div class="inline-drawer-content">
+                    <label class="checkbox_label" for="il_cast_cards">
+                        <input id="il_cast_cards" type="checkbox" />
+                        <span>Show the people here as cards under the top bar</span>
+                    </label>
+                    <label class="checkbox_label" for="il_portraits_enabled">
+                        <input id="il_portraits_enabled" type="checkbox" />
+                        <span>Draw a portrait of each person here</span>
+                    </label>
+                    <small class="inner-lore-hint">
+                        The game ledger's model turns what the story says about someone's looks into image tags, and an
+                        image server with the Stable Diffusion WebUI API (Local Dream through LDBridge, for example) draws
+                        them one at a time. A person is drawn once the story has described them. Portraits are saved with
+                        the chat and show on the cards, in the top bar and on each person's page, where you can also have
+                        a new one drawn.
+                    </small>
+                    <label for="il_portrait_url">Image server</label>
+                    <input id="il_portrait_url" class="text_pole" type="text" placeholder="Empty: the server set in Image Generation" />
+                    <label for="il_portrait_style">Style tags (added to every portrait)</label>
+                    <textarea id="il_portrait_style" class="text_pole textarea_compact" rows="2"></textarea>
+                    <label for="il_portrait_negative">Negative prompt</label>
+                    <textarea id="il_portrait_negative" class="text_pole textarea_compact" rows="2"></textarea>
+                    <div class="inner-lore-grid two-columns">
+                        <label>
+                            <span>Steps</span>
+                            <input id="il_portrait_steps" class="text_pole" type="number" min="1" max="60" step="1" />
+                        </label>
+                        <label>
+                            <span>Guidance (CFG)</span>
+                            <input id="il_portrait_cfg" class="text_pole" type="number" min="1" max="20" step="0.5" />
+                        </label>
+                    </div>
+                </div>
+            </div>
+
+            <div class="inline-drawer">
+                <div class="inline-drawer-toggle inline-drawer-header">
                     <b><i class="fa-solid fa-masks-theater"></i> Mind and Injection Limits</b>
                     <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
                 </div>
@@ -557,7 +741,7 @@
                             <label>
                                 <span>Server context profile</span>
                             <label>
-                                <span>Derived shares (%) — response / history / scene / minds / lore / progression</span>
+                                <span>Derived shares (%) — response / history / scene / minds / lore / progression / game</span>
                                 <span class="inner-lore-context-budget-row">
                                     <input id="il_derived_share_response" class="text_pole" type="number" min="0" max="100" step="1" />
                                     <input id="il_derived_share_history" class="text_pole" type="number" min="0" max="100" step="1" />
@@ -565,6 +749,7 @@
                                     <input id="il_derived_share_minds" class="text_pole" type="number" min="0" max="100" step="1" />
                                     <input id="il_derived_share_lore" class="text_pole" type="number" min="0" max="100" step="1" />
                                     <input id="il_derived_share_progression" class="text_pole" type="number" min="0" max="100" step="1" />
+                                    <input id="il_derived_share_game" class="text_pole" type="number" min="0" max="100" step="1" />
                                 </span>
                             </label>
                             <label>

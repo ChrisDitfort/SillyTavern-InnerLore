@@ -1,4 +1,4 @@
-import { extractJsonObject } from './core.js?v=47';
+import { extractJsonObject } from './core.js?v=48';
 
 export const OUTPUT_FORMAT_JSON = 'json';
 export const OUTPUT_FORMAT_DSL = 'dsl';
@@ -7,7 +7,10 @@ const TASKS = Object.freeze({
     curator: 'CURATOR',
     progression: 'PROGRESSION',
     event_director: 'EVENT_DIRECTOR',
+    game: 'GAME',
+    planner: 'PLANNER',
 });
+const TASK_HEADER_WORDS = 'CURATOR|PROGRESSION|EVENT[_-]DIRECTOR|GAME|PLANNER';
 
 const ENTITY_TYPES = new Set([
     'location', 'item', 'character', 'faction', 'organization', 'creature', 'event', 'concept',
@@ -23,8 +26,11 @@ const ROOT_ITEM_PATHS = Object.freeze({
     curator: new Set(['spatial.set', 'persistent_self.set', 'voice.set', 'relationships', 'current_mind.emotions']),
     progression: new Set(['timeline']),
     event_director: new Set(['source_refs']),
+    game: new Set(['units']),
+    planner: new Set(['units']),
 });
 const ITEM_IDENTITY_FIELDS = Object.freeze({
+    units: 'name',
     'spatial.set': 'key',
     'persistent_self.set': 'key',
     'voice.set': 'key',
@@ -44,6 +50,13 @@ const PRIMITIVE_LIST_PATHS = Object.freeze({
         'basis', 'completed_actions', 'blockers', 'requirements', 'conditions', 'subjects',
     ]),
     event_director: new Set(['subjects']),
+    game: new Set([]),
+    planner: new Set(['hooks', 'sells']),
+});
+// Game ledger and planner record words, and the payload list each fills.
+const GAME_RECORDS = Object.freeze({
+    game: { OBJECT: ['objects', 'key'], MONEY: ['money', ''], PRICE: ['prices', 'key'], STANDING: ['standings', 'character'], REPUTATION: ['reputation', 'group'], DEATH: ['deaths', 'character'] },
+    planner: { STAGE: ['stages', 'place'], PERSON: ['people', 'name'], OBJECT: ['objects', 'key'], PRICE: ['prices', 'key'] },
 });
 
 export function normalizeOutputFormat(value) {
@@ -295,6 +308,26 @@ function openRecord(task, line, result, lineNumber) {
         target.push(record);
         return record;
     }
+    if (task === 'game' || task === 'planner') {
+        // "price = 3" inside an OBJECT is a field, not a PRICE record.
+        const match = /^(CURRENCY|PURSE|OBJECT|MONEY|PRICE|STANDING|REPUTATION|DEATH|STAGE|PERSON)(?:\s+(?!\+?=)(.+))?$/iu.exec(line);
+        if (!match) return null;
+        const word = match[1].toLocaleUpperCase();
+        const value = decodedHeaderValue(match[2] || '', lineNumber);
+        if (word === 'CURRENCY' || word === 'PURSE') {
+            const field = word.toLocaleLowerCase();
+            if (result[`__${field}Seen`]) throw dslError(lineNumber, `${word} may appear only once.`);
+            result[`__${field}Seen`] = true;
+            result[field] = {};
+            return result[field];
+        }
+        const target = GAME_RECORDS[task][word];
+        if (!target) return null;
+        const record = {};
+        if (value && target[1]) record[target[1]] = value;
+        result[target[0]].push(record);
+        return record;
+    }
     const match = /^PROPOSAL(?:\s+(.+))?$/iu.exec(line);
     if (!match) return null;
     if (result.__proposalSeen) throw dslError(lineNumber, 'only one PROPOSAL or NO_PROPOSAL declaration is allowed.');
@@ -312,6 +345,8 @@ function initialPayload(task) {
             time: {}, goals: [], processes: [], events: [], event_evaluations: [], __timeSeen: false,
         };
     }
+    if (task === 'game') return { objects: [], money: [], prices: [], standings: [], reputation: [], deaths: [] };
+    if (task === 'planner') return { stages: [], people: [], objects: [], prices: [] };
     return { proposal: null, reason: '', __proposalSeen: false, __reasonSeen: false };
 }
 
@@ -321,6 +356,9 @@ function isTopLevelDeclaration(task, line) {
     }
     if (task === 'progression') {
         return /^(?:TIME|GOAL|PROCESS|EVENT|EVALUATION)(?:\s+.+)?$/iu.test(line);
+    }
+    if (task === 'game' || task === 'planner') {
+        return new RegExp(`^(?:CURRENCY|PURSE|${Object.keys(GAME_RECORDS[task]).join('|')})(?:\\s+(?!\\+?=).+)?$`, 'iu').test(line);
     }
     return /^(?:PROPOSAL(?:\s+.+)?|NO_PROPOSAL|REASON\s*=\s*.+)$/iu.test(line);
 }
@@ -339,12 +377,12 @@ export function parseInnerLoreDsl(value, requestedTask) {
     }
     const allLines = text.split('\n');
     if (allLines.length > MAXIMUM_LINES) throw new Error(`InnerLore DSL exceeds ${MAXIMUM_LINES} lines.`);
-    const headerPattern = /^INNERLORE\s+(CURATOR|PROGRESSION|EVENT[_-]DIRECTOR)\s+1$/iu;
+    const headerPattern = new RegExp(`^INNERLORE\\s+(${TASK_HEADER_WORDS})\\s+1$`, 'iu');
     const headerIndex = allLines.findIndex(line => headerPattern.test(line.trim()));
     if (headerIndex < 0) {
         // A version mismatch needs its own message: a repair prompt that only
         // says "no header" hides the actual cause from the model.
-        const versionPattern = /^INNERLORE\s+(?:CURATOR|PROGRESSION|EVENT[_-]DIRECTOR)\s+v?(\d+)$/iu;
+        const versionPattern = new RegExp(`^INNERLORE\\s+(?:${TASK_HEADER_WORDS})\\s+v?(\\d+)$`, 'iu');
         for (const line of allLines) {
             const version = versionPattern.exec(line.trim());
             if (version) {
@@ -481,6 +519,15 @@ export function parseInnerLoreDsl(value, requestedTask) {
             }
             let assignment = /^([a-z][a-z0-9_.\[\]]*)\s*(\+=|=)\s*(.+)$/u.exec(line);
             if (!assignment) {
+                // Some models (NovelAI's Xialong) write nested item fields as
+                // "key: value". Inside a record that can only mean "key = value".
+                const colon = /^([a-z][a-z0-9_.\[\]]*):\s+(.+)$/u.exec(line);
+                if (colon) {
+                    assignment = [line, colon[1], '=', colon[2]];
+                    diagnostics.push({ code: 'colon_assignment_normalized', lineNumber, path: colon[1] });
+                }
+            }
+            if (!assignment) {
                 const activeItem = contexts.length > 1 ? contexts.at(-1) : null;
                 const identityField = activeItem ? ITEM_IDENTITY_FIELDS[itemPaths.get(activeItem)] : '';
                 if (identityField && !Object.hasOwn(activeItem, identityField)) {
@@ -568,10 +615,25 @@ export function parseInnerLoreDsl(value, requestedTask) {
                     code: 'implicit_item_rollover', lineNumber, field: assignment[1],
                 });
             }
-            const scalarValue = parseScalar(assignment[3], lineNumber);
+            let scalarValue = parseScalar(assignment[3], lineNumber);
             let operator = assignment[2];
+            // Evidence and message indexes are lists wherever a progression
+            // record carries them (GOAL/PROCESS/EVENT evidence, EVALUATION
+            // trigger_action.evidence); only a timeline ITEM's evidence is text.
+            const progressionListField = task === 'progression' && contexts.length === 1
+                && /^(?:[a-z_]+\.)?(?:evidence|message_indexes)$/u.test(assignment[1]);
+            if (progressionListField && /message_indexes$/u.test(assignment[1])
+                && typeof scalarValue === 'string' && /^\d+(?:\s*[,;]\s*\d+)+$/u.test(scalarValue)) {
+                // "message_indexes = 4, 5": every index but the last is appended
+                // here; the last one takes the ordinary append path below.
+                const indexes = scalarValue.split(/[^\d]+/u).filter(Boolean).map(Number);
+                for (const index of indexes.slice(0, -1)) writeScalar(target, assignment[1], '+=', index, lineNumber);
+                scalarValue = indexes.at(-1);
+                operator = '+=';
+                diagnostics.push({ code: 'index_list_split', lineNumber, path: assignment[1] });
+            }
             if (operator === '='
-                && PRIMITIVE_LIST_PATHS[task].has(assignment[1])
+                && (PRIMITIVE_LIST_PATHS[task].has(assignment[1]) || progressionListField)
                 && scalarValue !== null
                 && typeof scalarValue !== 'object') {
                 operator = '+=';
@@ -629,6 +691,8 @@ export function parseInnerLoreDsl(value, requestedTask) {
         delete result.__proposalSeen;
         delete result.__reasonSeen;
     }
+    delete result.__currencySeen;
+    delete result.__purseSeen;
     pruneEmptyListMaps(result, diagnostics);
     attachDiagnostics(result, diagnostics);
     return result;
@@ -663,7 +727,7 @@ export function outputParseDiagnostics(payload) {
         : [];
 }
 
-const DSL_HEADER_PATTERN = /^INNERLORE\s+(CURATOR|PROGRESSION|EVENT[_-]DIRECTOR)\s+1$/iu;
+const DSL_HEADER_PATTERN = new RegExp(`^INNERLORE\\s+(${TASK_HEADER_WORDS})\\s+1$`, 'iu');
 
 /**
  * Recover the complete-record prefix of a DSL document that failed strict
@@ -711,6 +775,40 @@ function salvageTruncatedDsl(value, requestedTask, originalError) {
     throw originalError;
 }
 
+/**
+ * One malformed record from a weaker model should cost that record, not the
+ * whole reply and a repair call that tends to return far less: drop the
+ * record holding the bad line and parse the rest, a few records at most.
+ */
+function salvageMalformedRecords(value, requestedTask, originalError) {
+    const task = normalizeTask(requestedTask);
+    let lines = stripReasoningAndFences(value).split('\n');
+    const dropped = [];
+    let error = originalError;
+    for (let attempt = 0; attempt < 4; attempt++) {
+        const index = Number(error?.lineNumber) - 1;
+        if (error?.name !== 'InnerLoreDslError' || !Number.isInteger(index) || index < 1 || index >= lines.length) break;
+        // A stray line between records is dropped up to the next record;
+        // a bad line inside a record takes that record with it.
+        let start = index;
+        if (!/unknown record declaration/iu.test(error.message)) {
+            while (start > 0 && !isTopLevelDeclaration(task, lines[start].trim())) start--;
+            if (!isTopLevelDeclaration(task, lines[start].trim())) break;
+        }
+        let end = index + 1;
+        while (end < lines.length && !isTopLevelDeclaration(task, lines[end].trim()) && lines[end].trim() !== 'DONE') end++;
+        dropped.push(lines[start].trim().slice(0, 80));
+        lines = [...lines.slice(0, start), ...lines.slice(end)];
+        try {
+            const parsed = parseInnerLoreDsl(lines.join('\n'), task);
+            return appendOutputDiagnostics(parsed, dropped.map(record => ({ code: 'malformed_record_dropped', record })));
+        } catch (next) {
+            error = next;
+        }
+    }
+    throw originalError;
+}
+
 export function parseInnerLoreOutput(value, options = {}) {
     const format = normalizeOutputFormat(options.format);
     if (format !== OUTPUT_FORMAT_DSL) return extractJsonObject(value);
@@ -720,6 +818,9 @@ export function parseInnerLoreOutput(value, options = {}) {
         if (options.salvageTruncated) {
             try {
                 return salvageTruncatedDsl(value, options.task, error);
+            } catch { /* try dropping the malformed record */ }
+            try {
+                return salvageMalformedRecords(value, options.task, error);
             } catch { /* fall through to the cross-format check */ }
         }
         // Providers occasionally answer a DSL request with JSON anyway
@@ -843,6 +944,15 @@ export function stringifyInnerLoreDsl(payload, requestedTask) {
                 pushRecord(lines, `${declaration}${record?.key ? ` ${encodeText(record.key)}` : ''}`, record, ['key']);
             }
         }
+    } else if (task === 'game' || task === 'planner') {
+        if (payload?.currency && Object.keys(payload.currency).length) pushRecord(lines, 'CURRENCY', payload.currency);
+        if (payload?.purse && Object.keys(payload.purse).length) pushRecord(lines, 'PURSE', payload.purse);
+        for (const [word, [field, identity]] of Object.entries(GAME_RECORDS[task])) {
+            for (const record of Array.isArray(payload?.[field]) ? payload[field] : []) {
+                const header = identity && record?.[identity] ? `${word} ${encodeText(record[identity])}` : word;
+                pushRecord(lines, header, record, identity ? [identity] : []);
+            }
+        }
     } else {
         if (payload?.proposal) {
             pushRecord(lines, `PROPOSAL${payload.proposal.key ? ` ${encodeText(payload.proposal.key)}` : ''}`, payload.proposal, ['key']);
@@ -914,6 +1024,75 @@ visibility = private
 END
 DONE`;
     }
+    if (task === 'game') {
+        return `INNERLORE GAME 1
+OBJECT tallow_candle
+op = buy
+to = player
+quantity = 2
+evidence = Jet buys two candles from the counter.
+END
+MONEY
+from = player
+to = Bess
+amount = 2
+unit = copper
+reason = two tallow candles
+evidence = She slides the coppers across the bar.
+END
+OBJECT harbour_pass
+op = add
+name = harbour pass
+kind = document
+holder = player
+value = 5
+unit = silver
+evidence = The clerk stamps a harbour pass and hands it over.
+END
+STANDING Bess
+delta = 3
+reason = Jet tipped her and thanked her by name.
+evidence = Bess grins at the extra copper.
+END
+DONE`;
+    }
+    if (task === 'planner') {
+        return `INNERLORE PLANNER 1
+STAGE Old Quay
+summary = Grey morning; the herring boats are in and the gulls are loud.
+hooks += A crate of lamp oil sits unclaimed beside the harbour master's hut.
+END
+PERSON Old Fen
+location = Old Quay
+role = net-mender
+appearance = Bow-legged, salt-white beard, fingers knotted from the needle.
+manner = Gruff with strangers; softens for anyone who knows nets.
+wants = The two silver Mara has owed him since spring.
+secret = He saw who left the lamp-oil crate.
+group = the Old Quay fishermen
+lean = -4
+coin = 3 copper
+sells += mended nets
+END
+OBJECT mended_net
+location = Old Quay
+name = mended herring net
+kind = tool
+place = heaped on the quay steps
+price = 3
+unit = silver
+seller = Old Fen
+END
+PRICE fish_soup
+name = a bowl of fish soup
+kind = food
+price = 4
+unit = copper
+location = Old Quay
+seller = the soup stall by the steps
+END
+DONE`;
+    }
     return `INNERLORE EVENT_DIRECTOR 1
 NO_PROPOSAL
 REASON = No sufficiently grounded proposal is available.
@@ -959,7 +1138,29 @@ TIME timeline map-list block: ITEM timeline
 GOAL stable_key fields: owner, title, description, status, progress, visibility, source_event_key, due_in_seconds.minimum_seconds, due_in_seconds.estimated_seconds, due_in_seconds.maximum_seconds, next_step; blockers, requirements, evidence use +=
 PROCESS stable_key fields: subject_type, subject_name, kind, title, description, status, stage, progress, visibility, source_event_key, due_in_seconds.minimum_seconds, due_in_seconds.estimated_seconds, due_in_seconds.maximum_seconds, outcome; conditions and evidence use +=
 EVENT stable_key fields: title, kind, description, status, trigger, priority, visibility, source_event_key, requires_player_action, due_in_seconds.minimum_seconds, due_in_seconds.estimated_seconds, due_in_seconds.maximum_seconds, canon_impact; subjects and evidence use +=
-EVALUATION exact_definition_key requires evaluated = TRUE and reason = text. Emit only matched condition blocks. For each matched trigger_action, cancellation, revelation, public_reveal, or resolution, use dotted fields such as trigger_action.matched = TRUE; evidence and message_indexes use +=; trigger_action also requires actor.`;
+EVALUATION exact_definition_key requires evaluated = TRUE and reason = text. Emit only matched condition blocks. For each matched trigger_action, cancellation, revelation, public_reveal, or resolution, use dotted fields such as trigger_action.matched = TRUE; its evidence and message_indexes are lists, so always write trigger_action.evidence += quote and trigger_action.message_indexes += index (one item per line, never =); trigger_action also requires actor.`;
+    }
+    if (task === 'game') {
+        return `DSL FIELD REFERENCE
+CURRENCY (at most once): name; ITEM units blocks with fields name, plural, abbreviation, value (relative worth; the smallest unit is 1)
+PURSE (at most once): set (the amount the story states the player has), unit, evidence
+OBJECT stable_key fields: op (add|move|take|drop|give|put|steal|buy|sell|trade|loot|find|update|consumed|destroyed|lost), name, kind, quantity, value, price, unit, holder, to, place, owner, seller, condition, description, hidden, how, reason, evidence
+MONEY fields: from, to, amount, unit, reason, evidence
+PRICE stable_key fields: name, kind (item|food|drink|lodging|service|transport|fee|other), price, unit, per, seller, location, remove
+STANDING canonical character name fields: delta, set, group and lean (a first meeting only), reason, evidence
+REPUTATION group name fields: kind (faction|organization|place|people|other), delta, set, reason, evidence
+DEATH canonical name or descriptor fields: place (where the body lies), cause, evidence
+Write the player as holder/to/from = player. Emit only records for changes this passage establishes; an empty document is just the header and DONE.`;
+    }
+    if (task === 'planner') {
+        return `DSL FIELD REFERENCE
+CURRENCY (only when CURRENCY is none): name; ITEM units blocks with fields name, plural, abbreviation, value (relative worth; the smallest unit is 1)
+PURSE (only when STARTING_KIT_NEEDED is true): set, unit
+STAGE exact place name fields: summary; hooks use +=
+PERSON proper name fields: location (the STAGE place), role, appearance, manner, wants, secret, group (whose view of the player they share), lean (-20..20, warmer or cooler than that group by personality), coin (money they carry, e.g. 4 copper); sells use +=
+OBJECT stable_key fields: location (the STAGE place), name, kind, quantity, value, price, unit, place (spot within it), owner, seller, condition, description, hidden, holder (a PERSON name for something they carry; player only for the starting kit)
+PRICE stable_key fields: name, kind (item|food|drink|lodging|service|transport|fee|other), price, unit, per, seller, location
+Emit one STAGE for every place in PLACES_TO_PREPARE, each followed by its PERSON, OBJECT and PRICE records.`;
     }
     return `DSL FIELD REFERENCE
 PROPOSAL stable_key scalar fields: title, description, trigger_mode, trigger_after_seconds, trigger_time_certainty, action_condition, actor_scope, actor_name, cancellation_condition, activation_visibility, reveal_after_seconds, reveal_condition, resolution_condition, consequences, priority, confidence, rationale
@@ -994,7 +1195,11 @@ export function dslOutputContract(requestedTask) {
         ? 'Use LOCATION, ITEM, CHARACTER, FACTION, ORGANIZATION, CREATURE, EVENT, or CONCEPT for an entity record, and MIND for a private-mind record. Put the canonical entity or character name after the record word.'
         : task === 'progression'
             ? 'Use exactly one TIME record and zero or more GOAL, PROCESS, and EVENT records. Put each stable key after the record word. When a DSL_EVALUATION_KEYS block is present, emit its EVALUATION records first, immediately after the header line; otherwise emit EVALUATION records after the other records.'
-            : 'Use one PROPOSAL record with its stable key, or the single line NO_PROPOSAL. After it, emit exactly one top-level REASON = text line.';
+            : task === 'game'
+                ? 'Use CURRENCY, PURSE, OBJECT, MONEY, PRICE, STANDING, REPUTATION, or DEATH records. Put the object or price key, the character name, or the group name after the record word; MONEY, CURRENCY and PURSE take nothing after it.'
+                : task === 'planner'
+                    ? 'Use STAGE, PERSON, OBJECT, and PRICE records, plus CURRENCY and PURSE only when allowed. Put the place name, person name, or object or price key after the record word.'
+                    : 'Use one PROPOSAL record with its stable key, or the single line NO_PROPOSAL. After it, emit exactly one top-level REASON = text line.';
     return `<INNERLORE_DSL_OUTPUT priority="hard">
 Return InnerLore DSL v1, not JSON. The application parses this DSL into the canonical object shape described later and then runs the same strict local validators.
 
@@ -1006,8 +1211,7 @@ Grammar:
 - Append primitive list items with +=: facts += one fact
 - Append a map to a list with an ITEM block. For example: ITEM spatial.set, then its fields, then END. ITEM paths are relative to their containing record or ITEM and can nest.
 - Repeat the complete field name on every += line. In every ITEM block, emit its named identity field (for example key = retrieval or name = anxiety); never use an unlabeled value.
-- Encode current_mind.emotions only as ITEM current_mind.emotions blocks. Never assign the emotions path to NULL, text, or pipe-delimited shorthand before those blocks.
-- Numeric list indexes are accepted for compatibility but should not be used; ITEM blocks avoid counting and duplicate-index mistakes.
+${task === 'curator' ? '- Encode current_mind.emotions only as ITEM current_mind.emotions blocks. Never assign the emotions path to NULL, text, or pipe-delimited shorthand before those blocks.\n' : ''}- Numeric list indexes are accepted for compatibility but should not be used; ITEM blocks avoid counting and duplicate-index mistakes.
 - Unquoted text continues to the end of its line. Escape an actual newline as \\n and a backslash as \\\\.
 - Scalars TRUE, FALSE, NULL, numbers, EMPTY_LIST, and EMPTY_MAP are typed. Prefix an otherwise ambiguous string with TEXT and one space.
 - Close every record with END. Close the complete document with DONE.
@@ -1091,6 +1295,20 @@ Emit exactly ${keys.length} EVALUATION record${keys.length === 1 ? '' : 's'} —
 Every EVALUATION record must contain evaluated = TRUE and a reason = short grounded text line before its END.
 EVALUATION ${keys.join('\nEVALUATION ')}
 No other EVALUATION records are allowed. Do not omit any line above and do not stop before the last one.
+Shape when the passage does not meet a key's condition:
+EVALUATION <key copied from above>
+evaluated = TRUE
+reason = <one grounded sentence>
+END
+Shape when the passage meets a key's configured condition (use the field that matched; evidence and message_indexes are lists, always +=):
+EVALUATION <key copied from above>
+evaluated = TRUE
+reason = <one grounded sentence>
+trigger_action.matched = TRUE
+trigger_action.actor = <who did it>
+trigger_action.evidence += <short quote from the passage>
+trigger_action.message_indexes += <index of the message holding the quote>
+END
 </DSL_EVALUATION_KEYS>`
         : '<DSL_EVALUATION_KEYS priority="hard">Emit no EVALUATION records because no triggerable-event definitions were supplied.</DSL_EVALUATION_KEYS>';
     const target = messages.find(message => message?.role === 'system' && typeof message.content === 'string');

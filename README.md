@@ -1,11 +1,12 @@
 # InnerLore — Living Characters & World
 
-InnerLore is a SillyTavern client extension backed by its bundled `innerlore-storage` server plugin (pure SQLite) for four related jobs:
+InnerLore is a SillyTavern client extension backed by its bundled `innerlore-storage` server plugin (pure SQLite) for five related jobs:
 
 1. **Private character minds:** each relevant NPC has a durable Persistent Self, an individual textual voice, multidimensional subjective relationships, and one replaceable Current Mind for the immediate scene.
 2. **Automatic living lore:** individually significant characters, locations, items, factions, organizations, creatures, events, and concepts become detailed native World Info entries and continue updating as the story changes.
 3. **World progression:** a private chronologist infers elapsed fictional time from completed player/story exchanges and advances durable goals, processes, deadlines, and restrained story beats.
 4. **Editor-authored events:** reusable per-chat events watch story time and completed player or NPC actions, progress privately off screen, and become visible only under their configured reveal rules.
+5. **Game system:** a ledger of money, belongings, object whereabouts, prices, relationships, and reputation, kept from each reply, and a scene planner that prepares people, objects, and prices before the story reaches a place.
 
 It is designed for arbitrary character cards and genres. No scenario, relationship, setting, or canon fact is hard-coded.
 
@@ -120,11 +121,23 @@ Use **Open Lorebook** to inspect entries in SillyTavern's native editor. If entr
 
 ## Derived context budget (always on)
 
-The context engine sizes every story generation's curated packet from the real context, not fixed numbers. Fixed costs are measured first - the narrator prompt instructions with the state macro empty, the user persona, the character card, and the opening message - and subtracted from the model's context limit together with a configurable safety margin (default 10%, room for World Info and prompt inserts). Everything left is the gross, split by configurable shares across **response, history, scene, minds, lore, and progression** (defaults 10/40/5/20/15/10). History and response are shares of the same pie, not separate reservations.
+The context engine sizes every story generation's curated packet from the real context, not fixed numbers. Fixed costs are measured first - the narrator prompt instructions with the state macro empty, the user persona, the character card, and the opening message - and subtracted from the model's context limit together with a configurable safety margin (default 10%, room for World Info and prompt inserts). Everything left is the gross, split by configurable shares across **response, history, scene, minds, lore, progression, and game** (defaults 10/37/5/20/15/8/5). History and response are shares of the same pie, not separate reservations.
 
 History rides inside the state macro as part of the packet, and SillyTavern's own rendered conversation turns are bypassed for story generations (system prompt entries and the live player turn always remain), so history ships exactly once - no double-up, no wasted tokens. Every story generation - send, continue, swipe, regenerate - receives the complete packet, and the compiled packet can never exceed its derived allowance: sections that overflow are recompiled with proportionally shrunken budgets, with progression dropped only as a last resort.
 
 There is no off switch; only the shares, the safety margin, and the history turn cap are configurable, from the InnerLore panel's context section.
+
+## Text-completion story models (NovelAI Erato and Kayra)
+
+When SillyTavern's story API is a text-completion one (NovelAI, KoboldAI, text-generation-webui), InnerLore switches its story context to the form those models read. Erato and Kayra continue prose rather than follow instructions; they have 8,192 tokens of context and write at most 250 tokens per request. The tagged packet and turn contract written for chat models would take most of that window and push the story's own recent turns out.
+
+- **Memory** (after the story string): a short `----` lore entry for each person present, with what they notice, feel and want and a line of their private thought, then the place and the other selected lore.
+- **Note** (wherever `{{innerlore_state_context}}` sits, usually the Author's Note, or at the injection depth in automatic delivery): bracketed lines for where and when, who is here, the ways on, the purse and belongings, prices, how people regard the player, recent changes, the material prepared for this place, and one line saying the player's words and choices are the player's own.
+- **Budget:** memory and note together take about 30% of the model's context (about 8,600 characters at 8,000 tokens). SillyTavern fills the rest with the newest turns.
+- **No chat-only parts:** the latest-turn contract, the narrator prompt swap and the response-length warning are skipped. The choice buttons under a reply are built from the camera instead of a choices block.
+- **Request budgets:** NovelAI serves one generation per account, and Featherless's plan has 4 concurrency units, with a model costing 1 (under 16B), 2 (under 35B, such as Gemma 4 31B) or 4 (70B and larger; a name without a size counts as 4). Both refuse more with 429. InnerLore's requests through these providers share the budget, and the time spent waiting does not count toward a request's timeout. When the story runs on the same provider, background requests keep the story's share free (with a 2-unit story and 2-unit background on Featherless, one background request runs at a time and the story never waits); when both cannot fit (NovelAI, or a 4-unit Featherless story), a background request waits for the story and the story waits for one already running. Background passes through other providers run alongside as usual.
+
+The background passes keep their own connection profiles, so every InnerLore feature still runs whatever writes the story. Erato and Kayra cannot run the passes themselves: the curator and World Progression prompts are larger than their whole context, and the passes' answers are longer than one request allows.
 
 ## World independence
 
@@ -153,14 +166,22 @@ Seeds are applied once, when a chat with no existing InnerLore world gets its st
 
 ## NPC whereabouts and the world map
 
-The curator records where every character and creature is with `current_location`, reusing a canonical location name and updating it whenever someone arrives, leaves, or follows the player. A place named as a recorded part of a known location (a garden or fountain in a house's spatial record) anchors to that location. Without an explicit claim, a replaced `current_state` that names a known place moves the record there. Omission never clears a location; `unknown` does.
+The curator records where every character and creature is with `current_location`, reusing a canonical location name and updating it whenever someone arrives, leaves, or follows the player. A place named as a recorded part of a known location (a garden or fountain in a house's spatial record) anchors to that location. Without an explicit claim, a replaced `current_state` whose opening clause names a known place ("At the fish market on the Old Quay, …") moves the record there; a place named later in the state, or only seen ("handed Jet the key to Room Two", "smoke rising behind the Salt Lantern"), does not. Omission never clears a location; `unknown` does.
 
 The HUD, the world map, and the scene view all place NPCs from that record. Until the curator has processed the newest reply, an NPC the scene compiler finds present in it stands at the scene's location, so the map moves the moment a reply lands. Summaries and history never place anyone. A place reached in play before it has a location record gets a provisional map node, and when the newest turn names no place, the scene settles where the present cast is recorded to be. A place named inside a longer known place name ("Highmarket" in "Highmarket Gate") is not counted as named, so the scene settles on the specific place.
 
-**The HUD** is one row under SillyTavern's top bar, placed at the top bar's real bottom edge for any theme or screen:
+**The HUD** sits under SillyTavern's top bar, placed at the top bar's real bottom edge for any theme or screen. Its top row has:
 - **Place and story time:** tap them to open the map around you.
-- **Portraits:** you first, then everyone in the scene, then people seen recently (dimmed). Tap a portrait to open that person's card.
+- **You:** tap your own face to open the drawer.
 - **Buttons:** the world map, and an expand button for the drawer.
+
+**Cast cards** form a second row: everyone in the scene, then people seen recently (dimmed), each with their portrait, name, what they are (the planner's role, or the start of the curator's summary) and how they regard you. The row scrolls sideways. Tap a card to open that person's page with their private mind. With cast cards turned off, small faces of the same people sit in the top row instead.
+
+**Portraits** are drawn for the people on the cards by an image server with the Stable Diffusion WebUI API, by default the one set in SillyTavern's Image Generation (Local Dream through LDBridge, for example). The game ledger's model turns what the story says about the person (the curator's summary and description, the planner's role and appearance, and the place they are in) into Danbooru-style tags, which suit Illustrious and other anime SDXL models. The prompt is cut to the 75 tokens the model reads. Portraits are drawn one at a time (Local Dream takes about 90 seconds each), only once the story has described someone, and are kept with the chat as small WebP files under SillyTavern's user images (`InnerLore/`). They show on the cards, in the drawer and on the person's page, where **Draw a new portrait** replaces one you don't like. A failed portrait is retried after ten minutes; an image server that doesn't answer pauses drawing for ten minutes. Settings are under **Portraits and Cast Cards**: both switches, the image server, style tags, negative prompt, steps and guidance.
+
+**The game menu** is a bar along the bottom of the screen, under the message box. Each item opens its own full screen: **Inventory** and **Trade**. The bar steps aside while the on-screen keyboard is up.
+
+**Trade** lists who you can deal with here: the people in the scene and anyone selling at this place, with their wares, prices, services and (when known) the coin they carry, beside your own things. It also lists any bodies here, with what can be seen on them. Buttons write your move into the message box (buy, ask a price, sell, offer a swap, take from a body, search it), so the story narrates the deal and the ledger records what actually changes hands.
 
 **The drawer** lists who is with you and what each person is doing, plus the explored places around you, with shortcuts into the map. Whether it is open is remembered per browser.
 
@@ -172,6 +193,32 @@ The HUD, the world map, and the scene view all place NPCs from that record. Unti
 - **Here view:** shows the current place, the place containing it, and the explored places inside it.
 
 **Fog of war:** unexplored areas stay hidden. A place is explored once a reply puts you there (by naming it or by explicit movement), when it is the current scene, or when the curator records you there; the places containing it count as explored too. Exploration is worked out from the chat itself, so swipes, edits and rebuilds never leave a stale record. Fog lifts in a circle around each explored place. Places inside that circle are shown as seen but not yet visited, and everything else stays hidden until you get there.
+
+## Game system
+
+InnerLore keeps a game ledger alongside the lore: money, possessions and where every tracked object is, prices, how individual people regard the player, the player's reputation with groups, and places the scene planner has prepared. All of it reaches the narrator in `{{innerlore_state_context}}` (right after the camera block) and alone in `{{innerlore_game_context}}`, and **Inventory** in the game menu at the bottom of the screen opens it for the player as a full screen (Bag, Here, People, Ledger).
+
+**Game ledger.** After every reply a background pass reads the new exchange and records what it changed:
+- **Belongings and objects:** what the player picks up, buys, sells, gives, drops, uses up, or breaks; notable objects other people move, hide, or hand over. Each object has a holder (the player, a person, a place, or a container such as a satchel), a spot ("on the shelf behind the bar"), quantity, value, condition, an optional price and seller, and the history of its moves. Giving part of a stack splits it.
+- **Money:** the world's own currency (established once, for example crown 240, shilling 12, penny 1), the purse, and every payment, purchase, wage, tip, theft, or find that reaches or leaves the player. A payment larger than a counted purse empties it and is reported. Other people carry their own coin too, and money passing between them (a customer paying a stallholder, a bribe) is recorded.
+- **Trades:** sales and swaps between anyone, the player included, as the story narrates them.
+- **Deaths and loot:** when the story shows someone dying, their body stays where they fell and keeps everything they carried, including their coin. The narrator sees what is on the body (things they hid are marked hidden until searched), and whatever the story shows being taken moves to the taker.
+- **Prices:** every price the story states for goods and services at a place. A near-duplicate ("ale" and "a tankard of ale") is the same price.
+- **Relationships:** how each person regards the player, from -100 to 100, changed by what the player does to or for them (a courtesy moves a point or two, a betrayal up to 25 at once), with the reason kept. Tiers read hostile, unfriendly, wary, neutral, warm, friendly, close.
+- **Reputation:** the same scale for groups, organizations, and a place's people, changed by public deeds.
+
+The ledger records only what the story establishes, never intentions or offers. Its state is an append-only journal of changes, each tagged with the message it came from, so a swipe, an edit, or a rebuild rewinds it exactly: a reswipe never sees a purchase from the reply it replaces.
+
+**Scene planner** (part of the planning module). The planner prepares places like a game master: who is there now (named people with a role, appearance, manner, a want, an optional secret, the group whose view of the player they share, a personal lean, the coin they carry, the things they carry (some hidden), and what they sell), notable objects with honest values and where they are (some hidden until searched for), prices for goods and services consistent with the world's economy, and hooks. A prepared person's first impression is their group's reputation at the moment they enter the story plus their lean: a fisherman's view starts from what the quay's fishermen think of the player, warmer for a trusting soul and cooler for a bitter one. A person with no group starts at their lean. The narrator sees that attitude while the person is still only prepared, so their first lines already show it. Someone the narrator invents on the spot is treated the same way: when they first appear, the ledger records their group and a lean read from how the passage shows them, and they start from the group's view too.
+
+It runs:
+- after replies, for where the player is when it has nothing prepared (or the preparation is stale in story time), and for places reachable from there;
+- when the player sends a turn that heads somewhere unprepared, or stays somewhere that was never prepared. The story then waits for it (up to the configured time), so the narrator describes the arrival with the planner's people, objects, and prices;
+- once at the start of a chat, to give the player a modest starting purse and belongings consistent with the card and persona.
+
+Prepared material is narrator-only: it is listed under "Prepared for …" in the game block, introduced when the scene calls for it, and becomes part of the world when a reply shows it. Nothing prepared is canon until then, and the inventory screen never shows it. Known people are never re-created; the curator keeps tracking where they are.
+
+Settings are under **Game System**: the ledger and planner switches, their profiles (by default the ledger follows the curator profile and the planner the progression profile), how many places to prepare per reply, when a preparation goes stale, the longest wait for a destination, the game block budget, and extra instructions for each pass.
 
 ## Private minds
 
@@ -310,6 +357,7 @@ Macro expansion is synchronous and reads only this precomputed packet. In **Prom
 - `{{innerlore_npc_context}}`
 - `{{innerlore_lore_context}}`
 - `{{innerlore_progression_context}}`
+- `{{innerlore_game_context}}` — the game ledger: purse, belongings, what is here and for sale, standing, reputation, and the planner's prepared material
 
 An old packet is never reused across a revision or branch-head mismatch. The section budgets in InnerLore settings become safe per-request profile overrides; named server profiles remain revisioned in SQLite for reusable configurations.
 
@@ -345,7 +393,7 @@ Definitions and runtime are per chat. Saving a materially changed trigger re-arm
 
 Autonomy modes range from Advisory tracking to Conservative (default), Simulation, and Director. Conservative advances established commitments and safe background processes without freely inventing surprises. Context injection remains relevance- and budget-bounded and reserves room for goals, processes, and due beats instead of letting one category monopolize the prompt.
 
-The curator and progression requests run sequentially through the selected background profile and commit independently. This avoids self-competition on provider concurrency limits. **Requests the provider can run at once** (Background Model settings) decides how background work shares the provider with the story:
+The curator, progression, game ledger, and scene planner requests run one after another through their profiles and commit independently. This avoids self-competition on provider concurrency limits. With **Run background passes together** (Background Model settings) they all leave at once instead, so a turn's background work takes as long as its slowest pass; use it with the Claude bridge's agent pool, which runs them side by side inside one request slot, or with a provider that serves several requests at a time. **Requests the provider can run at once** (Background Model settings) decides how background work shares the provider with the story:
 
 - **1** (default): background work finishes first. A story request waits until running and scheduled background work is done ("Narrating - background work finishing first"), so it always carries the freshest world state, and background requests wait for a story that is being written.
 - **2**: the story takes one slot and background work the other. The story leaves at once with the last finished state, and a pass already running carries on beside it. A new pass waits until the reply is finished, so it never reads a half-written reply. Background work stays one request at a time, so the provider never sees more than two. Choose 2 when the provider serves two requests at once, or when the story and InnerLore use different providers. If a provider turns out to refuse a second simultaneous request, as a one-slot fallback profile might, that request is retried once the story finishes.

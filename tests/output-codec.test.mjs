@@ -280,6 +280,58 @@ DONE`, 'progression');
     }]);
 });
 
+test('DSL reads a "key: value" field line inside a record as an assignment', () => {
+    const parsed = parseInnerLoreDsl(`INNERLORE CURATOR 1
+LOCATION Chris's house
+summary = A stone house with a hot spring behind it.
+ITEM spatial.set
+key: spring_source
+kind: topology
+statement: The water emerges from a cleft in the grey rock bank.
+confidence: confirmed
+END
+END
+DONE`, 'curator');
+    assert.deepEqual(parsed.entities[0].spatial.set[0], {
+        key: 'spring_source', kind: 'topology', statement: 'The water emerges from a cleft in the grey rock bank.', confidence: 'confirmed',
+    });
+    assert.deepEqual(outputParseDiagnostics(parsed).map(item => item.code), Array(4).fill('colon_assignment_normalized'));
+    assert.throws(() => parseInnerLoreDsl(`INNERLORE CURATOR 1
+LOCATION Chris's house
+This line is not a field.
+END
+DONE`, 'curator'), /expected a field assignment or END/u);
+});
+
+test('a malformed record costs that record, not the whole reply', () => {
+    const output = `INNERLORE CURATOR 1
+CHARACTER Freesia
+summary = A young squire.
+current_location = Town Archery Range
+END
+LOCATION Town Archery Range
+summary = The range beside Chris's house.
+This line is not a field.
+END
+CHARACTER Marshal Elric Vane
+summary = The garrison marshal who assigned Freesia.
+END
+<INNERLORE_DSL_OUTPUT priority="hard">
+Return InnerLore DSL v1, not JSON.
+CHARACTER Chris
+summary = A knight.
+END
+DONE`;
+    assert.throws(() => parseInnerLoreDsl(output, 'curator'));
+    const parsed = parseInnerLoreOutput(output, { format: 'dsl', task: 'curator', salvageTruncated: true });
+    assert.deepEqual(parsed.entities.map(entity => entity.name), ['Freesia', 'Marshal Elric Vane', 'Chris']);
+    assert.deepEqual(outputParseDiagnostics(parsed).filter(item => item.code === 'malformed_record_dropped').map(item => item.record), [
+        'LOCATION Town Archery Range',
+        '<INNERLORE_DSL_OUTPUT priority="hard">',
+    ]);
+    assert.throws(() => parseInnerLoreOutput(output, { format: 'dsl', task: 'curator' }), 'only background passes that ask for salvage get it');
+});
+
 test('DSL maps repeated dotted emotion fields to distinct list items', () => {
     const parsed = parseInnerLoreDsl(`INNERLORE CURATOR 1
 MIND Freesia
@@ -557,4 +609,52 @@ test('a stream cut inside a record never becomes an entity', () => {
     assert.deepEqual(outputParseDiagnostics(truncated), [{
         code: 'truncated_tail_dropped', droppedLines: 2, totalLines: 5,
     }]);
+});
+
+test('progression DSL turns evidence and message_indexes written with = into lists, leaving timeline item evidence as text', () => {
+    const parsed = parseInnerLoreDsl(`INNERLORE PROGRESSION 1
+EVALUATION vault
+evaluated = TRUE
+reason = Jet opened the vault.
+trigger_action.matched = TRUE
+trigger_action.actor = Jet
+trigger_action.evidence = Jet turns the key and the vault door swings open.
+trigger_action.message_indexes = 4, 5
+END
+TIME
+elapsed.minimum_seconds = 20
+elapsed.estimated_seconds = 35
+elapsed.maximum_seconds = 60
+confidence = 0.8
+basis += One exchange.
+ITEM timeline
+key = open_vault
+description = Jet opens the vault.
+actor = Jet
+kind = action
+evidence = Jet turns the key.
+END
+END
+GOAL leave_town
+owner = Jet
+title = Leave town
+status = completed
+evidence = Jet boards the coach.
+END
+DONE`, 'progression');
+    const evaluation = parsed.event_evaluations[0];
+    assert.deepEqual(evaluation.trigger_action.evidence, ['Jet turns the key and the vault door swings open.']);
+    assert.deepEqual(evaluation.trigger_action.message_indexes, [4, 5]);
+    assert.equal(parsed.time.timeline[0].evidence, 'Jet turns the key.');
+    assert.deepEqual(parsed.goals[0].evidence, ['Jet boards the coach.']);
+    const codes = outputParseDiagnostics(parsed).map(item => item.code);
+    assert.ok(codes.includes('scalar_list_assignment_normalized'));
+    assert.ok(codes.includes('index_list_split'));
+});
+
+test('the DSL evaluation contract shows the matched-condition shape only when keys are supplied', () => {
+    const withKeys = appendDslEvaluationKeyContract([{ role: 'system', content: 'rules' }], 'dsl', ['vault']);
+    assert.match(withKeys[0].content, /trigger_action\.evidence \+= /u);
+    const without = appendDslEvaluationKeyContract([{ role: 'system', content: 'rules' }], 'dsl', []);
+    assert.doesNotMatch(without[0].content, /trigger_action\.evidence/u);
 });

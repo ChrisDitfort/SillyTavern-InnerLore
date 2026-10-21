@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import { createEmptyStore, mergeEntityOperations } from '../core.js';
 import { installMockInnerLoreStorage } from './mock-storage-server.mjs';
+import { createEventListeners } from './mock-event-source.mjs';
 
 const waitFor = async (predicate, timeout = 4_000) => {
     const started = Date.now();
@@ -15,7 +16,7 @@ const waitFor = async (predicate, timeout = 4_000) => {
 test('legacy chat JSON migrates once, then only a pointer remains while SQLite-style saves continue', async t => {
     const mock = installMockInnerLoreStorage();
     t.after(() => mock.restore());
-    const listeners = new Map();
+    const listeners = createEventListeners();
     const savedMetadata = [];
     const chatId = 'server-persistence-chat';
     const chat = [{ is_user: false, is_system: false, name: 'Narrator', mes: 'Ada waits beside the engine.' }];
@@ -30,6 +31,8 @@ test('legacy chat JSON migrates once, then only a pointer remains while SQLite-s
         disabledExtensions: [],
         connectionManager: { profiles: [], selectedProfile: '' },
         inner_lore: {
+            // These tests cover other passes; the game ledger has its own.
+            gameEnabled: false,
             enabled: true,
             autoUpdate: false,
             innerSelfEnabled: true,
@@ -54,7 +57,7 @@ test('legacy chat JSON migrates once, then only a pointer remains while SQLite-s
         saveMetadataDebounced: () => { throw new Error('chat JSON must not be the state write path'); },
         setExtensionPrompt: () => {},
         renderExtensionTemplateAsync: async () => '',
-        eventSource: { on: (event, callback) => listeners.set(event, callback) },
+        eventSource: { on: listeners.on },
         eventTypes: events,
         SlashCommandParser: null,
         SlashCommand: null,
@@ -87,4 +90,59 @@ test('legacy chat JSON migrates once, then only a pointer remains while SQLite-s
     await listeners.get(events.CHAT_DELETED)(chatId);
     assert.equal(mock.worlds.has(persistedPointer.worldId), false);
     assert.equal(mock.deletedWorldIds.has(persistedPointer.worldId), true);
+});
+
+test('a legacy store cloned onto a brand-new chat from another chat is not migrated into it', async t => {
+    const mock = installMockInnerLoreStorage();
+    t.after(() => mock.restore());
+    const listeners = createEventListeners();
+    const chatId = 'fresh-chat';
+    // SillyTavern copies the open chat's metadata onto a new chat started from it.
+    const inherited = createEmptyStore('older-chat');
+    mergeEntityOperations(inherited, [{ type: 'character', name: 'Ada', importance: 90, facts: ['Ada maintains the engine.'] }], {
+        messageIndex: 0,
+        minimumImportance: 0,
+    });
+    const chatMetadata = { inner_lore: inherited };
+    const events = {
+        MESSAGE_RECEIVED: 'message_received', GENERATION_STARTED: 'generation_started',
+        CHAT_CHANGED: 'chat_changed', MESSAGE_EDITED: 'message_edited', MESSAGE_SWIPED: 'message_swiped',
+        MESSAGE_DELETED: 'message_deleted',
+    };
+    const context = {
+        extensionSettings: {
+            disabledExtensions: [],
+            connectionManager: { profiles: [], selectedProfile: '' },
+            inner_lore: {
+                gameEnabled: false, enabled: true, autoUpdate: false, innerSelfEnabled: true,
+                autoLoreEnabled: false, worldProgressionEnabled: false, autoRebuildOnHistoryChange: false,
+            },
+        },
+        chatMetadata,
+        chat: [{ is_user: false, is_system: false, name: 'Narrator', mes: 'A new story begins.' }],
+        chatId, name1: 'Player', name2: 'Narrator',
+        getCurrentChatId: () => chatId,
+        getCharacterCardFields: () => ({}),
+        getRequestHeaders: () => ({ 'Content-Type': 'application/json', 'X-CSRF-Token': 'test' }),
+        saveSettingsDebounced: () => {},
+        saveMetadata: async () => {},
+        saveMetadataDebounced: () => {},
+        setExtensionPrompt: () => {},
+        renderExtensionTemplateAsync: async () => '',
+        eventSource: { on: listeners.on },
+        eventTypes: events,
+        SlashCommandParser: null,
+        SlashCommand: null,
+        ConnectionManagerRequestService: null,
+        getWorldInfoNames: () => [],
+        loadWorldInfo: async () => null,
+    };
+    globalThis.SillyTavern = { getContext: () => context };
+
+    await import(`../index.js?server-persistence-inherited=${Date.now()}`);
+    await waitFor(() => chatMetadata.inner_lore?.backend === 'airpg-storage' && listeners.has(events.MESSAGE_EDITED));
+
+    const world = mock.worlds.get(chatMetadata.inner_lore.worldId);
+    assert.equal(world.innerLore.store.chatId, chatId);
+    assert.equal(world.innerLore.store.entities['character:ada'], undefined, 'the new chat starts its own world');
 });

@@ -5,12 +5,19 @@ import {
     backgroundInFlightCount,
     connectionFallbackProfileIds,
     extractResponseText,
+    featherlessCost,
     isConcurrencyRejection,
     isTransientRequestError,
+    oneAtATimeProvider,
     providerConcurrency,
+    providerHasRoom,
+    providerInUse,
     sendInnerLoreRequest,
     setStoryIdleGate,
+    storyProvider,
     withRequestTimeout,
+    fitsBesideStory,
+    storyProviderBodyLines,
 } from '../llm-client.js';
 
 test('response extraction prefers final content over private reasoning', () => {
@@ -233,4 +240,153 @@ test('with two slots a provider that refuses a second request is retried after t
     } finally {
         setStoryIdleGate(null);
     }
+});
+
+function novelAiContext(sendRequest, { mainApi = 'openai', chatCompletionSettings = {} } = {}) {
+    globalThis.SillyTavern = {
+        getContext: () => ({
+            mainApi,
+            chatCompletionSettings,
+            extensionSettings: { connectionManager: { profiles: [
+                { id: 'glm', name: 'GLM 4.6 Novel AI', api: 'custom', 'api-url': 'https://text.novelai.net/oa/v1' },
+                { id: 'claude', name: 'Claude Bridge', api: 'custom', 'api-url': 'http://127.0.0.1:8790/innerlore/v1' },
+            ] } },
+            ConnectionManagerRequestService: { sendRequest },
+        }),
+    };
+}
+
+test('NovelAI profiles and a NovelAI story are recognised as one-at-a-time', () => {
+    novelAiContext(async () => '');
+    assert.equal(oneAtATimeProvider('glm'), 'novelai.net');
+    assert.equal(oneAtATimeProvider('claude'), '');
+    assert.equal(storyProvider(), '');
+    novelAiContext(async () => '', { mainApi: 'novel' });
+    assert.equal(storyProvider(), 'novelai.net', 'Erato and Kayra');
+    novelAiContext(async () => '', { chatCompletionSettings: { chat_completion_source: 'custom', custom_url: 'https://text.novelai.net/oa/v1' } });
+    assert.equal(storyProvider(), 'novelai.net', 'GLM or Xialong as the story model');
+});
+
+test('requests through NovelAI take turns, and the wait is not counted against their timeout', async () => {
+    const started = [];
+    let release;
+    novelAiContext(async () => {
+        started.push(Date.now());
+        if (started.length === 1) await new Promise(resolve => { release = resolve; });
+        return () => (async function* () { yield { text: '{"entities":[],"minds":[]}' }; })();
+    });
+    const settings = { ...streamingSettings, connectionProfileId: 'glm', providerConcurrency: 2, requestTimeoutSeconds: 15 };
+    const first = sendInnerLoreRequest(settings, [{ role: 'user', content: 'Return JSON.' }]);
+    const second = sendInnerLoreRequest(settings, [{ role: 'user', content: 'Return JSON.' }]);
+    await new Promise(resolve => setTimeout(resolve, 40));
+    assert.equal(started.length, 1, 'the second waits for the first');
+    assert.ok(providerInUse('novelai.net'));
+    release();
+    await Promise.all([first, second]);
+    assert.equal(started.length, 2);
+    assert.equal(providerInUse('novelai.net'), false);
+});
+
+test('with two slots a NovelAI background request still waits for a NovelAI story', async () => {
+    const sent = [];
+    novelAiContext(async () => {
+        sent.push(Date.now());
+        return () => (async function* () { yield { text: '{"entities":[],"minds":[]}' }; })();
+    }, { mainApi: 'novel' });
+    try {
+        const story = storyGate();
+        const request = sendInnerLoreRequest({ ...streamingSettings, connectionProfileId: 'glm', providerConcurrency: 2 }, [{ role: 'user', content: 'Return JSON.' }]);
+        await new Promise(resolve => setTimeout(resolve, 30));
+        assert.equal(sent.length, 0, 'NovelAI serves one request at a time');
+        assert.equal(providerInUse('novelai.net'), false, 'it waits before taking the turn the story would wait for');
+        story.finish();
+        await request;
+        assert.equal(sent.length, 1);
+        const busyStory = storyGate();
+        await sendInnerLoreRequest({ ...streamingSettings, connectionProfileId: 'claude', providerConcurrency: 2 }, [{ role: 'user', content: 'Return JSON.' }]);
+        assert.equal(sent.length, 2, 'another provider goes beside the story');
+        busyStory.finish();
+    } finally {
+        setStoryIdleGate(null);
+    }
+});
+
+function featherlessContext(sendRequest, storyModel = '') {
+    globalThis.SillyTavern = {
+        getContext: () => ({
+            mainApi: storyModel ? 'openai' : 'textgenerationwebui',
+            chatCompletionSettings: storyModel ? { chat_completion_source: 'custom', custom_url: 'https://api.featherless.ai/v1', custom_model: storyModel } : {},
+            extensionSettings: { connectionManager: { profiles: [
+                { id: 'gemma', name: 'Featherless Gemma', api: 'custom', 'api-url': 'https://api.featherless.ai/v1', model: 'coder3101/gemma-4-31B-it-heretic' },
+            ] } },
+            ConnectionManagerRequestService: { sendRequest },
+        }),
+    };
+}
+
+test('a Featherless model costs 1, 2 or 4 of the plan\'s units by its size', () => {
+    assert.equal(featherlessCost('inflatebot/MN-12B-Mag-Mell-R1'), 1);
+    assert.equal(featherlessCost('coder3101/gemma-4-31B-it-heretic'), 2);
+    assert.equal(featherlessCost('Tetratype/Gemma-4-26B-A4B-it-heretic-antislop'), 2);
+    assert.equal(featherlessCost('darkc0de/Qwen3.8-27B-heretic'), 2);
+    assert.equal(featherlessCost('TheDrummer/Anubis-70B-v1.1'), 4);
+    assert.equal(featherlessCost('zai-org/GLM-5.3'), 4, 'no size in the name: counted as large');
+});
+
+test('with the story on a 2-unit Featherless model, background requests leave the story its units', async () => {
+    const started = [];
+    const releases = [];
+    featherlessContext(async () => {
+        started.push(Date.now());
+        await new Promise(resolve => releases.push(resolve));
+        return () => (async function* () { yield { text: '{"entities":[],"minds":[]}' }; })();
+    }, 'coder3101/gemma-4-31B-it-heretic');
+    const settings = { ...streamingSettings, connectionProfileId: 'gemma', providerConcurrency: 2 };
+    const first = sendInnerLoreRequest(settings, [{ role: 'user', content: 'Return JSON.' }]);
+    const second = sendInnerLoreRequest(settings, [{ role: 'user', content: 'Return JSON.' }]);
+    await new Promise(resolve => setTimeout(resolve, 40));
+    assert.equal(started.length, 1, 'two units are kept for the story, so one background request runs at a time');
+    assert.ok(providerHasRoom('featherless.ai', 2), 'the story can still leave');
+    releases.shift()();
+    await first;
+    await new Promise(resolve => setTimeout(resolve, 40));
+    assert.equal(started.length, 2);
+    releases.shift()();
+    await second;
+    assert.equal(providerInUse('featherless.ai'), false);
+});
+
+test('with the story on a 70B Featherless model, a background request waits for the story', async () => {
+    const sent = [];
+    featherlessContext(async () => {
+        sent.push(Date.now());
+        return () => (async function* () { yield { text: '{"entities":[],"minds":[]}' }; })();
+    }, 'TheDrummer/Anubis-70B-v1.1');
+    try {
+        const story = storyGate();
+        const request = sendInnerLoreRequest({ ...streamingSettings, connectionProfileId: 'gemma', providerConcurrency: 2 }, [{ role: 'user', content: 'Return JSON.' }]);
+        await new Promise(resolve => setTimeout(resolve, 30));
+        assert.equal(sent.length, 0, 'the 70B story takes all four units');
+        story.finish();
+        await request;
+        assert.equal(sent.length, 1);
+    } finally {
+        setStoryIdleGate(null);
+    }
+});
+
+test('a planner on the story\'s one-slot provider does not fit beside the story; other providers do', () => {
+    novelAiContext(async () => '', { chatCompletionSettings: { chat_completion_source: 'custom', custom_url: 'https://text.novelai.net/oa/v1', custom_model: 'xialong-v1' } });
+    assert.equal(fitsBesideStory('glm'), false, 'NovelAI serves one request at a time');
+    assert.equal(fitsBesideStory('claude'), true, 'another provider is unaffected');
+    novelAiContext(async () => '');
+    assert.equal(fitsBesideStory('glm'), true, 'no limited story provider');
+});
+
+test('story requests on limited providers get thinking off and the preset samplers, never repeating keys the body has', () => {
+    assert.deepEqual(storyProviderBodyLines('featherless.ai', '', { top_k: 0, min_p: 0.02 }), ['reasoning_effort: none', 'chat_template_kwargs:', '  enable_thinking: false', 'min_p: 0.02']);
+    assert.deepEqual(storyProviderBodyLines('novelai.net', '', { top_k: 250, min_p: 0 }), ['top_k: 250']);
+    assert.deepEqual(storyProviderBodyLines('featherless.ai', 'reasoning_effort: none\nchat_template_kwargs:\n  enable_thinking: false', { top_k: 64 }), ['top_k: 64']);
+    assert.deepEqual(storyProviderBodyLines('', '', { top_k: 250 }), [], 'an unlimited provider is left alone');
+    assert.deepEqual(storyProviderBodyLines('novelai.net', 'top_k: 40', {}, 'top_k: 250\nrepetition_penalty: 1.1\nextra:\n  a: 1'), ['repetition_penalty: 1.1', 'extra:', '  a: 1'], "the user's YAML replaces the defaults, minus keys already sent");
 });

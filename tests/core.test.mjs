@@ -23,6 +23,10 @@ import {
     selectRelevantEntities,
     snapshotMessageRange,
     textMentions,
+    ensurePlayerEntity,
+    looksLikeProperName,
+    playerEntityKeys,
+    buildCastLock,
 } from '../core.js';
 
 test('latest-turn contract preserves a closed user choice set verbatim', () => {
@@ -802,4 +806,135 @@ test('message snapshots reject a response generated for a discarded swipe', () =
 
     chat[1].mes = 'Selected replacement swipe.';
     assert.equal(messageRangeMatchesSnapshot(chat, snapshot), false);
+});
+
+test('proper names are one to four capitalised words; descriptor and title runs are not names', () => {
+    for (const name of ['Marit', 'Tobbe Rusk', 'Hob Garrow', 'Hobbe of Mill Lane', 'Captain Vane']) assert.ok(looksLikeProperName(name), name);
+    for (const name of ['Lean Sailor', 'Old Man', 'The Chancellor', 'the lean sailor', 'Coach Driver', 'tobbe rusk']) assert.ok(!looksLikeProperName(name), name);
+});
+
+test('a descriptor record without identity_kind that gains a two-word proper-name alias is renamed, mind included', () => {
+    const store = createEmptyStore('descriptor-alias');
+    mergeEntityOperations(store, [{ type: 'character', name: 'Lean Sailor', importance: 60, summary: 'A lean sailor at the bar.' }], { minimumImportance: 0, messageIndex: 2 });
+    mergeMindOperations(store, [{ character: 'Lean Sailor', set: [{ key: 'current_goal', category: 'goal', thought: 'Get the newcomer to buy me a drink.', confidence: 'confirmed' }] }], { messageIndex: 2 });
+    mergeEntityOperations(store, [{ type: 'character', name: 'Lean Sailor', aliases: ['Tobbe Rusk'], importance: 60, current_state: 'Introduced himself as Tobbe Rusk.' }], { minimumImportance: 0, messageIndex: 4 });
+    assert.equal(store.entities['character:lean sailor'], undefined);
+    assert.equal(store.entities['character:tobbe rusk'].name, 'Tobbe Rusk');
+    assert.ok(store.entities['character:tobbe rusk'].aliases.includes('Lean Sailor'));
+    assert.equal(store.brains['lean sailor'], undefined);
+    assert.equal(store.brains['tobbe rusk'].name, 'Tobbe Rusk');
+});
+
+test('a new proper-name record whose text uses the descriptor phrase updates the descriptor record instead of forking', () => {
+    const store = createEmptyStore('descriptor-link');
+    mergeEntityOperations(store, [
+        { type: 'character', name: 'Lean Sailor', importance: 60, summary: 'A lean sailor at the bar.', current_location: 'Salt Lantern' },
+        { type: 'character', name: 'Old Man', importance: 55, summary: 'Hob Garrow, an elderly sailor with a wooden leg, by the fire.' },
+    ], { minimumImportance: 0, messageIndex: 2 });
+    mergeMindOperations(store, [{ character: 'Lean Sailor', set: [{ key: 'current_goal', category: 'goal', thought: 'Cadge a drink.', confidence: 'confirmed' }] }], { messageIndex: 2 });
+    const result = mergeEntityOperations(store, [
+        { type: 'character', name: 'Tobbe Rusk', importance: 65, summary: 'The lean sailor off the Grey Tern; talkative.' },
+        { type: 'character', name: 'Hob Garrow', importance: 60, summary: 'A retired sailor with a wooden leg.' },
+    ], { minimumImportance: 0, messageIndex: 4 });
+    assert.equal(result.linked, 2);
+    assert.equal(Object.values(store.entities).filter(record => record.type === 'character').length, 2);
+    assert.equal(store.entities['character:tobbe rusk'].name, 'Tobbe Rusk');
+    assert.ok(store.entities['character:tobbe rusk'].aliases.includes('Lean Sailor'));
+    assert.equal(store.entities['character:hob garrow'].name, 'Hob Garrow');
+    assert.ok(store.entities['character:hob garrow'].aliases.includes('Old Man'));
+    mergeMindOperations(store, [{ character: 'Tobbe Rusk', set: [{ key: 'current_goal', category: 'goal', thought: 'Keep the newcomer talking.', confidence: 'confirmed' }] }], { messageIndex: 4 });
+    assert.equal(Object.keys(store.brains).length, 1);
+    assert.equal(store.brains['tobbe rusk'].name, 'Tobbe Rusk');
+});
+
+test('an existing descriptor record and proper-name record for one person reconcile into one, minds included', () => {
+    const store = createEmptyStore('descriptor-pair');
+    mergeEntityOperations(store, [{ type: 'character', name: 'Lean Sailor', importance: 60, summary: 'A lean sailor at the bar.' }], { minimumImportance: 0, messageIndex: 2 });
+    mergeMindOperations(store, [{ character: 'Lean Sailor', set: [{ key: 'current_goal', category: 'goal', thought: 'Cadge a drink.', confidence: 'confirmed' }] }], { messageIndex: 2 });
+    // A later pass forked the same person under his revealed name.
+    store.entities['character:tobbe rusk'] = { ...store.entities['character:lean sailor'], id: 'character:tobbe rusk', name: 'Tobbe Rusk', aliases: [], keys: ['Tobbe Rusk'], summary: 'Tobbe Rusk, the lean sailor off the Grey Tern.' };
+    mergeMindOperations(store, [{ character: 'Tobbe Rusk', set: [{ key: 'current_goal', category: 'goal', thought: 'Keep the newcomer talking.', confidence: 'confirmed' }] }], { messageIndex: 4 });
+    assert.equal(Object.keys(store.brains).length, 2);
+    const result = mergeEntityOperations(store, [], { minimumImportance: 0, messageIndex: 6 });
+    assert.equal(result.reconciled, 1);
+    assert.equal(store.entities['character:lean sailor'], undefined);
+    assert.ok(store.entities['character:tobbe rusk'].aliases.includes('Lean Sailor'));
+    assert.equal(Object.keys(store.brains).length, 1);
+    assert.equal(store.brains['tobbe rusk'].name, 'Tobbe Rusk');
+});
+
+test("the player's record is created on demand and survives a full pass of more important records", () => {
+    const store = createEmptyStore('player');
+    const player = ensurePlayerEntity(store, { name: 'Jet', persona: 'A wiry courier.', messageIndex: 0 });
+    assert.equal(player.player, true);
+    assert.equal(store.entities['character:jet'].summary, 'A wiry courier.');
+    const operations = Array.from({ length: 13 }, (_, i) => ({ type: 'character', name: `Person ${i}`, importance: 90, summary: `Person number ${i}.` }));
+    operations.push({ type: 'character', name: 'Jet', importance: 10, current_state: 'Jet stands at the bar.' });
+    mergeEntityOperations(store, operations, { minimumImportance: 35, maximumOperations: 12, messageIndex: 3 });
+    assert.equal(store.entities['character:jet'].currentState, 'Jet stands at the bar.');
+    assert.ok(playerEntityKeys(store, 'Jet').has('jet'));
+});
+
+test('the cast lock names the people present, never the player, and asks for an inviting ending', () => {
+    const line = buildCastLock(['Marit', 'Jet', 'Tobbe Rusk', ''], 'Jet');
+    assert.match(line, /^Cast lock: present are Marit, Tobbe Rusk;/u);
+    assert.doesNotMatch(line, /present are [^;]*Jet/u);
+    assert.match(line, /invites Jet's next move\./u);
+    assert.match(buildCastLock([], 'Jet'), /nobody else is established as present/u);
+});
+
+test('an operation on the player or a known person is never linked to a descriptor its text merely mentions', () => {
+    const store = createEmptyStore('descriptor-mention');
+    ensurePlayerEntity(store, { name: 'Jet', persona: 'A courier.', messageIndex: 0 });
+    mergeEntityOperations(store, [
+        { type: 'character', name: 'Coach Driver', importance: 40, summary: 'The coach driver who brought Jet to Port Vell.' },
+        { type: 'character', name: 'Marit', importance: 70, summary: 'The landlady.' },
+    ], { minimumImportance: 0, messageIndex: 1 });
+    const result = mergeEntityOperations(store, [
+        { type: 'character', name: 'Jet', importance: 60, current_state: 'Jet stands on the doorstep after the coach driver pointed out the inn.', summary: 'A wiry courier, dropped off by the coach driver at the Salt Lantern.' },
+        { type: 'character', name: 'Marit', importance: 70, summary: 'The landlady; she sent the coach driver on his way.' },
+    ], { minimumImportance: 0, messageIndex: 2 });
+    assert.equal(result.linked, 0);
+    assert.deepEqual(store.entities['character:jet'].aliases, []);
+    assert.deepEqual(store.entities['character:marit'].aliases, []);
+    assert.ok(store.entities['character:coach driver']);
+});
+
+test('a passer-by who has already left gets no record; a departed person of consequence still does', () => {
+    const store = createEmptyStore('departed');
+    const result = mergeEntityOperations(store, [
+        { type: 'character', name: 'Coach Driver', importance: 40, summary: 'The driver who brought Jet to Port Vell.', current_state: 'Drove away into the rain after dropping Jet at the inn.' },
+        { type: 'character', name: 'Captain Vane', importance: 80, summary: 'Master of the Wind Dancer.', current_state: 'Has left port at dawn with the brig.' },
+    ], { minimumImportance: 0, messageIndex: 1 });
+    assert.equal(result.departedSkipped, 1);
+    assert.equal(store.entities['character:coach driver'], undefined);
+    assert.ok(store.entities['character:captain vane']);
+});
+
+test('the turn contract asks for fresh prose and a concrete ending; the cast lock sets length and register', () => {
+    const contract = buildLatestTurnContract([{ is_user: true, mes: 'I ask about the room.' }], { playerName: 'Jet' });
+    assert.match(contract, /<prose_contract priority="hard">[\s\S]*Fresh prose[\s\S]*never on a sentence that explains the mood/u);
+    const lock = buildCastLock(['Marit'], 'Jet');
+    assert.match(lock, /Style: 200 to 350 words[\s\S]*never lingering on bodies/u);
+    assert.match(lock, /Jet's never\.$/u);
+});
+
+test('a passer-by who is departing, or dropping off a passenger, gets no record either', () => {
+    const store = createEmptyStore('departing');
+    const result = mergeEntityOperations(store, [
+        { type: 'character', name: 'Coach Driver', importance: 40, summary: 'The driver of the coach that brought Jet to Port Vell.', current_state: 'Departing from the Salt Lantern after dropping off a passenger.' },
+    ], { minimumImportance: 0, messageIndex: 1 });
+    assert.equal(result.departedSkipped, 1);
+    assert.equal(Object.keys(store.entities).length, 0);
+});
+
+test('a departed passer-by with no record gets no mind; a known person keeps theirs', () => {
+    const store = createEmptyStore('departed-mind');
+    mergeEntityOperations(store, [{ type: 'character', name: 'Marit', importance: 70, summary: 'The landlady.' }], { minimumImportance: 0, messageIndex: 1 });
+    const result = mergeMindOperations(store, [
+        { character: 'Coach Driver', current_mind: { perception: 'The fare is paid; the passenger is dropped off.', immediate_goal: 'Departing Port Vell before the road floods.' } },
+        { character: 'Marit', current_mind: { perception: 'A stranger with a bundle.', immediate_goal: 'Coin before a bed.' } },
+    ], { messageIndex: 2 });
+    assert.equal(result.departedSkipped, 1);
+    assert.deepEqual(Object.keys(store.brains), ['marit']);
 });

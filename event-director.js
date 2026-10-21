@@ -1,5 +1,5 @@
-import { canonicalNameKey, clamp, cleanString, contextSimilarity, hashString, uniqueStrings } from './core.js?v=47';
-import { appendOutputDiagnostics } from './output-codec.js?v=2';
+import { canonicalNameKey, clamp, cleanString, contextSimilarity, hashString, uniqueStrings } from './core.js?v=48';
+import { appendOutputDiagnostics } from './output-codec.js?v=3';
 
 export const EVENT_DIRECTOR_VERSION = 1;
 export const AUTOMATIC_EVENT_ORIGIN = 'automatic_director';
@@ -71,6 +71,48 @@ function normalizeDefinitionInput(value) {
         subjects: uniqueStrings(source.subjects || [], 30),
         priority: integer(source.priority, 55, 0, 65),
     };
+}
+
+const RESERVED_PROPOSAL_KEYS = new Set([
+    'proposal', 'reason', 'key', 'event', 'events', 'stable_key', 'stable_lower_snake_case', 'trigger', 'watcher', 'definition', 'proposal_1', 'null', 'none',
+]);
+const ID_PREFIX_PATTERN = /\b(?:character|npc|player|location|place|item|entity|faction|lore)\s*:\s*/giu;
+
+function stripIdPrefixes(value) {
+    const text = String(value || '');
+    const cleaned = text.replace(ID_PREFIX_PATTERN, '');
+    if (cleaned === text) return text;
+    return cleaned.replace(/(?<=\p{L})_(?=\p{L})/gu, ' ');
+}
+
+/**
+ * Weaker providers copy the record word "proposal" into the key and write
+ * ids such as "character:jet" where a name belongs. Either would arm a
+ * trigger whose evaluation can never be grounded, so both are normalised.
+ */
+export function normalizeProposalIdentity(definition, playerName = '') {
+    const diagnostics = [];
+    if (!definition.key || definition.key.length < 3 || RESERVED_PROPOSAL_KEYS.has(definition.key)) {
+        const replacement = canonicalNameKey(definition.title).replace(/\s+/gu, '_').slice(0, 100);
+        if (replacement && replacement !== definition.key) {
+            diagnostics.push({ code: 'proposal_key_replaced', from: definition.key, to: replacement });
+            definition.key = replacement;
+        }
+    }
+    for (const field of ['actorName', 'actionCondition', 'cancellationCondition', 'revealCondition', 'resolutionCondition']) {
+        const cleaned = stripIdPrefixes(definition[field]);
+        if (cleaned !== (definition[field] || '')) {
+            diagnostics.push({ code: 'id_prefix_stripped', field });
+            definition[field] = cleaned;
+        }
+    }
+    const player = canonicalNameKey(playerName);
+    if (definition.actorName && player && canonicalNameKey(definition.actorName) === player) {
+        diagnostics.push({ code: 'actor_is_player', actor: definition.actorName });
+        definition.actorScope = 'player';
+        definition.actorName = '';
+    }
+    return { definition, diagnostics };
 }
 
 export function normalizeEventProposal(value, options = {}) {
@@ -246,6 +288,8 @@ export function validateEventDirectorPayload(payloadValue, options = {}) {
         appendOutputDiagnostics(payload, [{ code: 'visibility_public_normalized' }]);
     }
     const definition = normalizeDefinitionInput(raw);
+    const identity = normalizeProposalIdentity(definition, options.playerName);
+    if (identity.diagnostics.length) appendOutputDiagnostics(payload, identity.diagnostics);
     if (!definition.key || !definition.title || !definition.description || !definition.consequences) {
         throw new Error('Automatic Event Director proposal requires key, title, description, and consequences.');
     }
@@ -349,9 +393,11 @@ export function addEventProposal(stateValue, candidateValue, options = {}) {
 
 export function eventDefinitionFromProposal(proposalValue) {
     const proposal = normalizeEventProposal(proposalValue);
+    // Proposals saved before the key/actor normalisation existed are fixed here.
+    const { definition } = normalizeProposalIdentity({ ...proposal.definition });
     return {
         id: proposal.definitionId || `trigger:auto:${hashString(proposal.id)}`,
-        ...proposal.definition,
+        ...definition,
         enabled: true,
         timeBasis: 'after_creation',
         actionTiming: 'after_outcome',

@@ -6,7 +6,7 @@
  * those records here prevents speculative state from leaking into World Info.
  */
 
-import { canonicalNameKey, clamp, cleanString, contextSimilarity, uniqueStrings } from './core.js?v=47';
+import { canonicalNameKey, clamp, cleanString, contextSimilarity, uniqueStrings } from './core.js?v=48';
 import {
     evaluateTriggerEvents,
     getTriggerEventStats,
@@ -379,7 +379,15 @@ function dueState(clock, dueAt) {
 }
 
 function evidenceFrom(operation) {
-    return uniqueStrings(operation?.evidence || operation?.observed_evidence || [], 12);
+    const raw = operation?.evidence ?? operation?.observed_evidence ?? [];
+    // JSON-mode providers sometimes write one quote instead of a list.
+    return uniqueStrings(typeof raw === 'string' ? [raw] : raw, 12);
+}
+
+/** A final status claimed without evidence stays as it was; the log says so. */
+function noteStatusDowngrade(state, result, kind, record, messageIndex, requestedStatus) {
+    result.downgraded = (result.downgraded || 0) + 1;
+    appendLog(state, kind, record, messageIndex, `requested ${requestedStatus} without evidence; kept ${record.status}`);
 }
 
 function appendLog(state, kind, record, messageIndex, note = '') {
@@ -480,11 +488,11 @@ function mergeGoals(state, operations, messageIndex, limits) {
         record.requirements = uniqueStrings(operation.requirements || existing?.requirements || [], 20);
         record.progress = clamp(operation.progress ?? existing?.progress ?? 0, 0, 100);
         const requestedStatus = GOAL_STATUSES.has(operation.status) ? operation.status : (existing?.status || 'active');
-        record.status = FINAL_STATUSES.has(requestedStatus)
+        const ungroundedFinal = FINAL_STATUSES.has(requestedStatus)
             && requestedStatus !== existing?.status
-            && !evidenceFrom(operation).length
-            ? (existing?.status || 'active')
-            : requestedStatus;
+            && !evidenceFrom(operation).length;
+        record.status = ungroundedFinal ? (existing?.status || 'active') : requestedStatus;
+        if (ungroundedFinal) noteStatusDowngrade(state, result, 'goal_status_downgraded', record, messageIndex, requestedStatus);
         record.dueAt = dueAtFromOperation(operation, state.clock, existing?.dueAt || null);
         record.deadlineState = dueState(state.clock, record.dueAt);
         if (existing && progressionRecordSignature(existing) === progressionRecordSignature(record)) {
@@ -517,11 +525,11 @@ function mergeProcesses(state, operations, messageIndex, limits) {
         record.conditions = uniqueStrings(operation.conditions || existing?.conditions || [], 20);
         record.progress = clamp(operation.progress ?? existing?.progress ?? 0, 0, 100);
         const requestedStatus = PROCESS_STATUSES.has(operation.status) ? operation.status : (existing?.status || 'active');
-        record.status = FINAL_STATUSES.has(requestedStatus)
+        const ungroundedFinal = FINAL_STATUSES.has(requestedStatus)
             && requestedStatus !== existing?.status
-            && !evidenceFrom(operation).length
-            ? (existing?.status || 'active')
-            : requestedStatus;
+            && !evidenceFrom(operation).length;
+        record.status = ungroundedFinal ? (existing?.status || 'active') : requestedStatus;
+        if (ungroundedFinal) noteStatusDowngrade(state, result, 'process_status_downgraded', record, messageIndex, requestedStatus);
         record.dueAt = dueAtFromOperation(operation, state.clock, existing?.dueAt || null);
         record.dueState = dueState(state.clock, record.dueAt);
         if (existing && progressionRecordSignature(existing) === progressionRecordSignature(record)) {
@@ -573,6 +581,9 @@ function mergeEvents(state, operations, messageIndex, limits, autonomy) {
         const requested = operation.status;
         record.status = safeEventStatus(requested, operation, existing, autonomy);
         if (record.requiresPlayerAction && ['occurred_offscreen', 'revealed'].includes(requested)) result.protectedPlayerActions++;
+        else if (['occurred_offscreen', 'revealed'].includes(requested) && record.status !== requested && !evidenceFrom(operation).length) {
+            noteStatusDowngrade(state, result, 'event_status_downgraded', record, messageIndex, requested);
+        }
         record.dueAt = dueAtFromOperation(operation, state.clock, existing?.dueAt || null);
         const scheduledState = dueState(state.clock, record.dueAt);
         if (['latent', 'scheduled', 'possibly_due', 'due'].includes(record.status) && record.dueAt) {

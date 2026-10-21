@@ -13,8 +13,8 @@ import {
     cleanString,
     curatedLocationOf,
     resolveLocationReference,
-} from './core.js?v=47';
-import { deriveSceneState } from './scene.js?v=5';
+} from './core.js?v=48';
+import { deriveSceneState } from './scene.js?v=7';
 
 const MAP_VIEWBOX = { width: 1000, height: 700 };
 const MAX_NODE_CHIPS = 4;

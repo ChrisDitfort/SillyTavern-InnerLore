@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import { createEmptyStore } from '../core.js';
 import { installMockInnerLoreStorage } from './mock-storage-server.mjs';
+import { createEventListeners } from './mock-event-source.mjs';
 
 installMockInnerLoreStorage();
 
@@ -15,7 +16,7 @@ const waitFor = async (predicate, timeout = 2_000) => {
 };
 
 test('empty replies regenerate, and a failed recovery is never counted as a completed turn', async () => {
-    const listeners = new Map();
+    const listeners = createEventListeners();
     const prompts = new Map();
     const generationTypes = [];
     let regeneratedText = 'Osric Vale, the Lord Chancellor, seals the ruling. “The next matter may proceed.”';
@@ -31,6 +32,8 @@ test('empty replies regenerate, and a failed recovery is never counted as a comp
         disabledExtensions: [],
         connectionManager: { profiles: [], selectedProfile: '' },
         inner_lore: {
+            // These tests cover other passes; the game ledger has its own.
+            gameEnabled: false,
             enabled: true,
             autoUpdate: false,
             autoRecoverIncomplete: true,
@@ -68,7 +71,7 @@ test('empty replies regenerate, and a failed recovery is never counted as a comp
         },
         setExtensionPrompt: (key, value) => prompts.set(key, value),
         renderExtensionTemplateAsync: async () => '',
-        eventSource: { on: (event, callback) => listeners.set(event, callback) },
+        eventSource: { on: listeners.on },
         eventTypes: events,
         SlashCommandParser: null,
         SlashCommand: null,

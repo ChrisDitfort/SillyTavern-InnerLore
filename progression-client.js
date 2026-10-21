@@ -1,16 +1,17 @@
-import { canonicalNameKey } from './core.js?v=47';
-import { sendInnerLoreRequest } from './llm-client.js?v=15';
+import { canonicalNameKey } from './core.js?v=48';
+import { sendInnerLoreRequest } from './llm-client.js?v=16';
 import { buildProgressionRepairMessages } from './progression-prompts.js';
 import { PROGRESSION_JSON_SCHEMA } from './structured-output.js';
 import {
     appendDslEvaluationKeyContract,
+    appendOutputDiagnostics,
     escalateRepairSettings,
     normalizeOutputFormat,
     outputParseDiagnostics,
     parseInnerLoreOutput,
     prepareOutputMessages,
     structuredRequestOptions,
-} from './output-codec.js?v=2';
+} from './output-codec.js?v=3';
 
 function progressionRequestSettings(settings) {
     const dedicatedProfile = settings.progressionConnectionProfileId || settings.connectionProfileId;
@@ -138,8 +139,10 @@ export function validateProgressionPayload(payload, options = {}) {
     }
     const expectedEventKeys = [...new Set((Array.isArray(options.expectedEventKeys) ? options.expectedEventKeys : [])
         .filter(key => typeof key === 'string' && key))];
+    const diagnostics = [];
     if (expectedEventKeys.length) {
         const expected = new Set(expectedEventKeys);
+        if (options.lenientAcknowledgements) reconcileAcknowledgements(payload, expectedEventKeys, diagnostics);
         const seen = new Set();
         for (const evaluation of payload.event_evaluations) {
             if (!evaluation || typeof evaluation !== 'object' || Array.isArray(evaluation)) {
@@ -157,7 +160,18 @@ export function validateProgressionPayload(payload, options = {}) {
                 throw new Error(`World Progression event evaluation "${key}" is missing its reason.`);
             }
             discardImpossibleConfiguredMatches(evaluation, options);
-            for (const field of MATCH_FIELDS) validateMatchedCondition(evaluation, field, options);
+            for (const field of MATCH_FIELDS) {
+                try {
+                    validateMatchedCondition(evaluation, field, options);
+                } catch (error) {
+                    // A claimed match that cannot be grounded is worth nothing,
+                    // while failing the whole pass over it costs a repair call
+                    // and retries: drop the claim and keep the acknowledgement.
+                    if (options.lenientMatches === false) throw error;
+                    delete evaluation[field];
+                    diagnostics.push({ code: 'match_downgraded', key, field, reason: String(error?.message || error).slice(0, 200) });
+                }
+            }
             seen.add(key);
         }
         const missing = expectedEventKeys.filter(key => !seen.has(key));
@@ -167,13 +181,52 @@ export function validateProgressionPayload(payload, options = {}) {
     } else if (payload.event_evaluations.length) {
         throw new Error('World Progression returned event evaluations when no triggerable events were supplied.');
     }
+    appendOutputDiagnostics(payload, diagnostics);
     return payload;
+}
+
+/**
+ * Assisted profiles: a missing, duplicate, unknown or unacknowledged
+ * evaluation is settled locally as "not matched" instead of through a repair
+ * call that re-sends the whole prompt. Nothing here can create a match.
+ */
+function reconcileAcknowledgements(payload, expectedEventKeys, diagnostics) {
+    const expected = new Set(expectedEventKeys);
+    const seen = new Set();
+    const kept = [];
+    for (const evaluation of payload.event_evaluations) {
+        if (!evaluation || typeof evaluation !== 'object' || Array.isArray(evaluation)) {
+            diagnostics.push({ code: 'evaluation_dropped', reason: 'not an object' });
+            continue;
+        }
+        const key = typeof evaluation.key === 'string' ? evaluation.key : '';
+        if (!expected.has(key)) { diagnostics.push({ code: 'evaluation_dropped', key, reason: 'unknown key' }); continue; }
+        if (seen.has(key)) { diagnostics.push({ code: 'evaluation_dropped', key, reason: 'duplicate key' }); continue; }
+        if (evaluation.evaluated !== true) { evaluation.evaluated = true; diagnostics.push({ code: 'evaluation_marked_evaluated', key }); }
+        if (typeof evaluation.reason !== 'string' || !evaluation.reason.trim()) {
+            evaluation.reason = 'No reason given by the model.';
+            diagnostics.push({ code: 'evaluation_reason_filled', key });
+        }
+        seen.add(key);
+        kept.push(evaluation);
+    }
+    for (const key of expectedEventKeys) {
+        if (seen.has(key)) continue;
+        kept.push({ key, evaluated: true, reason: 'Not evaluated by the model; treated as not matched.' });
+        diagnostics.push({ code: 'acknowledgement_filled', key });
+    }
+    payload.event_evaluations = kept;
 }
 
 export async function requestProgressionPatch(settings, messages, signal, options = {}) {
     const requestSettings = progressionRequestSettings(settings);
     requestSettings.telemetryKind = 'progression';
-    const validationOptions = { discardImpossibleMatches: true, ...options };
+    const validationOptions = {
+        discardImpossibleMatches: true,
+        lenientMatches: true,
+        lenientAcknowledgements: Boolean(options.assisted),
+        ...options,
+    };
     const format = normalizeOutputFormat(settings.maintenanceOutputFormat);
     const requestMessages = appendDslEvaluationKeyContract(
         prepareOutputMessages(messages, { format, task: 'progression' }),

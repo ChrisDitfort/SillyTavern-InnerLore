@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import { createEmptyStore } from '../core.js';
 import { installMockInnerLoreStorage } from './mock-storage-server.mjs';
+import { createEventListeners } from './mock-event-source.mjs';
 
 installMockInnerLoreStorage();
 
@@ -29,8 +30,8 @@ const events = {
 
 // Loads the extension against a mocked SillyTavern whose background requests
 // stay open until the test answers them.
-async function loadInnerLore(chatId, slots) {
-    const listeners = new Map();
+async function loadInnerLore(chatId, slots, { novelai = false } = {}) {
+    const listeners = createEventListeners();
     const chat = [{ is_user: false, is_system: false, name: 'Narrator', mes: 'The gate stands shut.' }];
     const store = createEmptyStore(chatId);
     store.lastProcessedIndex = 0;
@@ -39,9 +40,11 @@ async function loadInnerLore(chatId, slots) {
         disabledExtensions: [],
         connectionManager: {
             selectedProfile: 'test-profile',
-            profiles: [{ id: 'test-profile', name: 'Test Profile', model: 'mock/model' }],
+            profiles: [{ id: 'test-profile', name: 'Test Profile', model: 'mock/model', ...(novelai ? { api: 'custom', 'api-url': 'https://text.novelai.net/oa/v1' } : {}) }],
         },
         inner_lore: {
+            // These tests cover other passes; the game ledger has its own.
+            gameEnabled: false,
             enabled: true,
             autoUpdate: true,
             innerSelfEnabled: true,
@@ -66,6 +69,7 @@ async function loadInnerLore(chatId, slots) {
         chatId,
         name1: 'Jet',
         name2: 'Narrator',
+        ...(novelai ? { mainApi: 'openai', chatCompletionSettings: { chat_completion_source: 'custom', custom_url: 'https://text.novelai.net/oa/v1', custom_model: 'xialong-v1' } } : {}),
         getCurrentChatId: () => chatId,
         getCharacterCardFields: () => ({}),
         saveSettingsDebounced: () => {},
@@ -73,7 +77,7 @@ async function loadInnerLore(chatId, slots) {
         saveMetadataDebounced: () => {},
         setExtensionPrompt: () => {},
         renderExtensionTemplateAsync: async () => '',
-        eventSource: { on: (event, callback) => listeners.set(event, callback) },
+        eventSource: { on: listeners.on },
         eventTypes: events,
         SlashCommandParser: null,
         SlashCommand: null,
@@ -153,4 +157,24 @@ test('with two slots the story never waits, and a new pass waits for the finishe
     assert.match(world.requests[1].text, /a hundred candles/u, 'the next pass reads the finished reply');
     world.requests[1].answer();
     await waitFor(() => world.chatMetadata.inner_lore.lastProcessedIndex === world.chat.length - 1);
+});
+
+test('on a one-request provider the story stops the running pass, which re-runs after the reply; the same watermark waits the second time', async () => {
+    const world = await loadInnerLore('preempt-chat', 2, { novelai: true });
+    await landReplyAndStartPass(world, 'I knock.', 'The first door swings inward.');
+
+    const story = await startStory(world, 'I step through.');
+    assert.equal(story.leftAtOnce, true, 'the story preempts the pass instead of waiting for NovelAI');
+    assert.equal(world.requests.length, 1, 'no new background request while the story is written');
+    world.chat.push({ is_user: false, is_system: false, name: 'Narrator', mes: 'The hall beyond is dark.' });
+    world.listeners.get(events.GENERATION_ENDED)();
+    world.listeners.get(events.MESSAGE_RECEIVED)(world.chat.length - 1);
+    await waitFor(() => world.requests.length === 2, 8_000);
+    assert.match(world.requests[1].text, /first door swings inward[\s\S]*hall beyond is dark/u, 'the re-run covers the stopped turn and the new reply');
+
+    const again = await startStory(world, 'I light a lamp.');
+    assert.equal(again.leftAtOnce, false, 'a second departure on the same watermark waits for the pass');
+    world.requests[1].answer();
+    await again.departed;
+    world.listeners.get(events.GENERATION_ENDED)();
 });

@@ -5,6 +5,7 @@ import { createEmptyStore } from '../core.js';
 import { createProgressionState } from '../progression.js';
 import { upsertTriggerEventDefinition } from '../trigger-events.js';
 import { installMockInnerLoreStorage } from './mock-storage-server.mjs';
+import { createEventListeners } from './mock-event-source.mjs';
 
 installMockInnerLoreStorage();
 
@@ -17,7 +18,7 @@ const waitFor = async (predicate, timeout = 2_000) => {
 };
 
 test('MESSAGE_SENT injects a newly typed explicit time skip into the same generation', async () => {
-    const listeners = new Map();
+    const listeners = createEventListeners();
     const prompts = new Map();
     const chat = Array.from({ length: 23 }, (_, index) => ({
         is_user: index % 2 === 1,
@@ -54,6 +55,8 @@ test('MESSAGE_SENT injects a newly typed explicit time skip into the same genera
         disabledExtensions: [],
         connectionManager: { selectedProfile: '', profiles: [] },
         inner_lore: {
+            // These tests cover other passes; the game ledger has its own.
+            gameEnabled: false,
             enabled: true,
             autoUpdate: false,
             innerSelfEnabled: true,
@@ -88,7 +91,7 @@ test('MESSAGE_SENT injects a newly typed explicit time skip into the same genera
         saveMetadataDebounced: () => {},
         setExtensionPrompt: (key, value) => prompts.set(key, value),
         renderExtensionTemplateAsync: async () => '',
-        eventSource: { on: (event, callback) => listeners.set(event, callback) },
+        eventSource: { on: listeners.on },
         eventTypes: events,
         SlashCommandParser: null,
         SlashCommand: null,

@@ -827,6 +827,8 @@ export function createEmptyStore(chatId = '') {
         entities: {},
         brains: {},
         progression: null,
+        // The game ledger's journal (game.js); null until the game layer runs.
+        game: null,
         lastProcessedIndex: -1,
         processedFingerprints: {},
         checkpoints: [],
@@ -876,6 +878,7 @@ export function normalizeStore(value, chatId = '') {
         if (brain) store.brains[brain.id] = brain;
     }
     store.progression = store.progression && typeof store.progression === 'object' ? store.progression : null;
+    store.game = store.game && typeof store.game === 'object' ? store.game : null;
     store.processedFingerprints = store.processedFingerprints && typeof store.processedFingerprints === 'object'
         ? store.processedFingerprints
         : {};
@@ -1144,6 +1147,17 @@ export function extractExplicitChoiceSet(value) {
  * generation. It quotes the newest user turn and, only when explicit syntax is
  * present, makes its closed option set machine-obvious near the end of context.
  */
+/**
+ * One line for smaller story models: who is present, by their established
+ * names, and how to end. Appended to the turn contract on limited providers.
+ */
+export function buildCastLock(names, playerName) {
+    const player = cleanString(playerName, 100) || 'the player';
+    const cast = uniqueStrings((Array.isArray(names) ? names : []).filter(name => canonicalNameKey(name) && canonicalNameKey(name) !== canonicalNameKey(player)), 12);
+    return `Cast lock: ${cast.length ? `present are ${cast.join(', ')}` : 'nobody else is established as present'}; use these names and each person's established pronouns exactly as in the previous replies; introduce no new named person unless the facts above list them, and a person without a name stays unnamed. End on an action or line from someone present that invites ${player}'s next move.
+Style: 200 to 350 words, and stop when the beat lands. The camera stays beside ${player}: narrate what the world does around ${player}, never ${player}'s own actions, words or feelings beyond the command, and never stage directions ("the focus shifts"). Call ${player} "you"; call everyone else by their established name, every time. Describe people by what the scene needs (face, hands, bearing, clothing), never lingering on bodies; one adjective per noun is plenty; no modern or chemical vocabulary. Other people's private thoughts may appear in italics, in their own voices; ${player}'s never.`;
+}
+
 export function buildLatestTurnContract(messages, options = {}) {
     const chat = Array.isArray(messages) ? messages : [];
     const latestUser = [...chat].reverse().find(message => (
@@ -1245,6 +1259,12 @@ export function buildLatestTurnContract(messages, options = {}) {
         'If the user requests a vote, judgment, procedure, test, or outcome, carry it through to a clear result in this reply unless the user explicitly pauses it.',
         'IDENTITY GATE: Give recurring or consequential speaking and deciding characters a stable proper name together with their role. Repair an established recurring role-placeholder at its first relevant appearance in the form “Name, the Role.” A transient one-scene actor supplied by an editor event may remain role-based unless canon or the event supplies a name; never invent a proper name merely to satisfy event delivery. Preserve deliberate canonical anonymity.',
         'Do not end mid-sentence or mid-quotation.',
+        ...(options.guidedPlay ? [
+            'GUIDED PLAY: a short command in the newest user turn is a declared action already under way; render any line it asks the player character to say only as reported gist. After the prose, close with a ```choices block of 3 to 5 next moves, one per line as go:, talk:, do: or look: followed by a command of at most eight words. Nothing follows the block.',
+        ] : []),
+        '<prose_contract priority="hard">',
+        'Fresh prose: do not reuse a sentence, image or verbal tic from the previous replies. End on a concrete action or spoken line, never on a sentence that explains the mood or what the moment means.',
+        '</prose_contract>',
         '</latest_turn_contract>',
     );
     return lines.join('\n');
@@ -1465,25 +1485,76 @@ function identityDescriptorKey(value) {
     return words.join(' ');
 }
 
-function looksLikeProperName(value) {
+const DEPARTED_ONE_OFF = /\b(?:depart(?:s|ed|ing)?|drives? (?:off|away)|driving (?:off|away)|drove (?:off|away)|rides? (?:off|away)|riding (?:off|away)|rode (?:off|away)|rattles? (?:off|away)|rattling (?:off|away)|rattled (?:off|away)|gone from (?:town|the town|port|the port)|leaving (?:town|port|the (?:town|city|port|village|inn))|left (?:town|port|the (?:town|city|port|village))|after dropping (?:off|him|her|them)|dropping off a passenger|out of the story|rode on|drove on|has (?:left|gone)|on (?:his|her|their) way (?:out|back|north|south|east|west)|no further (?:role|part))\b/iu;
+
+const NAME_PARTICLES = new Set(['of', 'the', 'de', 'van', 'von', 'le', 'la', 'du', 'da', 'del', 'di']);
+
+/** Words that describe a person without naming them ("the lean sailor", "Old Man"). */
+const DESCRIPTOR_WORDS = new Set([
+    'man', 'woman', 'boy', 'girl', 'lad', 'lass', 'youth', 'child', 'stranger', 'newcomer', 'traveller', 'traveler',
+    'passenger', 'visitor', 'guest', 'customer', 'patron', 'regular', 'local', 'villager', 'townsman', 'townswoman',
+    'peasant', 'farmer', 'fisherman', 'fisherwoman', 'fisher', 'sailor', 'seaman', 'mariner', 'deckhand', 'dockhand',
+    'docker', 'porter', 'boatman', 'ferryman', 'mate', 'bosun', 'smuggler', 'pirate', 'merchant', 'trader', 'vendor',
+    'seller', 'hawker', 'peddler', 'shopkeeper', 'innkeeper', 'landlord', 'landlady', 'barkeep', 'barman', 'barmaid',
+    'tapster', 'keeper', 'host', 'hostess', 'cook', 'maid', 'servant', 'steward', 'clerk', 'scribe', 'courier',
+    'messenger', 'runner', 'driver', 'coachman', 'carter', 'groom', 'ostler', 'stablehand', 'guard', 'guardsman',
+    'watchman', 'sentry', 'soldier', 'officer', 'sergeant', 'constable', 'bailiff', 'sheriff', 'magistrate', 'priest',
+    'monk', 'nun', 'cleric', 'healer', 'physician', 'surgeon', 'apothecary', 'herbalist', 'witch', 'wizard', 'mage',
+    'smith', 'blacksmith', 'cobbler', 'tailor', 'weaver', 'miller', 'baker', 'butcher', 'brewer', 'tanner', 'carpenter',
+    'mason', 'beggar', 'thief', 'cutpurse', 'drunk', 'drunkard', 'gambler', 'harlot', 'orphan', 'widow', 'widower',
+    'hermit', 'pilgrim', 'scholar', 'student', 'apprentice', 'journeyman', 'noble', 'knight', 'squire', 'page', 'herald',
+    'bard', 'minstrel', 'singer', 'dancer', 'fool', 'jester', 'crier', 'figure', 'person', 'fellow', 'gentleman',
+    'rider', 'archer', 'hunter', 'trapper', 'woodsman', 'shepherd', 'herder', 'miner', 'prisoner', 'captive', 'corpse',
+    'body', 'voice', 'shape', 'silhouette', 'attendant', 'bouncer', 'doorman', 'urchin', 'tout', 'lookout', 'crewman',
+    'old', 'young', 'elderly', 'aged', 'little', 'big', 'small', 'tall', 'short', 'lean', 'thin', 'fat', 'stout',
+    'broad', 'burly', 'hulking', 'wiry', 'gaunt', 'scarred', 'bearded', 'grey', 'gray', 'grizzled', 'dark', 'pale',
+    'hooded', 'cloaked', 'masked', 'veiled', 'ragged', 'drunken', 'sleeping', 'sleepy', 'silent', 'quiet', 'loud',
+    'nervous', 'angry', 'weeping', 'laughing', 'first', 'second', 'third', 'other', 'another', 'unknown', 'unnamed',
+    'mysterious', 'strange', 'rough', 'tough', 'wounded', 'injured', 'sick', 'blind', 'lame', 'limping', 'eyed',
+    'haired', 'stained', 'fingered', 'armed', 'legged', 'handed', 'faced', 'skinned', 'tar', 'salt', 'sea', 'one',
+    'coach', 'cart', 'wagon', 'ship', 'boat', 'inn', 'tavern', 'bar', 'shop', 'stall', 'dock', 'harbour', 'harbor',
+    'quay', 'street', 'town', 'city', 'village', 'temple', 'church', 'market', 'gate', 'tower', 'castle', 'palace',
+    'court', 'watch', 'guild', 'crew', 'company', 'caravan', 'stable', 'kitchen', 'house', 'hall', 'mill', 'farm',
+    'wife', 'husband', 'daughter', 'son', 'sister', 'cousin', 'uncle', 'aunt', 'friend', 'companion', 'partner',
+]);
+
+function looksLikeDescriptor(value) {
+    const words = canonicalNameKey(value).split(/\s+/u).filter(Boolean);
+    return words.length > 0 && words.every(word => DESCRIPTOR_WORDS.has(word) || GENERIC_IDENTITY_PREFIXES.has(word) || NAME_PARTICLES.has(word));
+}
+
+export function looksLikeProperName(value) {
     const name = normalizeName(value);
     if (!name || name.length > 60) return false;
     if (/^(?:the|a|an)\s+/iu.test(name)) return false;
-    // A public name is 1-4 capitalized words (Hobbe, Hobbe of Mill Lane).
-    return /^(?:[A-Z][\p{L}'’-]*(?:\s+(?:of|the)\s+|[A-Z][\p{L}'’-]*\s*)?)$/u.test(name)
-        && /^[A-Z]/.test(name);
+    // A public name is 1-4 capitalized words, optionally joined by a particle
+    // (Hobbe, Tobbe Rusk, Hobbe of Mill Lane). A run of titles and
+    // descriptors ("Old Man", "The Chancellor") is not one.
+    if (!/^[A-Z][\p{L}'’-]*(?:\s+(?:(?:of|the|de|van|von|le|la|du|da|del|di)\s+)?[A-Z][\p{L}'’-]*){0,3}$/u.test(name)) return false;
+    // "Elara's Father" is a relation to a name, not a name.
+    const words = name.split(/\s+/u);
+    const rest = words.filter(word => !/['’]s$/u.test(word));
+    if (rest.length < words.length && (!rest.length || looksLikeDescriptor(rest.join(' ')))) return false;
+    return !looksLikeDescriptor(name);
 }
 
 function sharesDescriptorToken(descriptor, candidate) {
+    // Only the distinctive part of a descriptor counts: "Old Man" and "Old
+    // Dunnock" share nothing that identifies a person.
     const tokens = new Set(identityDescriptorKey(descriptor) ? descriptor.toLowerCase().split(/\s+/u) : []);
+    for (const word of [...tokens]) if (DESCRIPTOR_WORDS.has(word) || GENERIC_IDENTITY_PREFIXES.has(word)) tokens.delete(word);
     if (!tokens.size) return false;
     return candidate.toLowerCase().split(/\s+/u).some(word => tokens.has(word));
 }
 
 function recordHasDescriptorIdentity(record) {
-    if (normalizeIdentityKind(record?.identityKind) === 'descriptor') return true;
+    const kind = normalizeIdentityKind(record?.identityKind);
+    if (kind === 'descriptor') return true;
     const name = normalizeName(record?.name);
     if (/^(?:the|a|an)\s+/iu.test(name)) return true;
+    // "Lean Sailor" or "Old Man" filed without identity_kind is still a
+    // descriptor; a provider that omits the field must not freeze the name.
+    if (kind !== 'public_name' && looksLikeDescriptor(name)) return true;
     const descriptorKey = identityDescriptorKey(name);
     return Boolean(descriptorKey) && uniqueStrings(record?.aliases, 30).some(alias => (
         /^(?:the|a|an)\s+/iu.test(alias)
@@ -1648,6 +1719,215 @@ export function reconcileCanonicalEntities(store) {
     return { reconciled: removedIds.length, changedIds: uniqueStrings(changedIds), removedIds: uniqueStrings(removedIds) };
 }
 
+/** Canonical keys of the player's record (name and aliases), for protection and mind filtering. */
+export function playerEntityKeys(store, playerName = '') {
+    const keys = new Set();
+    if (canonicalNameKey(playerName)) keys.add(canonicalNameKey(playerName));
+    for (const record of Object.values(store?.entities || {})) {
+        if (!record?.player) continue;
+        for (const name of [record.name, ...(record.aliases || [])]) if (canonicalNameKey(name)) keys.add(canonicalNameKey(name));
+    }
+    return keys;
+}
+
+/**
+ * The player's own record: the scene anchors on it, so it must exist even
+ * when a provider never writes one, and it is never dropped by the per-pass
+ * caps. Returns the record, existing or created.
+ */
+export function ensurePlayerEntity(store, options = {}) {
+    const name = normalizeName(options.name);
+    if (!store?.entities || !name || name.length < 2) return null;
+    const [, existing] = findEntityRecord(store, { type: 'character', name });
+    if (existing) {
+        if (!existing.player) existing.player = true;
+        return existing;
+    }
+    const messageIndex = Number.isInteger(options.messageIndex) ? options.messageIndex : -1;
+    const record = makeEntityRecord({ type: 'character', name, identity_kind: 'public_name' }, messageIndex);
+    record.player = true;
+    record.importance = 100;
+    record.summary = cleanString(options.persona, 300) || `${name}, the player character.`;
+    store.entities[record.id] = record;
+    return record;
+}
+
+const descriptorPhrase = record => {
+    const key = identityDescriptorKey(record?.name);
+    return key && key.split(' ').length >= 2 ? key : '';
+};
+function recordTextKey(record) {
+    const facts = (record?.facts || []).map(fact => (typeof fact === 'string' ? fact : fact?.text || fact?.statement || ''));
+    return ` ${canonicalNameKey([record?.summary, record?.description, record?.currentState, ...facts, ...(record?.history || [])].filter(Boolean).join(' . '))} `;
+}
+
+/**
+ * A person the story first tracked by a descriptor ("Lean Sailor") and now
+ * names ("Tobbe Rusk") must stay one record and one mind. Providers often
+ * emit the name as a brand-new record with no alias; this rewrites such an
+ * operation onto the descriptor record when exactly one descriptor can be
+ * the same person: the operation names the descriptor as an alias, its text
+ * uses the descriptor phrase, the descriptor's own text names the person, or
+ * another operation in the batch adds the name to that descriptor. Entity
+ * operations carry the name in `name`, mind operations in `character`.
+ * Returns diagnostics; the operations are rewritten in place.
+ */
+export function linkDescriptorOperations(store, operations, options = {}) {
+    const diagnostics = [];
+    const ops = (Array.isArray(operations) ? operations : []).filter(op => op && typeof op === 'object');
+    const minds = options.minds === true;
+    const nameField = minds ? 'character' : 'name';
+    const people = Object.values(store?.entities || {})
+        .filter(record => ['character', 'creature'].includes(normalizeEntityType(record?.type)) && record.enabled !== false && !record.player);
+    const descriptors = people.filter(record => recordHasDescriptorIdentity(record)
+        && !(record.aliases || []).some(alias => looksLikeProperName(alias)));
+    if (!descriptors.length) return diagnostics;
+    // Every established name, the player's included: an operation on one of
+    // them is an update, never a reveal of a descriptor person.
+    const known = new Set([
+        ...Object.values(store?.entities || {}).flatMap(record => [record?.name, ...(record?.aliases || [])]),
+        ...playerEntityKeys(store, options.playerName),
+    ].map(canonicalNameKey).filter(Boolean));
+    const batchReveals = new Map();
+    for (const op of ops) {
+        const own = canonicalNameKey(op[nameField] ?? op.name);
+        const target = descriptors.find(record => [record.name, ...(record.aliases || [])].some(value => canonicalNameKey(value) === own));
+        if (!target) continue;
+        for (const alias of operationArray(op, 'aliases', 'aliases')) if (looksLikeProperName(alias)) batchReveals.set(canonicalNameKey(alias), target);
+    }
+    for (const op of ops) {
+        if (!minds && !['character', 'creature'].includes(normalizeEntityType(op.type))) continue;
+        const name = normalizeName(op[nameField] ?? op.name);
+        const key = canonicalNameKey(name);
+        if (!key || known.has(key) || !looksLikeProperName(name)) continue;
+        const aliasKeys = new Set(operationArray(op, 'aliases', 'aliases').map(canonicalNameKey));
+        // The descriptor phrase must describe this person ("A lean sailor off
+        // the Grey Tern"), not merely be mentioned ("dropped off by the coach driver").
+        const head = ` ${canonicalNameKey(String(op.summary ?? op.description ?? op.current_state ?? op.currentState ?? '').slice(0, 90))} `;
+        const candidates = descriptors.filter(record => {
+            const recordKeys = [record.name, ...(record.aliases || [])].map(canonicalNameKey);
+            if (recordKeys.some(value => aliasKeys.has(value))) return true;
+            const phrase = descriptorPhrase(record);
+            if (phrase && head.includes(` ${phrase} `)) return true;
+            if (recordTextKey(record).includes(` ${key} `)) return true;
+            return batchReveals.get(key) === record;
+        });
+        if (candidates.length !== 1) {
+            if (candidates.length > 1) diagnostics.push({ code: 'descriptor_link_ambiguous', name, candidates: candidates.map(record => record.name) });
+            continue;
+        }
+        const [record] = candidates;
+        op.aliases = uniqueStrings([...operationArray(op, 'aliases', 'aliases'), record.name], 60);
+        op.promote_name = true;
+        op.identity_kind = 'public_name';
+        if (op.identityKind !== undefined) op.identityKind = 'public_name';
+        known.add(key);
+        diagnostics.push({ code: 'descriptor_linked', name, descriptor: record.name });
+    }
+    return diagnostics;
+}
+
+/**
+ * Existing duplicates (a descriptor record and a proper-name record for the
+ * same person, created in different passes): fold the descriptor into the
+ * named record when exactly one named record can be that person. The minds
+ * follow through reconcileAnchoredBrains once the descriptor is an alias.
+ */
+export function reconcileDescriptorDuplicates(store) {
+    const changedIds = [];
+    const removedIds = [];
+    const folds = [];
+    const entries = Object.entries(store?.entities || {})
+        .filter(([, record]) => ['character', 'creature'].includes(normalizeEntityType(record?.type)) && record.enabled !== false && !record.player);
+    const named = entries.filter(([, record]) => looksLikeProperName(record.name) && !recordHasDescriptorIdentity(record));
+    for (const [descriptorId, descriptor] of entries) {
+        if (!store.entities[descriptorId] || !recordHasDescriptorIdentity(descriptor)) continue;
+        if ((descriptor.aliases || []).some(alias => looksLikeProperName(alias))) continue;
+        const descriptorKeys = [descriptor.name, ...(descriptor.aliases || [])].map(canonicalNameKey);
+        const phrase = descriptorPhrase(descriptor);
+        const descriptorText = recordTextKey(descriptor);
+        const matches = named.filter(([id, record]) => {
+            if (id === descriptorId || !store.entities[id]) return false;
+            if ((record.aliases || []).some(alias => descriptorKeys.includes(canonicalNameKey(alias)))) return true;
+            if (descriptorText.includes(` ${canonicalNameKey(record.name)} `)) return true;
+            return Boolean(phrase) && recordTextKey(record).includes(` ${phrase} `);
+        });
+        if (matches.length !== 1) continue;
+        const [primaryId, primary] = matches[0];
+        mergeCanonicalEntityPair(primary, descriptor);
+        primary.identityKind = 'public_name';
+        delete store.entities[descriptorId];
+        removedIds.push(descriptorId);
+        changedIds.push(primaryId);
+        folds.push({ from: descriptor.name, to: primary.name, aliases: primary.aliases || [] });
+    }
+    return { reconciled: removedIds.length, changedIds: uniqueStrings(changedIds), removedIds: uniqueStrings(removedIds), folds };
+}
+
+const COMMON_CAPITALISED = new Set([
+    'i', 'the', 'a', 'an', 'and', 'but', 'or', 'so', 'then', 'when', 'if', 'you', 'your', 'he', 'she', 'it', 'they',
+    'we', 'his', 'her', 'their', 'no', 'yes', 'not', 'what', 'who', 'how', 'why', 'where', 'there', 'here', 'this',
+    'that', 'these', 'those', 'all', 'some', 'any', 'every', 'each', 'most', 'more', 'less', 'much', 'many', 'now',
+    'still', 'just', 'only', 'even', 'well', 'oh', 'ah', 'aye', 'nay', 'sir', 'madam', 'mister', 'miss', 'mrs', 'mr',
+    'ma', 'am', 'god', 'gods', 'hell', 'damn', 'right', 'left', 'north', 'south', 'east', 'west', 'come', 'go',
+    'look', 'wait', 'stop', 'please', 'thank', 'thanks', 'good', 'fine', 'true', 'nothing', 'something', 'anyone',
+    'someone', 'nobody', 'everyone', 'two', 'three', 'four', 'five', 'last', 'next', 'tonight', 'tomorrow',
+    'today', 'yesterday', 'morning', 'evening', 'night', 'day', 'inside', 'outside', 'behind', 'before', 'after',
+    'later', 'again', 'once', 'twice', 'maybe', 'perhaps', 'because', 'besides', 'anyway', 'meanwhile', 'instead',
+    'enough', 'both', 'half', 'none', 'same', 'such', 'very', 'too', 'also', 'ever', 'never', 'always', 'already',
+    'almost', 'rather', 'quite', 'indeed', 'hello', 'goodbye', 'farewell', 'cheers', 'ha', 'hm', 'hmm', 'eh', 'huh',
+    'ay', 'yeah', 'yep', 'nope', 'ok', 'okay', 'shared', 'room', 'rain', 'wind', 'storm', 'below', 'above', 'beyond',
+    'across', 'along', 'around', 'through', 'under', 'over', 'past', 'near', 'at', 'in', 'on', 'by', 'from', 'to',
+    'with', 'without', 'off', 'out', 'up', 'down', 'into', 'onto', 'upon', 'among', 'between', 'during', 'until',
+    'while', 'as', 'for', 'of', 'nor', 'yet', 'though', 'although', 'whether', 'unless', 'since', 'somewhere',
+    'nowhere', 'everywhere', 'elsewhere', 'away', 'back', 'forward', 'home', 'ahead', 'aside', 'together', 'apart',
+    'suddenly', 'slowly', 'quickly', 'finally', 'soon', 'late', 'early', 'long', 'far', 'close', 'high', 'low',
+    'deep', 'light', 'darkness', 'silence', 'inside', 'beneath', 'behind', 'toward', 'towards', 'against', 'about',
+    'like', 'than', 'but', 'except', 'despite', 'whatever', 'whoever', 'however', 'wherever', 'whenever', 'somehow',
+    'nobody', 'nothing', 'anything', 'everything', 'thus', 'hence', 'therefore', 'otherwise', 'else', 'elsewise',
+]);
+
+/**
+ * Proper names in a passage that match no known name: candidates for a new
+ * record, or the revealed name of someone tracked by a descriptor. Capitalised
+ * runs of up to three words; a single capitalised word at a sentence or
+ * quotation start is ignored. Returns [{ name, count }] by frequency.
+ */
+export function passageProperNames(text, options = {}) {
+    const known = new Set((options.known || []).map(canonicalNameKey).filter(Boolean));
+    const player = canonicalNameKey(options.player);
+    const body = String(text || '').replace(/\[message[^\]\n]*\]/gu, ' ');
+    const found = new Map();
+    const pattern = /(^|[\s(“"'‘-])([A-Z][\p{L}'’-]+(?:\s+(?:(?:of|the|de|van|von|le|la|du|da|del|di)\s+)?[A-Z][\p{L}'’-]+){0,2})/gu;
+    for (const match of body.matchAll(pattern)) {
+        const before = body.slice(Math.max(0, match.index - 4), match.index + match[1].length);
+        const sentenceStart = match.index === 0 || /[.!?:;\n—]\s*["“'‘]?\s*$/u.test(before) || /["“'‘]$/u.test(match[1]);
+        const words = match[2].replace(/['’]s$/u, '').split(/\s+/u);
+        // "Off the Grey Tern", "Below Rope Street": a sentence-initial common
+        // word is capitalised by position; the name starts after it.
+        while (words.length && (COMMON_CAPITALISED.has(words[0].toLowerCase()) || NAME_PARTICLES.has(words[0].toLowerCase()))) words.shift();
+        if (!words.length || words.some(word => COMMON_CAPITALISED.has(word.toLowerCase()))) continue;
+        if (sentenceStart && words.length < 2) continue;
+        const name = words.join(' ');
+        if (!looksLikeProperName(name)) continue;
+        const key = canonicalNameKey(name);
+        if (!key || known.has(key) || key === player) continue;
+        if ([...known].some(value => ` ${value} `.includes(` ${key} `))) continue;
+        const entry = found.get(key) || { name, count: 0 };
+        entry.count += 1;
+        found.set(key, entry);
+    }
+    return [...found.values()].sort((a, b) => b.count - a.count || a.name.localeCompare(b.name)).slice(0, options.limit ?? 12);
+}
+
+/** People tracked only by a descriptor, with no proper name revealed yet. */
+export function unnamedDescriptorPeople(store) {
+    return Object.values(store?.entities || {})
+        .filter(record => ['character', 'creature'].includes(normalizeEntityType(record?.type)) && record.enabled !== false && !record.player)
+        .filter(record => recordHasDescriptorIdentity(record) && !(record.aliases || []).some(alias => looksLikeProperName(alias)))
+        .map(record => record.name);
+}
+
 function inferParentLocation(store, record, operation, messageIndex) {
     if (normalizeEntityType(record.type) !== 'location') return;
     const explicitName = normalizeName(
@@ -1692,6 +1972,16 @@ function inferParentLocation(store, record, operation, messageIndex) {
 
 const UNKNOWN_LOCATION = /^(?:unknown|none|null|n\/?a|nowhere|unclear|elsewhere)$/iu;
 const MOBILE_ENTITY_TYPES = new Set(['character', 'creature']);
+// A current_state opens with where the character is ("In his hut by the
+// lamp, having…"); places named after that are errands, history or views
+// ("given Jet the key to Room Two", "smoke rising from behind the Salt Lantern").
+const STATE_CLAUSE_BREAK = /[,;:()\u2013\u2014]|\b(?:having|while|after|though|because|until)\b/iu;
+const STATE_VIEW_CUE = /\b(?:sees?|saw|seen|visible|watch(?:es|ing)?|look(?:s|ing)?|gaz(?:es|ing)|peer(?:s|ing)?|star(?:es|ing)|glimpse[sd]?|towards?|distance|distant|horizon|beyond)\b/iu;
+
+function stateLocationClause(state) {
+    const clause = cleanString(state, 3_000).split(STATE_CLAUSE_BREAK).map(part => part.trim()).find(Boolean) || '';
+    return STATE_VIEW_CUE.test(clause) ? '' : clause;
+}
 
 /**
  * Resolve a place reference to a known location record. An exact name or
@@ -1765,8 +2055,9 @@ export function curatedLocationOf(entities, record) {
 /**
  * Track where a character or creature is right now. The curator's explicit
  * current_location wins (parent_location is accepted as the same claim for a
- * person); without one, a replaced current_state that names a known place
- * moves the record there. Omission never clears an established location.
+ * person); without one, a replaced current_state whose opening clause names a
+ * known place moves the record there. Omission never clears an established
+ * location.
  */
 function applyCurrentLocation(store, record, operation, currentState, messageIndex) {
     if (!MOBILE_ENTITY_TYPES.has(normalizeEntityType(record.type))) return;
@@ -1785,7 +2076,7 @@ function applyCurrentLocation(store, record, operation, currentState, messageInd
             if (!location) location = containingLocationFor(store.entities, declared);
         }
     } else if (currentState) {
-        location = resolveLocationReference(store.entities, currentState);
+        location = resolveLocationReference(store.entities, stateLocationClause(currentState));
         if (!location) return;
         name = location.name;
     } else {
@@ -1810,7 +2101,17 @@ export function mergeEntityOperations(store, operations, options = {}) {
     const maximumOperations = clamp(options.maximumOperations ?? 12, 1, 50);
     const messageIndex = Number.isInteger(options.messageIndex) ? options.messageIndex : -1;
     const initialReconciliation = reconcileCanonicalEntities(store);
+    const descriptorReconciliation = reconcileDescriptorDuplicates(store);
+    const linkDiagnostics = linkDescriptorOperations(store, operations);
     const anchoredBrains = reconcileAnchoredBrains(store);
+    // Two minds now anchored to one folded person become one mind, under the public name.
+    if (descriptorReconciliation.reconciled) {
+        consolidateMinds(store);
+        for (const fold of descriptorReconciliation.folds) promoteBrainIdentity(store, fold.from, fold.to, fold.aliases);
+    }
+    const protectedKeys = playerEntityKeys(store);
+    const isProtected = operation => uniqueStrings([operation?.name, ...(operation?.aliases || [])], 60)
+        .some(value => protectedKeys.has(canonicalNameKey(value)));
     const allOperations = Array.isArray(operations) ? operations : [];
     const prioritizedOperations = allOperations
         .map((operation, originalIndex) => {
@@ -1819,7 +2120,8 @@ export function mergeEntityOperations(store, operations, options = {}) {
             const [, existing] = operation && typeof operation === 'object'
                 ? findEntityRecord(store, operation)
                 : ['', null];
-            const worldStatePriority = ['location', 'item'].includes(type) ? 1 : 0;
+            // The player's record always survives the per-pass cap.
+            const worldStatePriority = isProtected(operation) ? 2 : ['location', 'item'].includes(type) ? 1 : 0;
             return { operation, originalIndex, existing: Boolean(existing), worldStatePriority };
         })
         .sort((a, b) => (
@@ -1833,13 +2135,15 @@ export function mergeEntityOperations(store, operations, options = {}) {
     const truncated = Math.max(0, allOperations.length - prioritizedOperations.length);
     const result = {
         created: 0,
-        updated: initialReconciliation.reconciled,
+        updated: initialReconciliation.reconciled + descriptorReconciliation.reconciled,
         skipped: truncated,
         truncated,
-        reconciled: initialReconciliation.reconciled,
+        reconciled: initialReconciliation.reconciled + descriptorReconciliation.reconciled,
         mindsAnchored: anchoredBrains.anchored,
-        changedIds: [...initialReconciliation.changedIds],
-        removedIds: [...initialReconciliation.removedIds],
+        linked: linkDiagnostics.filter(item => item.code === 'descriptor_linked').length,
+        linkDiagnostics,
+        changedIds: [...initialReconciliation.changedIds, ...descriptorReconciliation.changedIds],
+        removedIds: [...initialReconciliation.removedIds, ...descriptorReconciliation.removedIds],
     };
 
     for (const rawOperation of prioritizedOperations) {
@@ -1862,6 +2166,14 @@ export function mergeEntityOperations(store, operations, options = {}) {
         const importance = clamp(operation.importance ?? record?.importance ?? 50, 0, 100);
         if (isNew && importance < minimumImportance) {
             result.skipped++;
+            continue;
+        }
+        // A passer-by who has already left (the coach driver who drove off) is
+        // not worth a record, let alone a mind.
+        if (isNew && type === 'character' && importance < 60
+            && DEPARTED_ONE_OFF.test(`${operationText(operation, 'summary', 'summary', 2_500)} ${operationText(operation, 'currentState', 'current_state', 3_000)}`)) {
+            result.skipped++;
+            result.departedSkipped = (result.departedSkipped || 0) + 1;
             continue;
         }
 
@@ -2597,6 +2909,7 @@ export function mergeMindOperations(store, operations, options = {}) {
     const maximumSceneThoughts = clamp(options.maximumSceneThoughts ?? 4, 0, 20);
     const messageIndex = Number.isInteger(options.messageIndex) ? options.messageIndex : -1;
     const allOperations = Array.isArray(operations) ? operations : [];
+    const linkDiagnostics = linkDescriptorOperations(store, allOperations, { minds: true });
     const truncated = Math.max(0, allOperations.length - maximumOperations);
     const result = {
         created: 0,
@@ -2607,6 +2920,8 @@ export function mergeMindOperations(store, operations, options = {}) {
         deferredFacetCandidates: 0,
         promotedFacetCandidates: 0,
         consolidatedEntries: 0,
+        linked: linkDiagnostics.filter(item => item.code === 'descriptor_linked').length,
+        linkDiagnostics,
     };
 
     for (const operation of allOperations.slice(0, maximumOperations)) {
@@ -2622,6 +2937,13 @@ export function mergeMindOperations(store, operations, options = {}) {
 
         let [id, brain] = findBrain(store, operation);
         const isNew = !brain;
+        // A passer-by who has already left has no record (see mergeEntityOperations) and gets no mind either.
+        if (isNew && !findEntityRecord(store, { type: 'character', name, aliases: operation.aliases })[1]
+            && DEPARTED_ONE_OFF.test(JSON.stringify(operation.current_mind ?? operation.currentMind ?? '') + ' ' + String(operation.summary ?? ''))) {
+            result.skipped++;
+            result.departedSkipped = (result.departedSkipped || 0) + 1;
+            continue;
+        }
         const proposedIdentityKind = normalizeIdentityKind(operation.identityKind ?? operation.identity_kind);
         if (isNew) brain = makeBrain(name, messageIndex, proposedIdentityKind);
 
@@ -2918,6 +3240,16 @@ export function renderCompactEntity(record, maximumLength = 1_800, options = {})
     for (const thread of rankedContextValues(record.unresolved, focusText, 3)) {
         append('Open', clipAtBoundary(thread, Math.max(80, Math.floor(maximum * 0.3))), { externalConcepts: [] });
     }
+    // The recorded layout: where things are and how places connect. A place
+    // in the scene gets its whole layout in recorded order; others only the
+    // statements closest to the scene.
+    const layout = Object.values(record.spatial?.invariants || {})
+        .filter(invariant => invariant?.relation !== 'part_of')
+        .map(invariant => cleanString(invariant.statement, 400))
+        .filter(Boolean);
+    const layoutLimit = clamp(options.layoutLimit ?? 2, 0, 20);
+    const layoutLines = layout.length <= layoutLimit ? layout : rankedContextValues(layout, focusText, layoutLimit);
+    for (const statement of layoutLines) append('Layout', statement, { externalConcepts: [] });
     if (record.manualOverride && record.manualContent) append('Manual', record.manualContent, { externalConcepts: [] });
     if (record.summary) append('Overview', record.summary);
     for (const relationship of rankedContextValues(record.relationships, focusText, 3)) {
@@ -3108,6 +3440,7 @@ export function rankRelevantEntities(entities, recentText, options = {}) {
     const focusText = cleanString(scene?.focusText || latestText, 40_000);
     const sceneIds = new Set([
         scene?.location?.id,
+        ...(scene?.places || []).map(item => item.id),
         ...(scene?.participants || []).map(item => item.id),
         ...(scene?.objects || []).map(item => item.id),
     ].filter(Boolean));
@@ -3996,6 +4329,7 @@ export function compilePromptInjection(store, recentText, settings = {}) {
                 externalConcepts,
                 claimRegistry,
                 suppressCurrentState,
+                layoutLimit: item.record.type === 'location' && item.sceneRelevant ? 10 : 2,
                 diagnostics,
             });
             if (!text) continue;

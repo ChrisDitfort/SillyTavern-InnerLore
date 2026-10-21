@@ -1,4 +1,4 @@
-import { clamp, hashString } from './core.js?v=47';
+import { clamp, hashString } from './core.js?v=48';
 
 export const CONTEXT_CONFIGURATION_VERSION = 1;
 
@@ -150,21 +150,22 @@ export function setCustomContextMaximum(settings, maximumCharacters) {
  * state macro empty, the user persona, the character card
  * (description/personality/scenario), and the opening message. Everything
  * left ("gross") is split by percentage across response, history, scene,
- * minds, lore, and progression - history and response are shares of the same
+ * minds, lore, progression, and game - history and response are shares of the same
  * pie, not separate reservations. History rides inside the state macro, so a
  * derived split delivers the complete packet (state + history) on every
  * story generation while the response share guarantees reply room.
  */
 export const DERIVED_SHARE_DEFAULTS = Object.freeze({
     response: 10,
-    history: 40,
+    history: 37,
     scene: 5,
     minds: 20,
     lore: 15,
-    progression: 10,
+    progression: 8,
+    game: 5,
 });
 
-const SHARE_KEYS = ['response', 'history', 'scene', 'minds', 'lore', 'progression'];
+const SHARE_KEYS = ['response', 'history', 'scene', 'minds', 'lore', 'progression', 'game'];
 
 export function deriveContextBudgets(inputs = {}, settings = {}) {
     const contextLimitTokens = Math.max(0, Math.round(Number(inputs?.contextLimitTokens) || 0));
@@ -199,6 +200,7 @@ export function deriveContextBudgets(inputs = {}, settings = {}) {
         minds: shareTokens.minds * 4,
         lore: shareTokens.lore * 4,
         progression: shareTokens.progression * 4,
+        game: shareTokens.game * 4,
     };
     return {
         contextLimitTokens,
@@ -206,7 +208,7 @@ export function deriveContextBudgets(inputs = {}, settings = {}) {
         grossTokens,
         responseTokens: shareTokens.response,
         historyCharacters: shareTokens.history * 4,
-        maximumCharacters: sections.scene + sections.minds + sections.lore + sections.progression,
+        maximumCharacters: sections.scene + sections.minds + sections.lore + sections.progression + sections.game,
         sections,
         shares: raw,
     };
@@ -217,12 +219,14 @@ export function contextProfileOverrides(settings) {
     const mindsEnabled = settings.innerSelfEnabled !== false;
     const loreEnabled = settings.autoLoreEnabled !== false;
     const progressionEnabled = settings.worldProgressionEnabled !== false;
+    const gameEnabled = settings.gameEnabled !== false;
     const enabledOnly = {
         sections: {
             scene: { enabled: sceneEnabled },
             minds: { enabled: mindsEnabled },
             lore: { enabled: loreEnabled },
             progression: { enabled: progressionEnabled },
+            game: { enabled: gameEnabled },
         },
     };
     // Derived budgets are the extension's always-on behavior: whenever the
@@ -235,6 +239,8 @@ export function contextProfileOverrides(settings) {
         const mindCharacters = mindsEnabled ? Math.max(0, Math.round(derived.sections.minds)) : 0;
         const loreCharacters = loreEnabled ? Math.max(0, Math.round(derived.sections.lore)) : 0;
         const progressionCharacters = progressionEnabled ? Math.max(0, Math.round(derived.sections.progression)) : 0;
+        // A measurement taken before the game share existed has no game section.
+        const gameCharacters = gameEnabled ? Math.max(0, Math.round(derived.sections.game ?? 0)) : 0;
         return {
             maximumCharacters: Math.max(2_000, Math.round(derived.maximumCharacters)),
             graphDepth: integer(settings.contextGraphDepth, 1, 0, 1),
@@ -260,6 +266,7 @@ export function contextProfileOverrides(settings) {
                     maximumItems: integer(settings.progressionMaximumInjectedEntries, 8, 1, 30),
                     maximumCharacters: progressionCharacters,
                 },
+                game: { enabled: gameCharacters > 0, maximumItems: 1, maximumCharacters: gameCharacters },
             },
         };
     }
@@ -268,6 +275,7 @@ export function contextProfileOverrides(settings) {
     const mindCharacters = mindsEnabled ? integer(settings.brainInjectionBudget, 6_000, 0, 50_000) : 0;
     const loreCharacters = loreEnabled ? integer(settings.loreInjectionBudget, 8_000, 0, 60_000) : 0;
     const progressionCharacters = progressionEnabled ? integer(settings.progressionInjectionBudget, 5_000, 0, 40_000) : 0;
+    const gameCharacters = gameEnabled ? integer(settings.gameInjectionBudget, 3_000, 0, 20_000) : 0;
     return {
         maximumCharacters: integer(settings.contextMaximumCharacters, 18_000, 2_000, 100_000),
         graphDepth: integer(settings.contextGraphDepth, 1, 0, 1),
@@ -292,6 +300,7 @@ export function contextProfileOverrides(settings) {
                 maximumItems: integer(settings.progressionMaximumInjectedEntries, 8, 1, 30),
                 maximumCharacters: progressionCharacters,
             },
+            game: { enabled: gameCharacters > 0, maximumItems: 1, maximumCharacters: gameCharacters },
         },
     };
 }

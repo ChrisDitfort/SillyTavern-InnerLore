@@ -4,6 +4,7 @@ import test from 'node:test';
 import { createEmptyStore } from '../core.js';
 import { createProgressionState } from '../progression.js';
 import { installMockInnerLoreStorage } from './mock-storage-server.mjs';
+import { createEventListeners } from './mock-event-source.mjs';
 
 installMockInnerLoreStorage();
 
@@ -16,7 +17,7 @@ const waitFor = async (predicate, timeout = 8_000) => {
 };
 
 test('live integration counts completed ranges once and catches up after a progression-only failure', async () => {
-    const listeners = new Map();
+    const listeners = createEventListeners();
     const worlds = new Map();
     const chat = [
         { is_user: true, is_system: false, name: 'Jet', mes: 'I cross the room.' },
@@ -32,6 +33,8 @@ test('live integration counts completed ranges once and catches up after a progr
             profiles: [{ id: 'mock-profile', name: 'Mock Profile', model: 'mock/model' }],
         },
         inner_lore: {
+            // These tests cover other passes; the game ledger has its own.
+            gameEnabled: false,
             enabled: true,
             autoUpdate: true,
             innerSelfEnabled: true,
@@ -103,7 +106,7 @@ test('live integration counts completed ranges once and catches up after a progr
         saveMetadataDebounced: () => {},
         setExtensionPrompt: () => {},
         renderExtensionTemplateAsync: async () => '',
-        eventSource: { on: (event, callback) => listeners.set(event, callback) },
+        eventSource: { on: listeners.on },
         eventTypes: events,
         SlashCommandParser: null,
         SlashCommand: null,

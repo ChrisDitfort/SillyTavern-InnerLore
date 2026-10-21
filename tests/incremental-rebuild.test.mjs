@@ -41,6 +41,8 @@ function harness(chat, store, requestCounter) {
             profiles: [{ id: 'test-profile', name: 'Test Profile', model: 'mock/model' }],
         },
         inner_lore: {
+            // These tests cover other passes; the game ledger has its own.
+            gameEnabled: false,
             enabled: true,
             autoUpdate: true,
             innerSelfEnabled: true,

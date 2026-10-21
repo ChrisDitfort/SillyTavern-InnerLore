@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { createEmptyStore, mergeEntityOperations } from '../core.js?v=47';
+import { createEmptyStore, mergeEntityOperations } from '../core.js?v=48';
 import {
     anchorView,
     buildMapModel,

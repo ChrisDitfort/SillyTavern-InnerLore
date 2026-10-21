@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import { createEmptyStore, normalizeBrainRecord, snapshotMessageRange } from '../core.js';
 import { installMockInnerLoreStorage } from './mock-storage-server.mjs';
+import { createEventListeners } from './mock-event-source.mjs';
 
 const waitFor = async (predicate, timeout = 4_000) => {
     const started = Date.now();
@@ -15,7 +16,7 @@ const waitFor = async (predicate, timeout = 4_000) => {
 test('SillyTavern macros receive the prepared branch state without duplicate automatic injection', async t => {
     const mock = installMockInnerLoreStorage();
     t.after(() => mock.restore());
-    const listeners = new Map();
+    const listeners = createEventListeners();
     const prompts = new Map();
     const macros = new Map();
     const chat = [
@@ -40,6 +41,8 @@ test('SillyTavern macros receive the prepared branch state without duplicate aut
         disabledExtensions: [],
         connectionManager: { selectedProfile: '', profiles: [] },
         inner_lore: {
+            // These tests cover other passes; the game ledger has its own.
+            gameEnabled: false,
             enabled: true, autoUpdate: false, innerSelfEnabled: true, autoLoreEnabled: true,
             worldProgressionEnabled: false, contextDeliveryMode: 'macro', contextProfileId: 'balanced',
             serverContextTimeoutMs: 1_200, autoRebuildOnHistoryChange: false,
@@ -57,7 +60,7 @@ test('SillyTavern macros receive the prepared branch state without duplicate aut
         setExtensionPrompt: (key, prompt) => prompts.set(key, prompt),
         registerMacro: (name, handler) => macros.set(name, handler),
         renderExtensionTemplateAsync: async () => '',
-        eventSource: { on: (event, callback) => listeners.set(event, callback) }, eventTypes: events,
+        eventSource: { on: listeners.on }, eventTypes: events,
         SlashCommandParser: null, SlashCommand: null, ConnectionManagerRequestService: null,
     };
     globalThis.document = { activeElement: null, getElementById: () => null, querySelectorAll: () => [] };

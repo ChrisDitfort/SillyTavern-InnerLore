@@ -802,11 +802,10 @@ test('the InnerLore editor exposes every trigger-event control with unique DOM i
     }
     const ids = [...html.matchAll(/\sid="([^"]+)"/gu)].map(match => match[1]);
     assert.equal(new Set(ids).size, ids.length, 'settings controls must not have duplicate ids');
-    assert.match(html, /Create Draft/u);
-    assert.match(html, /Event names are labels only/u);
-    assert.match(html, /Save &amp; Arm Event/u);
-    assert.match(html, /Time trigger:<\/b> fire after this amount/u);
-    assert.match(html, /Enable and arm when saved/u);
+    assert.match(html, /id="il_add_trigger_event"[^>]*>.*Create<\/button>/u);
+    assert.match(html, /When it fires<\/span> <small>\(set at least one\)<\/small>/u);
+    assert.match(html, /id="il_save_trigger_event"[^>]*>.*Save Draft<\/button>/u, 'a new event starts as a disabled draft');
+    assert.match(source, /Its name is only a label/u, 'creating an event explains that its name does not trigger it');
     assert.match(source, /getElementById\('il_trigger_event_actor_scope'\)\?\.addEventListener\('change'/u,
         'choosing a named actor must reveal its editor field immediately');
     assert.match(source, /getElementById\('il_trigger_event_enabled'\)\?\.addEventListener\('change'/u,

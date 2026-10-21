@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import { createEmptyStore } from '../core.js';
 import { installMockInnerLoreStorage } from './mock-storage-server.mjs';
+import { createEventListeners } from './mock-event-source.mjs';
 
 installMockInnerLoreStorage();
 
@@ -15,7 +16,7 @@ const waitFor = async (predicate, timeout = 2_000) => {
 };
 
 test('a hard cutoff is continued in place once before InnerLore queues analysis', async () => {
-    const listeners = new Map();
+    const listeners = createEventListeners();
     const prompts = new Map();
     let saveChatCalls = 0;
     const chat = [
@@ -36,6 +37,8 @@ test('a hard cutoff is continued in place once before InnerLore queues analysis'
         disabledExtensions: [],
         connectionManager: { profiles: [], selectedProfile: '' },
         inner_lore: {
+            // These tests cover other passes; the game ledger has its own.
+            gameEnabled: false,
             enabled: true,
             autoUpdate: false,
             autoRecoverIncomplete: true,
@@ -69,7 +72,7 @@ test('a hard cutoff is continued in place once before InnerLore queues analysis'
         saveChat: async () => { saveChatCalls++; },
         setExtensionPrompt: (key, value) => prompts.set(key, value),
         renderExtensionTemplateAsync: async () => '',
-        eventSource: { on: (event, callback) => listeners.set(event, callback) },
+        eventSource: { on: listeners.on },
         eventTypes: events,
         SlashCommandParser: null,
         SlashCommand: null,

@@ -1,4 +1,5 @@
-import { canonicalNameKey, cleanString } from './core.js?v=47';
+import { requiredSweep } from './curator-hints.js?v=1';
+import { canonicalNameKey, cleanString } from './core.js?v=48';
 import { extractDeterministicElapsedAnchors, progressionAgentSnapshot } from './progression.js';
 
 function clip(value, maximum) {
@@ -67,6 +68,8 @@ export function buildProgressionMessages(options = {}) {
     const settings = options.settings || {};
     const store = options.store || { entities: {}, brains: {} };
     const transcript = cleanString(options.transcript, 90_000);
+    // Smaller models get the passage's commitments listed and must sweep them first.
+    const assisted = options.assisted === true;
     const snapshot = progressionAgentSnapshot(options.progression, {
         maximumRecords: 200,
         currentIndex: options.currentIndex,
@@ -138,7 +141,7 @@ WORLD PROGRESSION
 - Progress locations and items only through an established process, condition, rate, or newly narrated event—never by arbitrary world churn. Store an unrevealed off-screen result in progression state; do not rewrite PUBLIC_ENTITY_STATE yourself.
 - Do not assume an NPC worked continuously merely because time passed. Respect travel, sleep, access, knowledge, blockers, dependencies, and whether the player is required.
 - ${autonomy === 'advisory' ? 'Advisory autonomy: track and schedule only. Never mark a new event occurred_offscreen and do not invent new beats.' : autonomy === 'conservative' ? 'Conservative autonomy: advance explicit goals, deadlines, and safe background processes. Add a beat only when strongly implied by existing canon; avoid surprise inventions.' : autonomy === 'simulation' ? 'Simulation autonomy: advance safe off-screen NPC/world activity that follows established motives and constraints; label unrevealed results occurred_offscreen.' : 'Director autonomy: you may propose restrained new beats that follow established canon, while still protecting player agency and treating proposals as private until revealed.'}
-- A brief exchange may advance time without advancing any goal. Return empty operation arrays when that is correct.
+${assisted ? '- A brief exchange may advance time without advancing any goal; return empty operation arrays only when the passage states no promise, offer, appointment, deadline, arrival or ongoing task. Restraint means no invented beats; it never means leaving out something the passage states.' : '- A brief exchange may advance time without advancing any goal. Return empty operation arrays when that is correct.'}
 - PATCH COMPRESSION GATE: return only materially changed goals, processes, and events. Never restate unchanged records, repeat their descriptions, or emit empty/default optional properties. Keep evidence and reasons to one compact sentence each. The timeline array may be empty when deterministic anchors fully cover elapsed time.
 
 TRUSTED TRIGGER EVENTS
@@ -293,7 +296,7 @@ Player character (never control): ${cleanString(options.playerName, 160) || '(un
 Additional instructions: ${customInstructions || '(none)'}
 </RUN_CONFIGURATION>
 
-<COMPLETED_PASSAGE>
+${assisted ? requiredSweep(transcript) : ''}<COMPLETED_PASSAGE>
 ${transcript || '(No narrative passage supplied.)'}
 </COMPLETED_PASSAGE>
 

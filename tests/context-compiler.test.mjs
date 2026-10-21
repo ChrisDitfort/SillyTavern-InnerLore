@@ -159,7 +159,7 @@ test('scene compiler follows a performed move without carrying unrelated recent 
         },
     });
 
-    assert.match(compiled.blocks.scene, /Location\/focus: the dungeon/i);
+    assert.match(compiled.blocks.scene, /Where: the dungeon/i);
     assert.doesNotMatch(compiled.blocks.scene, /Objects currently in play/u);
     assert.doesNotMatch(compiled.blocks.lore, /Jet Storm's House|Hot Spring|Marshal's Writ/u);
     assert.doesNotMatch(compiled.blocks.lore, /Seated (?:in the main room|beside the hearth)/iu, 'a performed move suppresses stale participant positions');

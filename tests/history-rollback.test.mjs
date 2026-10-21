@@ -10,6 +10,7 @@ import {
 import { applyProgressionPatch, createProgressionState } from '../progression.js';
 import { upsertTriggerEventDefinition } from '../trigger-events.js';
 import { installMockInnerLoreStorage } from './mock-storage-server.mjs';
+import { createEventListeners } from './mock-event-source.mjs';
 
 installMockInnerLoreStorage();
 
@@ -126,6 +127,8 @@ function baseSettings(worldProgressionEnabled) {
             profiles: [{ id: 'rollback-profile', name: 'Rollback Profile', model: 'mock/model' }],
         },
         inner_lore: {
+            // These tests cover other passes; the game ledger has its own.
+            gameEnabled: false,
             enabled: true,
             autoUpdate: true,
             autoRecoverIncomplete: false,
@@ -154,7 +157,7 @@ async function installHarness({
     lookbackMessages = 10,
     sendRequest,
 }) {
-    const listeners = new Map();
+    const listeners = createEventListeners();
     const prompts = [];
     const worlds = new Map();
     const extensionSettings = baseSettings(worldProgressionEnabled);
@@ -182,7 +185,7 @@ async function installHarness({
         saveMetadataDebounced: () => {},
         setExtensionPrompt: (key, value) => prompts.push({ key, value }),
         renderExtensionTemplateAsync: async () => '',
-        eventSource: { on: (event, callback) => listeners.set(event, callback) },
+        eventSource: { on: listeners.on },
         eventTypes: events,
         SlashCommandParser: null,
         SlashCommand: null,

@@ -14,7 +14,7 @@ import {
     deriveContextBudgets,
 } from '../context-config.js';
 
-test('deriveContextBudgets splits the remainder after fixed costs across all six shares', () => {
+test('deriveContextBudgets splits the remainder after fixed costs across all seven shares', () => {
     const result = deriveContextBudgets(
         { contextLimitTokens: 8_192, staticPromptCharacters: 4_096 },
         { derivedSafetyMarginPercent: 10 },

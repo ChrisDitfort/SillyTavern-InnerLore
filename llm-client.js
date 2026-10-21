@@ -1,5 +1,5 @@
-import { cleanString } from './core.js?v=47';
-import { buildRepairMessages } from './prompts.js?v=8';
+import { cleanString } from './core.js?v=48';
+import { buildRepairMessages } from './prompts.js?v=9';
 import { CURATOR_JSON_SCHEMA } from './structured-output.js';
 import {
     OUTPUT_FORMAT_DSL,
@@ -9,7 +9,7 @@ import {
     parseInnerLoreOutput,
     prepareOutputMessages,
     structuredRequestOptions,
-} from './output-codec.js?v=2';
+} from './output-codec.js?v=3';
 
 function context() {
     return SillyTavern.getContext();
@@ -201,6 +201,178 @@ export async function waitForBackgroundIdle() {
     }
 }
 
+/**
+ * Providers that limit how much one account runs at once, and refuse more
+ * with 429. NovelAI serves one generation at a time. Featherless's plan has
+ * 4 concurrency units and a model costs 1 (under 16B parameters), 2 (under
+ * 35B, such as Gemma 4 31B) or 4 (70B and every large model). Requests
+ * through these providers share the budget here; the wait is not part of a
+ * request's timeout.
+ */
+const LIMITED_PROVIDERS = Object.freeze({ 'novelai.net': 1, 'featherless.ai': 4 });
+const providerUnits = new Map();
+
+export function limitedHost(url) {
+    let host = '';
+    try {
+        host = new URL(String(url || '')).hostname;
+    } catch {
+        return '';
+    }
+    return Object.keys(LIMITED_PROVIDERS).find(item => host === item || host.endsWith(`.${item}`)) || '';
+}
+
+/** A model's size in billions of parameters from its name ("Gemma-4-31B" is 31); Infinity when unnamed. */
+export function modelSizeBillions(model) {
+    const sizes = [...String(model || '').matchAll(/(\d+(?:\.\d+)?)\s*[bB](?![a-z])/gu)].map(match => Number(match[1]));
+    return sizes.length ? Math.max(...sizes) : Infinity;
+}
+
+/** Featherless's cost class from the model's size in its name; unknown sizes count as large. */
+export function featherlessCost(model) {
+    const size = modelSizeBillions(model);
+    return size < 16 ? 1 : size < 35 ? 2 : 4;
+}
+
+function providerCost(provider, model) {
+    return provider === 'featherless.ai' ? featherlessCost(model) : 1;
+}
+
+/** The limited provider a connection profile uses, if any. */
+export function oneAtATimeProvider(profileId) {
+    const profile = (context().extensionSettings?.connectionManager?.profiles || []).find(item => item?.id === profileId);
+    if (!profile) return '';
+    if (profile.api === 'novel') return 'novelai.net';
+    return limitedHost(profile['api-url']);
+}
+
+function profileCost(profileId) {
+    const profile = (context().extensionSettings?.connectionManager?.profiles || []).find(item => item?.id === profileId);
+    return providerCost(oneAtATimeProvider(profileId), profile?.model);
+}
+
+/** Whether this provider host limits how much one account runs at once. */
+export function isLimitedProvider(provider) {
+    return Boolean(provider && LIMITED_PROVIDERS[provider]);
+}
+
+/**
+ * Body lines a story request on a limited provider needs that SillyTavern's
+ * custom source drops unless the preset is bound to the connection: thinking
+ * off on Featherless, and the preset's top_k and min_p (NovelAI's Xialong
+ * wants top_k 250). `custom` is the user's own YAML; its top-level sections
+ * replace the defaults. Keys already in `existing` are never repeated.
+ */
+export function storyProviderBodyLines(provider, existing, preset = {}, custom = '') {
+    if (!isLimitedProvider(provider)) return [];
+    const has = key => new RegExp(`^\\s*${key}\\s*:`, 'mu').test(String(existing || ''));
+    const lines = [];
+    const own = String(custom || '').trim();
+    if (own) {
+        let section = null;
+        for (const line of own.split('\n')) {
+            const key = /^([A-Za-z_][\w.-]*)\s*:/u.exec(line)?.[1];
+            if (key) section = has(key) ? null : key;
+            if (section) lines.push(line);
+        }
+        return lines;
+    }
+    if (provider === 'featherless.ai') {
+        if (!has('reasoning_effort')) lines.push('reasoning_effort: none');
+        if (!has('chat_template_kwargs')) lines.push('chat_template_kwargs:', '  enable_thinking: false');
+    }
+    if (!has('top_k') && Number(preset.top_k) > 0) lines.push(`top_k: ${Math.round(Number(preset.top_k))}`);
+    if (!has('min_p') && Number(preset.min_p) > 0) lines.push(`min_p: ${Number(preset.min_p)}`);
+    return lines;
+}
+
+/**
+ * Whether a background request on this profile can run while the story is
+ * being written: a different provider always can; a shared limited provider
+ * only when its budget holds both (Featherless: a 31B model beside a 31B
+ * story; NovelAI: never).
+ */
+export function fitsBesideStory(profileId) {
+    const provider = oneAtATimeProvider(profileId);
+    if (!provider || provider !== storyProvider()) return true;
+    return LIMITED_PROVIDERS[provider] - storyCost() >= profileCost(profileId);
+}
+
+/**
+ * The limited provider the story itself runs on, if any: NovelAI's text
+ * completion (Erato, Kayra) or chat endpoint (GLM, Xialong), or Featherless.
+ */
+export function storyProvider() {
+    const ctx = context();
+    if (ctx.mainApi === 'novel') return 'novelai.net';
+    if (ctx.mainApi === 'textgenerationwebui' && ctx.textCompletionSettings?.type === 'featherless') return 'featherless.ai';
+    const chat = ctx.chatCompletionSettings;
+    if (ctx.mainApi === 'openai' && chat?.chat_completion_source === 'custom') return limitedHost(chat.custom_url);
+    return '';
+}
+
+/** The share of its provider's budget a story request takes. */
+export function storyCost() {
+    const ctx = context();
+    const provider = storyProvider();
+    const model = ctx.mainApi === 'textgenerationwebui' ? ctx.textCompletionSettings?.featherless_model : ctx.chatCompletionSettings?.custom_model;
+    return provider ? providerCost(provider, model) : 0;
+}
+
+function unitsOf(provider) {
+    if (!providerUnits.has(provider)) providerUnits.set(provider, { used: 0, waiting: [] });
+    return providerUnits.get(provider);
+}
+
+/** Whether a background request holds or waits for this provider's budget. */
+export function providerInUse(provider) {
+    const units = provider ? providerUnits.get(provider) : null;
+    return Boolean(units && (units.used > 0 || units.waiting.length));
+}
+
+/** Whether `cost` more units fit beside the background requests on this provider now. */
+export function providerHasRoom(provider, cost = 1) {
+    if (!provider || !LIMITED_PROVIDERS[provider]) return true;
+    return (providerUnits.get(provider)?.used || 0) + cost <= LIMITED_PROVIDERS[provider];
+}
+
+/**
+ * Wait until `cost` units of this provider's budget are free, keeping
+ * `reserve` units for the story; resolves to the function that returns them.
+ */
+export async function takeProviderTurn(provider, signal, { cost = 1, reserve = 0 } = {}) {
+    if (!provider || !LIMITED_PROVIDERS[provider]) return () => {};
+    const units = unitsOf(provider);
+    const room = Math.max(cost, LIMITED_PROVIDERS[provider] - reserve);
+    await new Promise((resolve, reject) => {
+        const entry = () => {
+            if (signal?.aborted) return true;
+            if (units.used + cost > room) return false;
+            units.used += cost;
+            resolve();
+            return true;
+        };
+        const abandon = () => {
+            const index = units.waiting.indexOf(entry);
+            if (index >= 0) units.waiting.splice(index, 1);
+            reject(new DOMException('Aborted', 'AbortError'));
+        };
+        if (!entry()) {
+            units.waiting.push(entry);
+            signal?.addEventListener?.('abort', abandon, { once: true });
+        }
+    });
+    let returned = false;
+    return () => {
+        if (returned) return;
+        returned = true;
+        units.used = Math.max(0, units.used - cost);
+        for (let index = 0; index < units.waiting.length; index++) {
+            if (units.waiting[index]()) units.waiting.splice(index--, 1);
+        }
+    };
+}
+
 async function withBackgroundSlot(task, signal, { waitForStory = true } = {}) {
     // With one provider slot, story and background never overlap: a
     // background request waits for any active story generation before leaving.
@@ -234,7 +406,12 @@ async function sendViaProfile(settings, messages, signal, options = {}) {
     }
 
     const maximumTokens = Math.max(800, Math.min(32_000, Number(settings.maximumResponseTokens) || 6_000));
-    const waitForStory = providerConcurrency(settings) < 2;
+    // A provider that serves one request at a time cannot write the story and
+    // this at once, whatever the slot setting says.
+    const provider = oneAtATimeProvider(profileId);
+    const sharesStoryProvider = Boolean(provider) && provider === storyProvider()
+        && LIMITED_PROVIDERS[provider] < storyCost() + profileCost(profileId);
+    const waitForStory = providerConcurrency(settings) < 2 || sharesStoryProvider;
     // The slot covers the whole generation: a streamed request returns its
     // generator immediately, so the stream is read inside the slot too.
     // Releasing it before the body arrives would let the story start while
@@ -510,7 +687,7 @@ async function sendInnerLoreRequestInner(settings, messages, signal, options = {
         )),
         timeoutMilliseconds,
     );
-    const startedAt = Date.now();
+    let startedAt = Date.now();
     const fallbackProfiles = connectionFallbackProfileIds(settings);
     const routes = [
         settings.connectionSource === 'active'
@@ -533,18 +710,33 @@ async function sendInnerLoreRequestInner(settings, messages, signal, options = {
                 lastError = timeoutError(circuitBreakerMilliseconds);
                 break;
             }
+            const provider = route.source === 'profile' ? oneAtATimeProvider(route.profileId) : '';
+            const queuedAt = Date.now();
+            let endTurn = () => {};
             try {
+                // On the story's own provider, keep the story's share free. When
+                // both cannot fit (NovelAI's single slot), let a story being
+                // written finish first, before taking the turn it would wait for.
+                const cost = provider ? profileCost(route.profileId) : 0;
+                const reserve = provider && provider === storyProvider() ? storyCost() : 0;
+                if (reserve && LIMITED_PROVIDERS[provider] - reserve < cost && waitForStoryIdle) await waitForStoryIdle(signal);
+                const fitsBeside = LIMITED_PROVIDERS[provider] - reserve >= cost;
+                endTurn = await takeProviderTurn(provider, signal, { cost, reserve: fitsBeside ? reserve : 0 });
+                // Waiting for a one-at-a-time provider is not the request's time.
+                startedAt += Date.now() - queuedAt;
                 const output = await withRequestTimeout(async attemptSignal => {
                     if (route.source === 'active') {
                         return await sendViaActiveConnection(routeSettings, messages, attemptSignal, options);
                     }
                     return await sendViaProfile(routeSettings, messages, attemptSignal, options);
-                }, signal, Math.min(timeoutMilliseconds, remaining));
+                }, signal, Math.min(timeoutMilliseconds, circuitBreakerMilliseconds - (Date.now() - startedAt)));
+                endTurn();
                 if (routeIndex > 0) {
                     console.warn(`[InnerLore] Background request recovered through fallback profile ${route.profileId}.`);
                 }
                 return output;
             } catch (error) {
+                endTurn();
                 if (error?.name === 'AbortError' || signal?.aborted) throw error;
                 lastError = error;
                 const transient = isTransientRequestError(error);

@@ -14,10 +14,11 @@ import {
     contextSimilarity,
     contextTokens,
     curatedLocationOf,
+    resolveLocationReference,
     shortCharacterReferences,
     textMentions,
     uniqueStrings,
-} from './core.js?v=47';
+} from './core.js?v=48';
 
 const ABSENT_STATE = /\b(?:absent|away|departed|elsewhere|left\s+(?:the|this|that|the\s+scene)|gone\s+home|went\s+home|headed\s+home|returned\s+home|on\s+(?:his|her|their|its)\s+way\s+home|no\s+longer\s+(?:here|present)|not\s+present|off[ -]?screen|outside\s+the\s+scene)\b/iu;
 const PLACE_HEAD_NOUNS = new Set([
@@ -36,13 +37,20 @@ const PLACE_HEAD_NOUNS = new Set([
     'border', 'frontier', 'outpost', 'wilderness', 'upstairs', 'downstairs', 'doorway', 'doorstep',
 ]);
 
+// Things that "run", "lead" or "climb" without anyone moving: a street that
+// runs toward the harbour is not the player heading there.
+const TOPOGRAPHY_SUBJECTS = new Set([
+    ...PLACE_HEAD_NOUNS, 'track', 'trail', 'stair', 'stairs', 'steps', 'staircase', 'corridor', 'passage', 'way', 'slope',
+    'canal', 'tunnel', 'causeway', 'avenue', 'boulevard', 'highway', 'ladder', 'gangway', 'ramp', 'rail', 'fence', 'hedge',
+]);
+
 const DORMANT_LOCATION = /\b(?:not\s+visited|only\s+mentioned|rejected|declined|abandoned\s+for|left\s+behind|previous\s+scene)\b/iu;
-const MOVEMENT_CUE_GLOBAL = /\b(?:arrive|arrived|come|came|coming|descend|descended|enter|entered|follow|followed|go|goes|going|head|headed|lead|leads|leading|led|leave|left|move|moved|reach|reached|return|returned|step|stepped|travel|travelled|walk|walked)\b/giu;
+const MOVEMENT_CUE_GLOBAL = /\b(?:arrives?|arrived|comes?|came|coming|descends?|descended|enters?|entered|follows?|followed|go|goes|going|went|heads?|headed|lead|leads|leading|led|leaves?|left|moves?|moved|reach|reaches|reached|returns?|returned|steps?|stepped|travels?|travelled|traveled|walks?|walked|runs?|ran|hurr(?:y|ies|ied)|rush(?:es|ed)?|climbs?|climbed|cross(?:es|ed)?|push(?:es|ed)?|slips?|slipped|ducks?|ducked|wanders?|wandered|strides?|strode|march(?:es|ed)?|rides?|rode|sails?|sailed)\b/giu;
 const MOVEMENT_REJECTED = /\b(?:cannot|can't|couldn't|doesn't|didn't|refuse|refused|remain|remained|stay|stayed|stop|stopped|unable\s+to)\b/iu;
-const MOVEMENT_CONFIRMED = /\b(?:arrived|descended|entered|followed|inside|reached|returned|stairwell|travelled|walked)\b/iu;
-const DEFERRED_MOVEMENT = /\b(?:afterwards?|eventually|later|next\s+(?:day|evening|morning|night|week)|someday|tomorrow|tonight\s+after|when\s+(?:I|we|he|she|they)\s+(?:can|finish|have|return))\b/iu;
+const MOVEMENT_CONFIRMED = /\b(?:arrived|descended|entered|followed|inside|reached|returned|stairwell|travelled|walked|ran|climbed|crossed|pushed|hurried|rushed)\b/iu;
+const DEFERRED_MOVEMENT = /\b(?:afterwards?|eventually|(?<!\b(?:minutes?|hours?|days?|weeks?|months?|years?|moments?)\s)later|next\s+(?:day|evening|morning|night|week)|someday|tomorrow|tonight\s+after|when\s+(?:I|we|he|she|they)\s+(?:can|finish|have|return))\b/iu;
 const LOCALLY_ABSENT_OBJECT = /\b(?:left\s+behind|not\s+(?:carried|carrying|here|present)|remained\s+(?:behind|outside|upstairs|downstairs)|still\s+(?:behind|outside|upstairs|downstairs|elsewhere)|without\s+(?:the|a|an|his|her|their))\b/iu;
-const LOCATION_PREPOSITION = /\b(into|inside|within|towards?|through|at|in|to)\s+((?:(?:the|a|an)\s+)?[\p{L}\p{N}'’_-]+(?:\s+[\p{L}\p{N}'’_-]+){0,5})/giu;
+const LOCATION_PREPOSITION = /\b(into|onto|inside|within|towards?|through|at|in|to)\s+((?:(?:the|a|an)\s+)?[\p{L}\p{N}'’_-]+(?:\s+[\p{L}\p{N}'’_-]+){0,5})/giu;
 const LOCATION_STOP_WORDS = new Set([
     'after', 'and', 'as', 'because', 'before', 'but', 'from', 'later', 'once', 'so', 'then',
     'there', 'they', 'until', 'when', 'where', 'were', 'which', 'while', 'who', 'with', 'you',
@@ -52,6 +60,129 @@ const LOCATION_NON_NOUNS = new Set([
     'arrive', 'come', 'descend', 'enter', 'follow', 'go', 'head', 'lead', 'leave', 'move', 'reach',
     'return', 'step', 'travel', 'walk',
 ]);
+
+// Parts of a building or yard. An unresolved move to one of these ("up to the
+// attic") is a move within the place the player already is.
+const INTERIOR_PART_WORDS = new Set([
+    'room', 'hall', 'kitchen', 'cellar', 'basement', 'yard', 'courtyard', 'garden', 'stable', 'stables',
+    'stairs', 'staircase', 'stairwell', 'upstairs', 'downstairs', 'corridor', 'passage', 'landing', 'attic',
+    'loft', 'bar', 'taproom', 'parlour', 'parlor', 'porch', 'balcony', 'roof', 'doorway', 'doorstep', 'chamber',
+    'study', 'library', 'pantry', 'larder', 'shed', 'workshop', 'vault', 'lobby', 'foyer', 'gallery',
+]);
+// A place seen, pointed at, or come from is not where the player is.
+const DISTANT_VIEW = /\b(?:points?|pointed|pointing|see|sees|saw|seen|glimpse[sd]?|views?|window|distance|distant|far\s+(?:off|away|below|above)|beyond|horizon|would\s+be|in\s+the\s+direction\s+of)\b/iu;
+const VIEWING_TURN = /\b(?:look|looks|looking|gaze|gazes|peer|peers|watch|watches|glance|glances|stare|stares|listen|listens)\b/iu;
+const QUOTED_SPEECH = /"[^"\n]{0,800}"|“[^”\n]{0,800}”/gu;
+
+/** Text with quoted speech blanked out (same length, so indices still line up). */
+function withoutQuotedSpeech(text) {
+    return String(text || '').replace(QUOTED_SPEECH, match => ' '.repeat(match.length));
+}
+
+/** A location's recorded parent place, by id first and by name otherwise. */
+function parentPlace(entities, record) {
+    const byId = record?.parentLocationId && entities?.[record.parentLocationId];
+    if (byId?.type === 'location' && byId.enabled !== false && byId.id !== record.id) return byId;
+    const named = record?.parentLocationName ? resolveLocationReference(entities, record.parentLocationName) : null;
+    return named && named.id !== record?.id ? named : null;
+}
+
+/**
+ * The places around an anchor, nearest first: the anchor, the places it
+ * contains, the places that contain it, and everything else those contain.
+ */
+function locationFamily(entities, anchor) {
+    if (!anchor) return [];
+    const locations = Object.values(entities || {}).filter(record => record?.type === 'location' && record.enabled !== false);
+    const parents = new Map(locations.map(record => [record.id, parentPlace(entities, record)?.id || '']));
+    const family = [{ record: anchor, distance: 0 }];
+    const seen = new Set([anchor.id]);
+    const add = (record, distance) => {
+        if (!record || seen.has(record.id)) return;
+        seen.add(record.id);
+        family.push({ record, distance });
+    };
+    for (const record of locations) if (parents.get(record.id) === anchor.id) add(record, 1);
+    let ancestor = entities[parents.get(anchor.id)];
+    for (let depth = 1; ancestor && depth <= 4; depth++) {
+        add(ancestor, depth);
+        for (const record of locations) if (parents.get(record.id) === ancestor.id) add(record, depth + 1);
+        ancestor = entities[parents.get(ancestor.id)];
+    }
+    return family.sort((a, b) => a.distance - b.distance);
+}
+
+/** Short names a place goes by inside its parent ("Stable Yard" and "yard" for "Salt Lantern Stable Yard"). */
+function placePartKeys(entities, record) {
+    const strip = key => key.replace(/^(?:the|a|an)\s+/u, '');
+    const name = strip(canonicalNameKey(record.name));
+    const parent = parentPlace(entities, record);
+    const parentKey = parent ? strip(canonicalNameKey(parent.name)) : '';
+    const keys = [name, ...(record.aliases || []).map(alias => strip(canonicalNameKey(alias)))];
+    if (parentKey && name.startsWith(`${parentKey} `)) keys.push(name.slice(parentKey.length + 1));
+    const last = name.split(' ').at(-1);
+    if (INTERIOR_PART_WORDS.has(last)) keys.push(last);
+    return uniqueStrings(keys.filter(Boolean), 12);
+}
+
+/**
+ * Resolve a phrase for part of a place ("the yard", "the common room") to the
+ * recorded place it means, searching outward from where the player is: a
+ * place whose own short name matches, else the nearest place whose recorded
+ * layout mentions the phrase.
+ */
+function resolvePlacePhrase(phrase, entities, anchor) {
+    const core = canonicalNameKey(phrase).replace(/^(?:the|a|an)\s+/u, '');
+    if (!core || !anchor) return null;
+    const family = locationFamily(entities, anchor);
+    const named = family.find(({ record }) => placePartKeys(entities, record).includes(core));
+    if (named) return { record: named.record, part: '' };
+    // Only parts of a building are looked up in recorded layouts; "the
+    // harbour" seen from a window is a place of its own.
+    const head = core.split(' ').at(-1);
+    if (!INTERIOR_PART_WORDS.has(head) || /\p{Lu}/u.test(cleanString(phrase).replace(/^(?:the|a|an)\s+/iu, ''))) return null;
+    const familyIds = new Set(family.map(({ record }) => record.id));
+    for (const { record } of family) {
+        for (const invariant of Object.values(record.spatial?.invariants || {})) {
+            if (!textMentions(`${invariant.object || ''}\n${invariant.statement || ''}`, [core])) continue;
+            // "Room Two is at the end of the corridor" puts the player in Room Two.
+            const subject = resolveLocationReference(entities, invariant.subject);
+            if (subject && familyIds.has(subject.id) && subject.id !== record.id) return { record: subject, part: '' };
+            return { record, part: cleanString(phrase, 80) };
+        }
+        if (textMentions(`${record.summary || ''}\n${record.description || ''}`, [core])) return { record, part: cleanString(phrase, 80) };
+    }
+    return { record: anchor, part: cleanString(phrase, 80) };
+}
+
+/** Whether every mention of a place in the text is a view, a pointing, an origin, or quoted speech. */
+function onlyDistantMentions(text, references, viewingTurn) {
+    const source = cleanString(text, 30_000);
+    const quotedSpans = [...source.matchAll(QUOTED_SPEECH)].map(match => [match.index, match.index + match[0].length]);
+    const sentences = source.split(/(?<=[.!?])\s+|\n+/u);
+    let offset = 0;
+    let anyNear = false;
+    for (const sentence of sentences) {
+        const start = source.indexOf(sentence, offset);
+        offset = Math.max(offset, start + sentence.length);
+        if (!textMentions(sentence, references)) continue;
+        const quoted = quotedSpans.some(([from, to]) => start >= from && start + sentence.length <= to + 1);
+        const origin = references.some(reference => new RegExp(`\\bfrom\\s+(?:the\\s+)?${reference.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}`, 'iu').test(sentence));
+        if (!(viewingTurn || quoted || origin || DISTANT_VIEW.test(sentence))) anyNear = true;
+    }
+    return !anyNear;
+}
+
+/** Where most of the present cast is recorded, for resolving part-of-place phrases. */
+function castAnchor(entities, castRecords) {
+    const counts = new Map();
+    for (const record of castRecords) {
+        const place = curatedLocationOf(entities, record);
+        if (place) counts.set(place.id, (counts.get(place.id) || 0) + 1);
+    }
+    const best = [...counts.entries()].sort((a, b) => b[1] - a[1])[0];
+    return best ? entities[best[0]] : null;
+}
 
 function relevantMessages(messages, maximum = 6) {
     return (Array.isArray(messages) ? messages : [])
@@ -132,6 +263,8 @@ function hasLinkedMovementCue(source, prepositionIndex, rawCandidate) {
     const cues = [...clause.matchAll(MOVEMENT_CUE_GLOBAL)];
     const cue = cues.at(-1);
     if (!cue) return false;
+    const subjectWords = canonicalNameKey(clause.slice(0, cue.index || 0)).split(/\s+/u).filter(Boolean).slice(-3);
+    if (subjectWords.length && TOPOGRAPHY_SUBJECTS.has(subjectWords.at(-1))) return false;
     const between = cleanString(clause.slice((cue.index || 0) + cue[0].length), 120);
     const bridgeWords = canonicalNameKey(between).split(/\s+/u).filter(Boolean);
     // Permit a short object/companion phrase ("lead her down into" or
@@ -159,7 +292,7 @@ function referenceLocallyAbsent(text, record) {
     ));
 }
 
-function explicitMovementLocation(text, entities) {
+function explicitMovementLocation(text, entities, anchor = null) {
     const source = cleanString(text, 20_000);
     const characters = Object.values(entities || {}).filter(record => record?.type === 'character');
     const locations = Object.values(entities || {}).filter(record => record?.type === 'location' && record.enabled !== false);
@@ -170,7 +303,16 @@ function explicitMovementLocation(text, entities) {
         const candidateCore = canonicalNameKey(candidate).replace(/^(?:the|a|an)\s+/u, '');
         if (!candidate || LOCATION_NON_NOUNS.has(candidateCore)
             || characters.some(record => referenceMatch(candidate, record))) continue;
-        const known = locations.find(record => referenceMatch(candidate, record));
+        // "Highmarket Gate" is the gate, not the town that also matches it.
+        let known = locations
+            .filter(record => referenceMatch(candidate, record))
+            .sort((a, b) => Number(canonicalNameKey(b.name) === candidateCore) - Number(canonicalNameKey(a.name) === candidateCore)
+                || b.name.length - a.name.length)[0];
+        let part = '';
+        if (!known) {
+            const resolved = resolvePlacePhrase(candidate, entities, anchor);
+            if (resolved) ({ record: known, part } = resolved);
+        }
         if (!known) {
             // Unknown (not-yet-curated) locations are only trusted when the
             // phrase's head noun is a place word or it contains a proper noun.
@@ -183,10 +325,10 @@ function explicitMovementLocation(text, entities) {
             if (!PLACE_HEAD_NOUNS.has(head) && !hasProper) continue;
         }
         const preposition = canonicalNameKey(match[1]);
-        const score = (known ? 100 : 0) + (['into', 'inside', 'within', 'at', 'in'].includes(preposition) ? 30 : 10);
+        const score = (known ? (part ? 60 : 100) : 0) + (['into', 'onto', 'inside', 'within', 'at', 'in'].includes(preposition) ? 30 : 10);
         if (!result || score > result.score) {
             result = known
-                ? { id: known.id, name: known.name, source: 'explicit movement in latest turn', confidence: 1, score }
+                ? { id: known.id, name: known.name, ...(part ? { part } : {}), source: 'explicit movement in latest turn', confidence: part ? 0.95 : 1, score }
                 : { id: '', name: candidate, source: 'explicit movement in latest turn', confidence: 0.92, score };
         }
     }
@@ -194,7 +336,7 @@ function explicitMovementLocation(text, entities) {
     return result;
 }
 
-function locationRanking(store, latestText, focusText, participantNames, currentIndex, castRecords = [], playerRecord = null) {
+function locationRanking(store, latestText, focusText, participantNames, currentIndex, castRecords = [], playerRecord = null, viewingTurn = false) {
     const castLocations = castRecords.map(record => ({
         location: curatedLocationOf(store?.entities, record),
         weight: record === playerRecord ? 2 : 1,
@@ -223,7 +365,8 @@ function locationRanking(store, latestText, focusText, participantNames, current
     return locations
         .map(record => {
             const references = recordReferences(record);
-            const latestMention = ownMentions(latestClean, record, references);
+            const latestMention = ownMentions(latestClean, record, references)
+                && !onlyDistantMentions(latestClean, references, viewingTurn);
             const focusMention = ownMentions(focusClean, record, references);
             const state = cleanString(record.currentState, 3_000);
             const stateSimilarity = contextSimilarity(state, latestTokens);
@@ -290,20 +433,59 @@ export function deriveSceneState(messages, store, options = {}) {
     }
 
     const participantNames = [...participantMap.values()].map(item => item.name);
-    const directedLocation = explicitMovementLocation(latestUserText, store?.entities);
-    const narratedLocation = explicitMovementLocation(latestText, store?.entities);
+    const entities = store?.entities || {};
+    // Where the curator last recorded the player. Once it has read the newest
+    // reply it is the authority; until then it is the best guess, because a
+    // place merely named in prose is often seen, pointed at, or remembered.
+    const playerPlace = playerRecord ? curatedLocationOf(entities, playerRecord) : null;
+    const latestReply = [...relevant].reverse().find(({ message }) => !message.is_user);
+    const curatorCurrent = Boolean(playerPlace && latestReply)
+        && Number.isInteger(store?.lastProcessedIndex) && store.lastProcessedIndex >= latestReply.index;
+    const recorded = playerPlace ? {
+        id: playerPlace.id,
+        name: playerPlace.name,
+        source: curatorCurrent ? 'curated player location' : 'last recorded player location',
+        confidence: curatorCurrent ? 1 : 0.85,
+    } : null;
+    const anchor = playerPlace || castAnchor(entities, characters.filter(record => participantMap.has(record.id)));
+    const directedLocation = explicitMovementLocation(latestUserText, entities, anchor);
+    // When the player only looks, the narration's roads and steps are views.
+    const viewingTurn = VIEWING_TURN.test(latestUserText) && !directedLocation;
+    const narratedLocation = viewingTurn ? null : explicitMovementLocation(withoutQuotedSpeech(latestText), entities, anchor);
+    const pendingCommand = latest?.message?.is_user;
     // Keep an explicit player-directed move as current after the story reply
     // confirms the transition. A clear refusal/stoppage prevents that carryover.
-    let location = narratedLocation || (directedLocation && (
-        latest?.message?.is_user || MOVEMENT_CONFIRMED.test(latestText) || !MOVEMENT_REJECTED.test(latestText)
-    ) ? directedLocation : null);
+    const confirmedDirection = directedLocation && (
+        pendingCommand || MOVEMENT_CONFIRMED.test(latestText) || !MOVEMENT_REJECTED.test(latestText)
+    ) ? directedLocation : null;
+    const moves = [narratedLocation, confirmedDirection].filter(Boolean);
+    // Of two known destinations, one inside the other is the more precise.
+    const insideOf = (inner, outer) => {
+        for (let place = parentPlace(entities, entities[inner.id]), depth = 0; place && depth < 6; place = parentPlace(entities, place), depth++) {
+            if (place.id === outer.id) return true;
+        }
+        return false;
+    };
+    moves.sort((a, b) => Number(Boolean(a.id && b.id && insideOf(b, a))) - Number(Boolean(a.id && b.id && insideOf(a, b))));
+    let location = null;
+    if (pendingCommand && directedLocation) location = directedLocation;
+    else if (curatorCurrent) location = recorded;
+    else {
+        location = moves.find(move => move.id && !move.part)
+            || moves.find(move => move.id)
+            || moves.find(move => !move.id)
+            || null;
+    }
     if (!location) {
         const castRecords = characters.filter(record => participantMap.has(record.id));
         const ranked = locationRanking(
-            store, latestText || exchangeText, focusText, participantNames, currentIndex, castRecords, playerRecord,
+            store, latestText || exchangeText, focusText, participantNames, currentIndex, castRecords, playerRecord, viewingTurn,
         );
         const best = ranked[0];
-        if (best && (best.latestMention || best.focusMention || best.stateSimilarity >= 0.18
+        // A place plainly named where the player is beats the last record;
+        // weaker signals do not.
+        if (recorded && !best?.latestMention) location = recorded;
+        else if (best && (best.latestMention || best.focusMention || best.stateSimilarity >= 0.18
             || best.participantMatches >= 2 || best.castHere >= 1)) {
             const castOnly = !best.latestMention && !best.focusMention && best.stateSimilarity < 0.18
                 && best.participantMatches < 2;
@@ -342,6 +524,21 @@ export function deriveSceneState(messages, store, options = {}) {
         .slice(0, 8)
         .map(record => ({ id: record.id, name: record.name, reason: 'named in latest exchange' }));
 
+    // The place that contains the scene, and parts of the surrounding place
+    // named in the newest turns ("the yard"), so their layout reaches context.
+    const places = [];
+    const here = location?.id ? entities[location.id] : null;
+    const container = here ? parentPlace(entities, here) : null;
+    if (container) places.push({ id: container.id, name: container.name, reason: 'contains the scene' });
+    if (here) {
+        const named = `${latestUserText}\n${latestText}`;
+        for (const { record } of locationFamily(entities, here)) {
+            if (record.id === here.id || places.some(place => place.id === record.id)) continue;
+            if (textMentions(named, placePartKeys(entities, record))) places.push({ id: record.id, name: record.name, reason: 'named part' });
+            if (places.length >= 4) break;
+        }
+    }
+
     return {
         currentIndex,
         latestMessageIndex: latest?.index ?? -1,
@@ -353,31 +550,128 @@ export function deriveSceneState(messages, store, options = {}) {
         focusText,
         focusTokens: contextTokens(focusText, 240),
         location,
+        places,
         participants: [...participantMap.values()],
         addressed,
         objects,
     };
 }
 
-export function renderSceneState(scene, maximumLength = 1_200) {
-    if (!scene) return '';
-    const maximum = Math.max(240, Number(maximumLength) || 1_200);
+// Spatial relations that describe a way out of, or into, a place.
+const WAY_RELATIONS = new Set(['connected_to', 'adjacent_to', 'entrance_at', 'door_at', 'opens']);
+const MAXIMUM_WAYS_ON = 8;
+
+/**
+ * What the player character can perceive and reach right now, assembled from
+ * the compiled scene and curated world: where they are, who is with them,
+ * who was only mentioned, objects in play, and the ways on from here.
+ */
+export function deriveCameraFrame(scene, store, options = {}) {
+    const entities = store?.entities || {};
+    const playerName = cleanString(options.playerName || scene?.latestUserName, 160) || 'Player';
+    const playerKey = canonicalNameKey(playerName);
+    const where = cleanString(scene?.location?.name, 240);
+    const byId = scene?.location?.id && entities[scene.location.id];
+    const here = byId?.type === 'location' ? byId : resolveLocationReference(entities, where);
+    const parentOf = record => parentPlace(entities, record);
+    const parent = here ? parentOf(here) : null;
+
+    // Places that contain the current one: a person recorded there (the
+    // city, while the scene is one of its streets) is not elsewhere.
+    const enclosing = new Set();
+    for (let place = parent; place && !enclosing.has(place.id) && enclosing.size < 8; place = parentOf(place)) {
+        enclosing.add(place.id);
+    }
+    const withYou = [];
+    const unconfirmed = [];
+    const elsewhere = [];
+    for (const participant of scene?.participants || []) {
+        if (canonicalNameKey(participant.name) === playerKey) continue;
+        const record = entities[participant.id];
+        const curated = record ? curatedLocationOf(entities, record) : null;
+        const curatedHere = Boolean(curated && here && curated.id === here.id);
+        // Only a known place can rule someone out: an unresolved phrase
+        // ("the stairs") may well be inside where they were recorded.
+        if (curated && here && !curatedHere && !enclosing.has(curated.id)) {
+            elsewhere.push({ name: participant.name, at: curated.name });
+        } else if (curatedHere || participant.reason === 'named in latest turn'
+            || (!curated && participant.reason === 'named in latest exchange')) {
+            withYou.push({ name: participant.name, state: cleanString(record?.currentState, 240) });
+        } else {
+            unconfirmed.push({ name: participant.name });
+        }
+    }
+
+    const waysOn = [];
+    const seen = new Set(here ? [here.id] : []);
+    const addWay = (record, relation) => {
+        if (!record || seen.has(record.id) || record.enabled === false) return;
+        seen.add(record.id);
+        waysOn.push({ name: record.name, relation });
+    };
+    if (here) {
+        const locations = Object.values(entities).filter(record => record?.type === 'location' && record.enabled !== false);
+        if (parent) addWay(parent, 'the wider place');
+        for (const record of locations) if (parentOf(record)?.id === here.id) addWay(record, 'inside');
+        if (parent) for (const record of locations) if (parentOf(record)?.id === parent.id) addWay(record, `also in ${parent.name}`);
+        for (const invariant of Object.values(here.spatial?.invariants || {})) {
+            if (!WAY_RELATIONS.has(invariant?.relation) || !cleanString(invariant.statement)) continue;
+            const target = resolveLocationReference(entities, invariant.object);
+            if (target && target.id !== here.id) addWay(target, cleanString(invariant.statement, 200));
+            else if (!target) waysOn.push({ name: '', relation: cleanString(invariant.statement, 200) });
+        }
+    }
+
+    return {
+        pov: playerName,
+        where,
+        part: cleanString(scene?.location?.part, 80),
+        within: parent?.name || '',
+        time: cleanString(options.clockLabel, 120),
+        withYou,
+        unconfirmed,
+        elsewhere,
+        addressed: (scene?.addressed || []).map(item => item.name).filter(Boolean),
+        objects: (scene?.objects || []).map(item => item.name).filter(Boolean),
+        waysOn: waysOn.slice(0, MAXIMUM_WAYS_ON),
+        latestUserName: cleanString(scene?.latestUserName, 160),
+    };
+}
+
+/** Render the camera frame as the narrator's opening context block. */
+export function renderCameraPacket(frame, maximumLength = 1_800) {
+    if (!frame) return '';
+    const maximum = Math.max(240, Number(maximumLength) || 1_800);
+    const pov = frame.pov || 'the player character';
     const opening = [
-        '<inner_lore_current_scene compiled="true">',
-        'This is a relevance map compiled from the latest turn and established current state, not permission to invent missing facts.',
+        `<inner_lore_camera pov=${JSON.stringify(pov)} compiled="true">`,
+        `The camera is ${pov}'s eyes and ears. Build the reply from what ${pov} can see, hear and reach from here. This is compiled state, not permission to invent missing facts; where it disagrees with the newest story turns, the story wins.`,
+        `Behind the camera: the private minds, world reference and progression that follow steer what people do and what happens next. ${pov} never sees them directly, only words, actions and visible evidence. Do not force every listed element into the prose.`,
     ];
     const details = [];
-    if (scene.location?.name) details.push(`Location/focus: ${scene.location.name} (${scene.location.source}).`);
-    if (scene.participants?.length) details.push(`Present or directly engaged: ${scene.participants.map(item => item.name).join('; ')}.`);
-    if (scene.addressed?.length) details.push(`Directly addressed or affected by the newest player turn: ${scene.addressed.map(item => item.name).join('; ')}.`);
-    if (scene.objects?.length) details.push(`Objects currently in play: ${scene.objects.map(item => item.name).join('; ')}.`);
-    if (scene.latestUserName) {
-        details.push(`Newest player-turn source: ${scene.latestUserName}. Preserve that turn's speaker and actor ownership.`);
+    if (frame.where) {
+        const within = frame.within ? `, within ${frame.within}` : '';
+        const part = frame.part ? ` (${frame.part})` : '';
+        details.push(`Where: ${frame.where}${part}${within}.${frame.time ? ` Story time: ${frame.time}.` : ''}`);
     }
-    details.push(
-        'Prefer this immediate scene over merely recent alternatives or objects elsewhere. Do not force every listed element into the prose.',
-    );
-    const closing = '</inner_lore_current_scene>';
+    if (frame.withYou.length) {
+        details.push(`With ${pov}: ${frame.withYou.map(item => (item.state ? `${item.name} (${item.state})` : item.name)).join('; ')}.`);
+    }
+    if (frame.addressed.length) details.push(`Directly addressed or affected by ${pov}'s newest turn: ${frame.addressed.join('; ')}.`);
+    if (frame.objects.length) details.push(`Objects in play: ${frame.objects.join('; ')}.`);
+    if (frame.waysOn.length) {
+        details.push(`Ways on from here: ${frame.waysOn.map(way => (way.name ? `${way.name} (${way.relation})` : way.relation)).join('; ')}. Show them as ${pov} would notice them; a place ${pov} has not been to is seen only from outside.`);
+    }
+    if (frame.unconfirmed.length) {
+        details.push(`Recently in the scene, presence not confirmed now: ${frame.unconfirmed.map(item => item.name).join('; ')}.`);
+    }
+    if (frame.elsewhere.length) {
+        details.push(`Mentioned but last recorded elsewhere, so not in view unless the story brings them: ${frame.elsewhere.map(item => `${item.name} (at ${item.at})`).join('; ')}.`);
+    }
+    if (frame.latestUserName) {
+        details.push(`Newest player-turn source: ${frame.latestUserName}. Preserve that turn's speaker and actor ownership.`);
+    }
+    const closing = '</inner_lore_camera>';
     const included = [];
     for (const detail of details) {
         const candidate = [...opening, ...included, detail, closing].join('\n');

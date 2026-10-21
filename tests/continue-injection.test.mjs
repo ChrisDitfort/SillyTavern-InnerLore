@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import { createEmptyStore, snapshotMessageRange } from '../core.js';
 import { installMockInnerLoreStorage } from './mock-storage-server.mjs';
+import { createEventListeners } from './mock-event-source.mjs';
 
 installMockInnerLoreStorage();
 
@@ -15,7 +16,7 @@ const waitFor = async (predicate, timeout = 4_000) => {
 };
 
 test('a continue generation suppresses the latest-turn contract, a normal turn keeps it', async () => {
-    const listeners = new Map();
+    const listeners = createEventListeners();
     const prompts = new Map();
     const chat = [
         { is_user: false, is_system: false, name: 'Narrator', mes: 'The hall is quiet as Freesia waits.' },
@@ -33,6 +34,8 @@ test('a continue generation suppresses the latest-turn contract, a normal turn k
             profiles: [{ id: 'test-profile', name: 'Test Profile', model: 'mock/model' }],
         },
         inner_lore: {
+            // These tests cover other passes; the game ledger has its own.
+            gameEnabled: false,
             enabled: true,
             autoUpdate: true,
             innerSelfEnabled: true,
@@ -73,7 +76,7 @@ test('a continue generation suppresses the latest-turn contract, a normal turn k
         saveMetadataDebounced: () => {},
         setExtensionPrompt: (key, value) => prompts.set(key, value),
         renderExtensionTemplateAsync: async () => '',
-        eventSource: { on: (event, callback) => listeners.set(event, callback) },
+        eventSource: { on: listeners.on },
         eventTypes: events,
         SlashCommandParser: null,
         SlashCommand: null,
@@ -93,13 +96,14 @@ test('a continue generation suppresses the latest-turn contract, a normal turn k
     const CONTRACT_KEY = 'inner_lore_latest_turn_contract';
 
     // A normal story turn injects the latest-turn contract for the user action.
-    listeners.get(events.GENERATION_STARTED)('normal', {}, false);
+    // SillyTavern awaits GENERATION_STARTED before it assembles the prompt.
+    await listeners.get(events.GENERATION_STARTED)('normal', {}, false);
     const normalContract = prompts.get(CONTRACT_KEY);
     assert.ok(normalContract && normalContract.includes('latest_turn_contract'), 'a normal turn injects the latest-turn contract');
     assert.ok(normalContract.includes('Do it, Freesia'), 'the contract carries the newest user action');
 
     // A continue must clear that contract so the model extends the existing
     // reply instead of treating the already-complete turn as satisfied.
-    listeners.get(events.GENERATION_STARTED)('continue', {}, false);
+    await listeners.get(events.GENERATION_STARTED)('continue', {}, false);
     assert.equal(prompts.get(CONTRACT_KEY), '', 'a continue suppresses the latest-turn contract');
 });

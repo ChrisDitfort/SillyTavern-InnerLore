@@ -5,11 +5,12 @@
  * World Progression into one bounded prompt without adding an LLM call.
  */
 
-import { cleanString, compilePromptInjection } from './core.js?v=47';
+import { cleanString, compilePromptInjection } from './core.js?v=48';
 import { contextProfileOverrides } from './context-config.js';
 import { collectRecentStoryExpressions } from './expression-cooldown.js';
+import { renderGamePacket } from './game.js?v=2';
 import { compileProgressionInjection } from './progression.js';
-import { deriveSceneState, renderSceneState } from './scene.js?v=5';
+import { deriveCameraFrame, deriveSceneState, renderCameraPacket } from './scene.js?v=7';
 
 function reasonText(reasons) {
     return Array.isArray(reasons) && reasons.length ? reasons.join(', ') : 'not active in current scene';
@@ -24,7 +25,7 @@ export function formatContextDiagnostics(compilation) {
     lines.push(`Newest player source: ${scene?.latestUserName || '(unknown)'}`);
     lines.push(
         `Prompt size: ${compilation.characters} characters (~${Math.ceil(compilation.characters / 4)} tokens)`,
-        `  Scene ${compilation.blocks.scene.length} · Minds ${compilation.blocks.minds.length} · Lore ${compilation.blocks.lore.length} · Progression ${compilation.blocks.progression.length}`,
+        `  Scene ${compilation.blocks.scene.length} · Game ${compilation.blocks.game?.length || 0} · Minds ${compilation.blocks.minds.length} · Lore ${compilation.blocks.lore.length} · Progression ${compilation.blocks.progression.length}`,
         `Near-duplicate lines suppressed: ${compilation.duplicatesSuppressed}`,
         `Expression cooldown: ${compilation.surfaceCooldownCharacters ? `${compilation.surfaceCooldownCharacters} recent-story characters` : 'inactive'}`,
     );
@@ -69,7 +70,8 @@ export function compileContext(options = {}) {
         const empty = {
             text: '',
             scene: null,
-            blocks: { scene: '', minds: '', lore: '', progression: '' },
+            camera: null,
+            blocks: { scene: '', game: '', minds: '', lore: '', progression: '' },
             selectedBrains: [],
             selectedEntities: [],
             selectedProgression: [],
@@ -95,6 +97,10 @@ export function compileContext(options = {}) {
         playerName: options.playerName,
         lookbackMessages: settings.sceneLookbackMessages ?? 4,
     });
+    const camera = deriveCameraFrame(scene, options.store, {
+        playerName: options.playerName,
+        clockLabel: options.store.progression?.clock?.currentTimeLabel,
+    });
     const recentExpressionText = collectRecentStoryExpressions(options.messages, {
         endIndex: options.currentIndex,
         maximumReplies: settings.expressionCooldownReplies ?? 3,
@@ -110,7 +116,7 @@ export function compileContext(options = {}) {
     let continuity = null;
     let progression = null;
     let sceneText = '';
-    let blocks = { scene: '', minds: '', lore: '', progression: '' };
+    let blocks = { scene: '', game: '', minds: '', lore: '', progression: '' };
     let text = '';
     for (let attempt = 0; ; attempt++) {
         progression = compileProgressionInjection(options.store.progression, options.recentText, {
@@ -127,9 +133,21 @@ export function compileContext(options = {}) {
         });
         sceneText = attemptSettings.sceneContextEnabled === false
             ? ''
-            : renderSceneState(scene, attemptSettings.sceneInjectionBudget ?? 1_200);
+            : renderCameraPacket(camera, attemptSettings.sceneInjectionBudget ?? 1_200);
+        // What the player carries and can buy, and how people regard them,
+        // follows the camera: it is part of what the player can act on now.
+        const gameText = attemptSettings.gameEnabled === false
+            ? ''
+            : renderGamePacket(options.store.game, {
+                scene,
+                camera,
+                store: options.store,
+                playerName: options.playerName,
+                maximumCharacters: attemptSettings.gameInjectionBudget ?? 3_000,
+            });
         blocks = {
             scene: sceneText,
+            game: gameText,
             minds: continuity.blocks.minds,
             lore: continuity.blocks.lore,
             progression: progression.text,
@@ -144,6 +162,7 @@ export function compileContext(options = {}) {
             brainInjectionBudget: scaled(attemptSettings.brainInjectionBudget ?? 6_000, 320),
             loreInjectionBudget: scaled(attemptSettings.loreInjectionBudget ?? 6_500, 240),
             progressionInjectionBudget: scaled(attemptSettings.progressionInjectionBudget ?? 3_000, 240),
+            gameInjectionBudget: scaled(attemptSettings.gameInjectionBudget ?? 3_000, 400),
         };
     }
     if (totalBudget && text.length > totalBudget && blocks.progression) {
@@ -179,6 +198,7 @@ The excerpts below are distinctive wording already spent in the most recent repl
     const compilation = {
         text,
         scene,
+        camera,
         blocks,
         selectedBrains: continuity.selectedBrains,
         selectedEntities: continuity.selectedEntities,

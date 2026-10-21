@@ -138,3 +138,21 @@ test('director prompts expose the configured confidence contract and repairs exp
     assert.match(repaired.at(-1).content, /confidence 0\.70 is below 0\.87/u);
     assert.match(repaired.at(-1).content, /proposal:null/u);
 });
+
+test('a proposal keyed by the record word or naming ids with type prefixes is normalised, not armed as junk', () => {
+    const state = createProgressionState();
+    const result = validateEventDirectorPayload(payload({
+        key: 'proposal',
+        title: 'Courier arrives at the Salt Lantern',
+        action_condition: 'character:jet enters location:salt_lantern',
+        actor_scope: 'named',
+        actor_name: 'character:rowan',
+    }), validation(state));
+    assert.equal(result.proposal.key, 'courier_arrives_at_the_salt_lantern');
+    assert.equal(result.proposal.actionCondition, 'jet enters salt lantern');
+    assert.equal(result.proposal.actorScope, 'player');
+    assert.equal(result.proposal.actorName, '');
+    const definition = eventDefinitionFromProposal({ id: 'p1', definition: { key: 'proposal', title: 'Bell rings', actorName: 'npc:hob garrow', actorScope: 'named' } });
+    assert.equal(definition.key, 'bell_rings');
+    assert.equal(definition.actorName, 'hob garrow');
+});

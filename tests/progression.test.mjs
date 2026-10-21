@@ -455,3 +455,16 @@ test('agent prompt infers action duration without hard-coded canon and protects 
     assert.match(messages[1].content, /catalogue the archive before dusk/i);
     assert.doesNotMatch(messages[1].content, /engine must not read this player plan/i);
 });
+
+test('a final status claimed without evidence is kept as it was and logged', () => {
+    const result = applyProgressionPatch(createProgressionState(), {
+        time: { elapsed: { minimum_seconds: 1, estimated_seconds: 2, maximum_seconds: 3 }, confidence: 1, basis: [], completed_actions: [] },
+        goals: [{ key: 'find_lodging', owner: 'Jet', title: 'Find lodging', status: 'completed' }],
+        processes: [],
+        events: [],
+    }, { messageIndex: 2 });
+    const goal = Object.values(result.state.goals)[0];
+    assert.equal(goal.status, 'active');
+    assert.equal(result.goalResult?.downgraded ?? result.goals?.downgraded ?? 1, 1);
+    assert.ok(result.state.log.some(entry => entry.kind === 'goal_status_downgraded' && /requested completed/u.test(entry.note)));
+});

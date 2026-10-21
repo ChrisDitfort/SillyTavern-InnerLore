@@ -1,6 +1,6 @@
 /** Pure adaptive scheduling for the curator and World Progression agents. */
 
-import { cleanString, contextTokens } from './core.js?v=47';
+import { cleanString, contextTokens } from './core.js?v=48';
 import { explicitUserTimeAdvanceSeconds } from './event-delivery.js?v=2';
 import { listTriggerEventRecords } from './trigger-events.js';
 

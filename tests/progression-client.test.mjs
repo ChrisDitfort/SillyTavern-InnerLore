@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { validateProgressionPayload } from '../progression-client.js';
+import { outputParseDiagnostics } from '../output-codec.js?v=3';
 import { buildProgressionRepairMessages } from '../progression-prompts.js';
 
 function payload(eventEvaluations = []) {
@@ -69,7 +70,7 @@ test('progression validation rejects ungrounded match objects', () => {
                 evidence: [],
                 message_indexes: [14],
             },
-        }]), { expectedEventKeys: ['vault'] }),
+        }]), { expectedEventKeys: ['vault'], lenientMatches: false }),
         /without evidence/u,
     );
     assert.throws(
@@ -83,7 +84,7 @@ test('progression validation rejects ungrounded match objects', () => {
                 evidence: ['The vault opens.'],
                 message_indexes: [14],
             },
-        }]), { expectedEventKeys: ['vault'] }),
+        }]), { expectedEventKeys: ['vault'], lenientMatches: false }),
         /without an actor/u,
     );
     assert.throws(
@@ -93,6 +94,39 @@ test('progression validation rejects ungrounded match objects', () => {
             reason: 'Skipped it.',
         }]), { expectedEventKeys: ['alarm'] }),
         /evaluated:true/u,
+    );
+});
+
+test('ungrounded match claims are dropped with a diagnostic by default, keeping the acknowledgement', () => {
+    const result = validateProgressionPayload(payload([{
+        key: 'vault',
+        evaluated: true,
+        reason: 'Claimed a match.',
+        trigger_action: { matched: true, actor: 'Jet', evidence: [], message_indexes: [14] },
+    }]), { expectedEventKeys: ['vault'] });
+    assert.equal(result.event_evaluations[0].trigger_action, undefined);
+    assert.equal(result.event_evaluations[0].evaluated, true);
+    const diagnostics = outputParseDiagnostics(result);
+    assert.equal(diagnostics[0].code, 'match_downgraded');
+    assert.equal(diagnostics[0].field, 'trigger_action');
+    assert.match(diagnostics[0].reason, /without evidence/u);
+});
+
+test('assisted profiles settle missing, unknown and duplicate acknowledgements locally', () => {
+    const result = validateProgressionPayload(payload([
+        { key: 'invented', evaluated: true, reason: 'Not a real key.' },
+        { key: 'alarm', evaluated: false, reason: '' },
+        { key: 'alarm', evaluated: true, reason: 'Duplicate.' },
+    ]), { expectedEventKeys: ['alarm', 'vault'], lenientAcknowledgements: true });
+    assert.deepEqual(result.event_evaluations.map(item => item.key), ['alarm', 'vault']);
+    assert.equal(result.event_evaluations[0].evaluated, true);
+    assert.ok(result.event_evaluations[0].reason);
+    assert.match(result.event_evaluations[1].reason, /Not evaluated by the model/u);
+    const codes = outputParseDiagnostics(result).map(item => item.code);
+    assert.deepEqual(codes, ['evaluation_dropped', 'evaluation_marked_evaluated', 'evaluation_reason_filled', 'evaluation_dropped', 'acknowledgement_filled']);
+    assert.throws(
+        () => validateProgressionPayload(payload([{ key: 'invented', evaluated: true, reason: 'x' }]), { expectedEventKeys: ['alarm'] }),
+        /unknown event evaluation key/u,
     );
 });
 
@@ -113,6 +147,7 @@ test('progression validation enforces event age, passage range, configured condi
         passageStartIndex: 8,
         passageEndIndex: 14,
         playerName: 'Jet',
+        lenientMatches: false,
     };
     const evaluation = (actor, messageIndex) => payload([{
         key: 'vault',

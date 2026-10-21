@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import { createEmptyStore, EXPRESSION_FOUNDATION_VERSION, mergeEntityOperations, mergeMindOperations, messageFingerprint } from '../core.js';
 import { installMockInnerLoreStorage } from './mock-storage-server.mjs';
+import { createEventListeners } from './mock-event-source.mjs';
 
 installMockInnerLoreStorage();
 
@@ -15,7 +16,7 @@ const waitFor = async (predicate, timeout = 4_000) => {
 };
 
 test('a swipe during analysis discards the stale result and runs one deferred rebuild', async () => {
-    const listeners = new Map();
+    const listeners = createEventListeners();
     const prompts = [];
     const worlds = new Map();
     const chat = [{
@@ -54,6 +55,8 @@ test('a swipe during analysis discards the stale result and runs one deferred re
             profiles: [{ id: 'test-profile', name: 'Test Profile', model: 'mock/model' }],
         },
         inner_lore: {
+            // These tests cover other passes; the game ledger has its own.
+            gameEnabled: false,
             enabled: true,
             autoUpdate: true,
             innerSelfEnabled: true,
@@ -118,7 +121,7 @@ test('a swipe during analysis discards the stale result and runs one deferred re
         saveMetadataDebounced: () => {},
         setExtensionPrompt: (key, value) => prompts.push({ key, value }),
         renderExtensionTemplateAsync: async () => '',
-        eventSource: { on: (event, callback) => listeners.set(event, callback) },
+        eventSource: { on: listeners.on },
         eventTypes: events,
         SlashCommandParser: null,
         SlashCommand: null,
@@ -184,7 +187,7 @@ test('a swipe during analysis discards the stale result and runs one deferred re
 });
 
 test('load-time fingerprint audit rebuilds a changed active swipe and removes stale minds', async () => {
-    const listeners = new Map();
+    const listeners = createEventListeners();
     const prompts = [];
     const chat = [
         { is_user: true, is_system: false, name: 'Jet Storm', mes: '"Thank you, Harrow."' },
@@ -219,6 +222,8 @@ test('load-time fingerprint audit rebuilds a changed active swipe and removes st
             profiles: [{ id: 'test-profile', name: 'Test Profile', model: 'mock/model' }],
         },
         inner_lore: {
+            // These tests cover other passes; the game ledger has its own.
+            gameEnabled: false,
             enabled: true,
             autoUpdate: true,
             innerSelfEnabled: true,
@@ -257,7 +262,7 @@ test('load-time fingerprint audit rebuilds a changed active swipe and removes st
         saveMetadataDebounced: () => {},
         setExtensionPrompt: (key, value) => prompts.push({ key, value }),
         renderExtensionTemplateAsync: async () => '',
-        eventSource: { on: (event, callback) => listeners.set(event, callback) },
+        eventSource: { on: listeners.on },
         eventTypes: events,
         SlashCommandParser: null,
         SlashCommand: null,
@@ -295,7 +300,7 @@ test('load-time fingerprint audit rebuilds a changed active swipe and removes st
 });
 
 test('InnerLore preparation never cancels or blocks the story generation', async () => {
-    const listeners = new Map();
+    const listeners = createEventListeners();
     const prompts = new Map();
     const errors = [];
     const chat = [
@@ -323,6 +328,8 @@ test('InnerLore preparation never cancels or blocks the story generation', async
             profiles: [{ id: 'test-profile', name: 'Test Profile', model: 'mock/model' }],
         },
         inner_lore: {
+            // These tests cover other passes; the game ledger has its own.
+            gameEnabled: false,
             enabled: true,
             autoUpdate: true,
             innerSelfEnabled: true,
@@ -366,7 +373,7 @@ test('InnerLore preparation never cancels or blocks the story generation', async
         saveMetadataDebounced: () => {},
         setExtensionPrompt: (key, value) => prompts.set(key, value),
         renderExtensionTemplateAsync: async () => '',
-        eventSource: { on: (event, callback) => listeners.set(event, callback) },
+        eventSource: { on: listeners.on },
         eventTypes: events,
         SlashCommandParser: null,
         SlashCommand: null,
@@ -413,7 +420,7 @@ test('InnerLore preparation never cancels or blocks the story generation', async
 });
 
 test('generation lifecycle events cannot leave curator passes blocked', async () => {
-    const listeners = new Map();
+    const listeners = createEventListeners();
     const chat = [{ is_user: false, is_system: false, name: 'Narrator', mes: 'The room is quiet.' }];
     const store = createEmptyStore('generation-lifecycle-chat');
     store.lastProcessedIndex = 0;
@@ -425,6 +432,8 @@ test('generation lifecycle events cannot leave curator passes blocked', async ()
             profiles: [{ id: 'test-profile', name: 'Test Profile', model: 'mock/model' }],
         },
         inner_lore: {
+            // These tests cover other passes; the game ledger has its own.
+            gameEnabled: false,
             enabled: true,
             autoUpdate: true,
             innerSelfEnabled: true,
@@ -470,7 +479,7 @@ test('generation lifecycle events cannot leave curator passes blocked', async ()
         saveMetadataDebounced: () => {},
         setExtensionPrompt: () => {},
         renderExtensionTemplateAsync: async () => '',
-        eventSource: { on: (event, callback) => listeners.set(event, callback) },
+        eventSource: { on: listeners.on },
         eventTypes: events,
         SlashCommandParser: null,
         SlashCommand: null,
@@ -508,7 +517,7 @@ test('generation lifecycle events cannot leave curator passes blocked', async ()
 });
 
 test('a newer completed turn survives an older in-flight curator pass', async () => {
-    const listeners = new Map();
+    const listeners = createEventListeners();
     const chat = [{ is_user: false, is_system: false, name: 'Narrator', mes: 'The room is quiet.' }];
     const store = createEmptyStore('queued-turn-race-chat');
     store.lastProcessedIndex = 0;
@@ -520,6 +529,8 @@ test('a newer completed turn survives an older in-flight curator pass', async ()
             profiles: [{ id: 'test-profile', name: 'Test Profile', model: 'mock/model' }],
         },
         inner_lore: {
+            // These tests cover other passes; the game ledger has its own.
+            gameEnabled: false,
             enabled: true,
             autoUpdate: true,
             innerSelfEnabled: true,
@@ -571,7 +582,7 @@ test('a newer completed turn survives an older in-flight curator pass', async ()
         saveMetadataDebounced: () => {},
         setExtensionPrompt: () => {},
         renderExtensionTemplateAsync: async () => '',
-        eventSource: { on: (event, callback) => listeners.set(event, callback) },
+        eventSource: { on: listeners.on },
         eventTypes: events,
         SlashCommandParser: null,
         SlashCommand: null,
@@ -607,7 +618,7 @@ test('a newer completed turn survives an older in-flight curator pass', async ()
 });
 
 test('load-time catch-up drains a persisted 24-turn curator queue', async () => {
-    const listeners = new Map();
+    const listeners = createEventListeners();
     const analyzedPrompts = [];
     const chat = [{
         is_user: false,
@@ -633,6 +644,8 @@ test('load-time catch-up drains a persisted 24-turn curator queue', async () => 
             profiles: [{ id: 'test-profile', name: 'Test Profile', model: 'mock/model' }],
         },
         inner_lore: {
+            // These tests cover other passes; the game ledger has its own.
+            gameEnabled: false,
             enabled: true,
             autoUpdate: true,
             innerSelfEnabled: true,
@@ -671,7 +684,7 @@ test('load-time catch-up drains a persisted 24-turn curator queue', async () => 
         saveMetadataDebounced: () => {},
         setExtensionPrompt: () => {},
         renderExtensionTemplateAsync: async () => '',
-        eventSource: { on: (event, callback) => listeners.set(event, callback) },
+        eventSource: { on: listeners.on },
         eventTypes: events,
         SlashCommandParser: null,
         SlashCommand: null,
@@ -720,7 +733,7 @@ test('load-time catch-up drains a persisted 24-turn curator queue', async () => 
 });
 
 test('a fresh character greeting seeds its first NPC mind automatically', async () => {
-    const listeners = new Map();
+    const listeners = createEventListeners();
     const chat = [{
         is_user: false,
         is_system: false,
@@ -735,6 +748,8 @@ test('a fresh character greeting seeds its first NPC mind automatically', async 
             profiles: [{ id: 'test-profile', name: 'Test Profile', model: 'mock/model' }],
         },
         inner_lore: {
+            // These tests cover other passes; the game ledger has its own.
+            gameEnabled: false,
             enabled: true,
             autoUpdate: true,
             innerSelfEnabled: true,
@@ -774,7 +789,7 @@ test('a fresh character greeting seeds its first NPC mind automatically', async 
         saveMetadataDebounced: () => {},
         setExtensionPrompt: () => {},
         renderExtensionTemplateAsync: async () => '',
-        eventSource: { on: (event, callback) => listeners.set(event, callback) },
+        eventSource: { on: listeners.on },
         eventTypes: events,
         SlashCommandParser: null,
         SlashCommand: null,

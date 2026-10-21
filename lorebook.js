@@ -1,4 +1,4 @@
-import { cleanString, hashString, renderLoreContent } from './core.js?v=47';
+import { cleanString, hashString, renderLoreContent } from './core.js?v=48';
 
 const AUTOMATION_ID = 'inner-lore-v1';
 const LOREBOOK_OWNER_KEY = 'innerLore';
@@ -139,7 +139,8 @@ export async function ensureLorebook(store, options = {}) {
  */
 export async function syncLorebook(store, options = {}) {
     const { name, data } = await ensureLorebook(store, options);
-    const records = Object.values(store.entities || {});
+    // The player's own record anchors the scene; it is not lore for the narrator.
+    const records = Object.values(store.entities || {}).filter(record => !record?.player);
     const liveIds = new Set(records.map(record => record.id));
     let created = 0;
     let updated = 0;

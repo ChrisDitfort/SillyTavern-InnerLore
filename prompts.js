@@ -7,7 +7,8 @@ import {
     renderCompactEntity,
     selectRelevantBrains,
     selectRelevantEntities,
-} from './core.js?v=47';
+} from './core.js?v=48';
+import { buildCuratorHints } from './curator-hints.js?v=1';
 
 const DETAIL_TARGETS = Object.freeze({
     compact: 'For a new entity with enough evidence, aim for roughly 80–160 words across its summary, description, and lists.',
@@ -163,7 +164,7 @@ function buildEntitySnapshot(store, transcript, currentIndex, maximumEntities) {
         } : undefined,
         unresolved: record.unresolved || [],
         status: record.status,
-        compact_reference: renderCompactEntity(record, 2_000),
+        compact_reference: renderCompactEntity(record, 2_000, { layoutLimit: 0 }),
     }));
 }
 
@@ -220,8 +221,11 @@ export function buildAnalysisMessages(options) {
         return name => claimed.has(canonicalNameKey(name));
     };
     const isClaimed = claimedMindNames();
+    const playerKey = canonicalNameKey(options.playerName);
     const charactersWithoutMinds = existingEntities
         .filter(entity => entity.type === 'character')
+        // The player never gets a private mind, under any name.
+        .filter(entity => !entity.player && (!playerKey || canonicalNameKey(entity.name) !== playerKey))
         .filter(entity => !isClaimed(entity.name) && !(entity.aliases || []).some(alias => isClaimed(alias)))
         .map(entity => entity.name)
         .slice(0, 8);
@@ -236,6 +240,10 @@ export function buildAnalysisMessages(options) {
         .map(entity => entity.name)
         .slice(0, 4);
     const cardContext = cleanString(options.characterCard, 20_000);
+    // Smaller models get code-found identity and coverage hints for the passage.
+    const curatorHints = options.assisted && !options.foundationOnly
+        ? buildCuratorHints({ store: options.store, transcript: options.transcript, playerName: options.playerName })
+        : '';
     const customInstructions = cleanString(settings.customInstructions, 4_000);
     const recentExpressionText = cleanString(options.recentExpressionText, 4_000);
     const declaredLocationNames = extractDeclaredLocationNames(transcript);
@@ -505,7 +513,7 @@ Characters tracked in lore but missing a private mind (create the mind of any of
 Beings currently misfiled as items or creatures but described as sentient companions (if PASSAGE shows them participating: fix the entity type to "character" AND create their mind): ${companionsMistypedAsItems.length ? companionsMistypedAsItems.join(', ') : '(none)'}
 </RUN_CONFIGURATION>
 
-${foundationOnlyInstructions}
+${curatorHints}${foundationOnlyInstructions}
 
 <PASSAGE>
 ${transcript || '(No narrative passage supplied.)'}
@@ -518,6 +526,14 @@ Before returning JSON, inspect the passage for any agreement, obedience, composu
 3. Current Mind must distinguish what the NPC committed to aloud from what they privately want. If any inner_thought questions whether they meant the spoken yes, no other field may claim confirmed acceptance.
 Scan the proposed JSON for these contradictions and correct them before output.
 </REQUIRED_FINAL_VOLITION_AUDIT>
+
+<REQUIRED_FINAL_COVERAGE_AUDIT>
+Before returning JSON, check coverage and placement against PASSAGE and CHARACTER_CARD:
+1. Every named person who speaks, acts, is acted on, or gives an order in PASSAGE has an entity record; reuse the EXISTING_STATE name.
+2. Every place where a scene in PASSAGE happens, or that someone goes to, has a location record; a smaller place inside a known one sets parent_location.
+3. Each character's current_location is the place where PASSAGE leaves them, and their current_state agrees with it.
+4. Details from CHARACTER_CARD are canon and may be recorded; anything else must be shown in PASSAGE.
+</REQUIRED_FINAL_COVERAGE_AUDIT>
 
 <REQUIRED_SURFACE_NOVELTY_AUDIT>
 Before returning JSON, compare each proposed Current Mind field against RECENT_EXPRESSION_COOLDOWN. Rewrite or omit any already-spent gesture, prop use, gaze/body tell, self-command, conspicuous phrase, or dialogue-shaped sentence scaffold. Keep persistent emotion and conflict intact, but leave the narrator multiple fresh ways to express them. Do not solve repetition by flattening the NPC into generic calm exposition.

@@ -2,6 +2,7 @@ import {
     applyStoreCheckpoint,
     alignExplicitLocationOperations,
     brainPsychologyCount,
+    buildCastLock,
     buildLatestTurnContract,
     canonicalNameKey,
     cleanString,
@@ -16,22 +17,25 @@ import {
     generatedProseIssue,
     hashString,
     messageRangeMatchesSnapshot,
+    ensurePlayerEntity,
     mergeEntityOperations,
     mergeMindOperations,
     messageFingerprint,
+    playerEntityKeys,
     normalizeBrainRecord,
     normalizeStore,
     parseCardSeedEntities,
     recordCheckpoint,
     refreshMentionRecency,
     renderLoreContent,
+    resolveLocationReference,
     selectResumeCheckpoint,
     snapshotMessageRange,
     summaryceptionRecallText,
     uniqueStrings,
-} from './core.js?v=47';
+} from './core.js?v=48';
 import { compileContext } from './context-compiler.js?v=5';
-import { deriveSceneState } from './scene.js?v=5';
+import { deriveCameraFrame, deriveSceneState } from './scene.js?v=7';
 import {
     createMapPanel,
     describeSurroundings,
@@ -68,7 +72,16 @@ import {
     waitForBackgroundIdle,
     testInnerLoreConnection,
     setStoryIdleGate,
-} from './llm-client.js?v=15';
+    fitsBesideStory,
+    isLimitedProvider,
+    limitedHost,
+    modelSizeBillions,
+    oneAtATimeProvider,
+    storyProviderBodyLines,
+    providerHasRoom,
+    storyCost,
+    storyProvider,
+} from './llm-client.js?v=16';
 import {
     deleteInnerLorebooksForChat,
     openInnerLorebook,
@@ -81,7 +94,7 @@ import {
     formatTranscript,
     insufficientResponseCap,
     planNarratorPromptDelivery,
-} from './prompts.js?v=8';
+} from './prompts.js?v=9';
 import { compileTriggerEventDeliveryPreview } from './event-delivery.js?v=2';
 import { requestEventDirectorProposal } from './event-director-client.js';
 import { buildEventDirectorMessages } from './event-director-prompts.js';
@@ -96,9 +109,42 @@ import {
     recordEventDirectorAttempt,
 } from './event-director.js';
 import { decideInnerLoreMaintenance } from './maintenance-scheduler.js?v=4';
+import { CHOICES_EXTRA_KEY, extractReplyChoices, fallbackChoices, storedChoices } from './player-choices.js?v=1';
 import { EmbeddedStorageClient } from './embedded-storage.js?v=1';
 import { requestProgressionPatch, testProgressionConnection } from './progression-client.js';
 import { buildProgressionMessages } from './progression-prompts.js';
+import {
+    applyGameOperations,
+    createGameState,
+    gameContext,
+    gameOverview,
+    standingTier,
+    gameStateBefore,
+    getGameStats,
+    groundedRecords,
+    introductionOperations,
+    needsStartingKit,
+    normalizeGameRecords,
+    reconcileGameIdentities,
+    supersededPlannerPrices,
+    normalizeGameState,
+    placeRefOf,
+    plannerTargets,
+} from './game.js?v=2';
+import { buildLedgerMessages, buildPlannerMessages } from './game-prompts.js?v=2';
+import { requestGamePatch } from './game-client.js?v=1';
+import { isTextCompletionApi, renderTextPacket, textPacketBudget } from './text-packet.js?v=1';
+import { createGamePanel, createTradePanel } from './game-view.js?v=1';
+import {
+    PORTRAIT_DEFAULTS,
+    PORTRAIT_METADATA_KEY,
+    composePortraitPrompt,
+    createPortraitQueue,
+    findPortrait,
+    portraitPayload,
+    portraitSource,
+    requestPortraitTags,
+} from './portrait.js?v=1';
 import {
     applyProgressionPatch,
     createProgressionState,
@@ -136,8 +182,10 @@ const MODULE_KEY = 'inner_lore';
 const PROMPT_KEY = 'inner_lore_context';
 const TURN_CONTRACT_PROMPT_KEY = 'inner_lore_latest_turn_contract';
 const TRIGGER_DELIVERY_PROMPT_KEY = 'inner_lore_trigger_delivery';
+// For a text-completion story model: InnerLore's lore entries, after the story string.
+const TEXT_MEMORY_PROMPT_KEY = 'inner_lore_text_memory';
 const DISPLAY_NAME = 'InnerLore';
-const EXTENSION_VERSION = '0.24.0';
+const EXTENSION_VERSION = '0.26.0';
 const LOG_PREFIX = '[InnerLore]';
 
 /**
@@ -183,6 +231,9 @@ let narratorPromptRestore = null;
 /** Advisory: a response cap too small for the narration length guarantees
  *  severed or empty replies and eventual quarantine; say so once per load. */
 async function warnOnInsufficientResponseCap() {
+    // NovelAI's text models write at most 250 tokens a request by design; the
+    // chat preset's response length does not apply to them.
+    if (storyIsTextCompletion()) return;
     try {
         const oaiModule = await import('/scripts/openai.js');
         const capTokens = Number(oaiModule.oai_settings?.openai_max_tokens) || 0;
@@ -214,6 +265,10 @@ async function findMainPromptEntry() {
     return prompts.find(prompt => prompt?.identifier === 'main') || null;
 }
 
+// NovelAI's own system prompt for Xialong: replacing it makes Xialong write
+// like base GLM, so InnerLore's narrator prompt follows it instead.
+const XIALONG_SYSTEM_PROMPT = 'You are Xialong (夏龍), an AI model finetuned by Anlatan. You follow the user\'s instructions precisely while bringing creativity, nuance, and depth to every response. Adapt your voice and style to match what the task demands.';
+
 const NPC_STATION_DIRECTIVE = 'NPC voice: characters never lecture world lore, cosmology, or power-taxonomy uninvited. Each answers from their own station - a merchant sells and appraises, a scholar explains, a guard suspects - volunteering at most one detail their own life would naturally carry, and declining, deflecting, or charging for the rest. Trade terms stay inside a specialist\'s own shop-talk, never a guided tour of the ladder.';
 
 const NARRATION_FRESHNESS_DIRECTIVE = 'Narration freshness: never reuse a distinctive image, descriptor, phrase, or closing construction that appeared in the earlier replies. Vary sentence architecture between replies - length, opening shape, and especially the final line. Two consecutive replies must never end with the same shaped closer (for example "just another ..."), and a sensory detail already given (a smell, a texture, a complexion) is spent: reference it only when the scene truly returns to it, and then with new wording.';
@@ -223,6 +278,18 @@ const NARRATION_LENGTH_DIRECTIVES = Object.freeze({
     standard: 'Narration length: aim for roughly 250-400 words — two to four paragraphs covering a complete beat with sensory texture.',
     long: 'Narration length: write a long, immersive reply of roughly 500-800 words — several paragraphs, layered detail, room for the scene to breathe.',
 });
+
+const GUIDED_PLAY_DIRECTIVE = `GUIDED PLAY (amends the agency rules above only where stated):
+- The camera packet in the game state is {{user}}'s eyes and ears. Build each reply from what {{user}} can see, hear and reach from there, and let the ways on show naturally in the scene: a lit doorway, a road that forks, someone beckoning.
+- {{user}} may play in short commands ("go to the harbour", "talk to the innkeeper", "ask the guard about the curfew", "look at the carved door"). Treat a command as a declared action already under way: narrate {{user}} doing it from the outside, then move straight to the world's response.
+- A commanded line of speech appears only as its gist in reported speech ("You ask the innkeeper whether a room is free"). Never invent {{user}}'s exact words, tone or feelings, or any action beyond the command.
+- After the prose, end every reply with a fenced choices block: 3 to 5 moves {{user}} could make next, one per line, each starting with go:, talk:, do: or look: and written as a command of at most eight words. Offer only what {{user}} can perceive or reasonably attempt right now, include at least one way on when the scene has one, never decide for {{user}}, and never reveal anything behind the camera. Nothing follows the block. Example:
+\`\`\`choices
+go: Head down to the harbour
+talk: Ask the innkeeper about a room
+do: Pick up the dropped letter
+look: Study the carved door
+\`\`\``;
 
 /** The prompt order the manager will actually use for this character. */
 async function findActivePromptOrder() {
@@ -249,8 +316,13 @@ async function applyNarratorPromptSwap(shouldApply) {
     const deliveryPlan = planNarratorPromptDelivery(orderList);
     narratorPromptRestore = { entry, content: entry.content, orderList, orderRestore: null };
     const lengthDirective = NARRATION_LENGTH_DIRECTIVES[settings.narrationLength];
-    const directives = [lengthDirective, NARRATION_FRESHNESS_DIRECTIVE, NPC_STATION_DIRECTIVE].filter(Boolean).join('\n\n');
+    const guidedPlay = settings.guidedPlayEnabled !== false ? GUIDED_PLAY_DIRECTIVE : '';
+    const directives = [lengthDirective, NARRATION_FRESHNESS_DIRECTIVE, NPC_STATION_DIRECTIVE, guidedPlay].filter(Boolean).join('\n\n');
     entry.content = directives ? `${template}\n\n${directives}` : template;
+    const oaiModule = await import('/scripts/openai.js');
+    if (/^xialong/iu.test(String(oaiModule.oai_settings?.custom_model || ''))) {
+        entry.content = `${XIALONG_SYSTEM_PROMPT}\n\n${entry.content}`;
+    }
     if (deliveryPlan && orderList) {
         if (deliveryPlan.existed) {
             // Present but disabled: enable it in place for this generation.
@@ -468,6 +540,7 @@ const defaultSettings = Object.freeze({
     historyBudgetCharacters: 6_000,
     historyMaxTurns: 24,
     narrationLength: 'standard',
+    guidedPlayEnabled: true,
     connectionSource: 'profile',
     connectionProfileId: '',
     fallbackConnectionProfileId: '',
@@ -481,6 +554,8 @@ const defaultSettings = Object.freeze({
     autoRebuildOnHistoryChange: true,
     autoRebuildMessageLimit: 120,
     customInstructions: '',
+    // YAML added to story requests on Featherless or NovelAI (blank = thinking off, the preset's top_k and min_p).
+    storyProviderBody: '',
     worldProgressionEnabled: true,
     progressionEveryAssistantTurns: 2,
     progressionAutonomy: 'conservative',
@@ -505,6 +580,53 @@ const defaultSettings = Object.freeze({
     automaticEventDirectorMinimumConfidence: 0.82,
     automaticEventDirectorIncludePrivateMinds: false,
     automaticEventDirectorExpirationTurns: 40,
+    // Game system: the ledger keeps money, belongings, object whereabouts,
+    // prices, standing and reputation from each reply; the scene planner
+    // prepares people, objects and prices for where the player is and can go.
+    gameEnabled: true,
+    gameLedgerEnabled: true,
+    gameConnectionProfileId: '',
+    gameMaximumResponseTokens: 4_000,
+    gameTemperature: 0.1,
+    gameCustomInstructions: '',
+    gameInjectionBudget: 3_000,
+    scenePlannerEnabled: true,
+    scenePlannerPrefetch: true,
+    // On a provider that serves one request at a time, the story stops the running pass (it re-runs after the reply).
+    storyPreemptsBackground: true,
+    scenePlannerMaximumPlaces: 2,
+    scenePlannerStaleHours: 8,
+    // When the newest player turn heads for a place with nothing prepared,
+    // prepare it before the story arrives there, waiting up to this long.
+    scenePlannerAtSend: true,
+    scenePlannerSendWaitSeconds: 60,
+    plannerConnectionProfileId: '',
+    plannerMaximumResponseTokens: 6_000,
+    // A profile here splits the curator: people, places and whereabouts stay
+    // on the curator profile, NPC minds go to this one, side by side.
+    mindsConnectionProfileId: '',
+    // Background help for smaller models (list-first ledger, code-found hints,
+    // evidence check, identity and coverage hints, lenient progression): auto
+    // turns it on for models under 70B by name and for unnamed sizes on a
+    // one-request-at-a-time provider (NovelAI's GLM 4.6); Claude stays plain.
+    assistedBackground: 'auto',
+    plannerTemperature: 0.7,
+    plannerCustomInstructions: '',
+    // NPC portraits, drawn by an image server that speaks the Stable Diffusion
+    // WebUI API (Local Dream through LDBridge); an empty URL means the server
+    // SillyTavern's own image generation uses.
+    portraitsEnabled: true,
+    portraitServerUrl: '',
+    portraitStyle: PORTRAIT_DEFAULTS.style,
+    portraitNegative: PORTRAIT_DEFAULTS.negative,
+    portraitSteps: PORTRAIT_DEFAULTS.steps,
+    portraitCfg: PORTRAIT_DEFAULTS.cfg,
+    // The people here as a row of cards under the top bar.
+    castCardsEnabled: true,
+    // Send the curator, progression, game ledger and scene planner at once
+    // instead of one after another (for the Claude bridge's agent pool, or a
+    // provider that serves several requests at a time).
+    parallelBackgroundPasses: false,
     lorebookRegistry: {},
     pendingChatCleanups: {},
     storageBackend: 'sqlite',
@@ -521,6 +643,9 @@ function activeStorageClient() {
 }
 
 const runtime = {
+    choicesHidden: false,
+    choicesSignature: '',
+    lastFilledChoice: '',
     processing: false,
     rebuilding: false,
     queued: false,
@@ -831,6 +956,8 @@ async function cleanupDeletedChat(chatId, { silent = false } = {}) {
         ctx.setExtensionPrompt(PROMPT_KEY, '', 1, 0, false, 0);
         ctx.setExtensionPrompt(TURN_CONTRACT_PROMPT_KEY, '', 1, 0, false, 0);
         ctx.setExtensionPrompt(TRIGGER_DELIVERY_PROMPT_KEY, '', 1, 0, false, 0);
+        ctx.setExtensionPrompt(TEXT_MEMORY_PROMPT_KEY, '', 0, 0, false, 0);
+        runtime.lastTextMemory = '';
         runtime.lastInjection = '';
         runtime.lastTurnContract = '';
         runtime.lastTriggerDeliveryPrompt = '';
@@ -921,6 +1048,26 @@ async function retryPendingChatCleanups() {
 
 function log(...args) {
     if (getSettings().debug) console.debug(LOG_PREFIX, ...args);
+}
+
+/**
+ * Background help for smaller models (list-first ledger, code-found hints,
+ * evidence check): on for a profile's model under 70B by its name (Gemma 4
+ * 31B, Qwen 27B), off for large or unnamed ones (Claude, GLM 4.6), unless
+ * the setting forces it.
+ */
+function assistedFor(profileId) {
+    const mode = getSettings().assistedBackground || 'auto';
+    if (mode === 'on') return true;
+    if (mode === 'off') return false;
+    const profile = (context().extensionSettings?.connectionManager?.profiles || []).find(item => item?.id === profileId);
+    const size = modelSizeBillions(profile?.model);
+    return size < 70 || (!Number.isFinite(size) && Boolean(oneAtATimeProvider(profileId)));
+}
+
+/** The story is written by a text-completion model (NovelAI, KoboldAI, text-generation-webui). */
+function storyIsTextCompletion() {
+    return isTextCompletionApi(context().mainApi);
 }
 
 function currentChatId() {
@@ -1115,7 +1262,10 @@ async function loadChatStore() {
     const pointer = !greetingOnlyChat && metadataPointerValue?.chatId && metadataPointerValue.chatId !== chatId
         ? metadataPointerValue
         : (registryPointer || metadataPointerValue);
-    const legacyStore = metadataPointerValue && isLegacyInnerLoreStore(metadataValue) ? metadataValue : null;
+    // A whole store kept in the chat file (the pre-storage format) migrates
+    // into storage, unless it was cloned onto a brand-new chat from another.
+    const inheritedLegacyStore = greetingOnlyChat && metadataValue?.chatId && metadataValue.chatId !== chatId;
+    const legacyStore = !inheritedLegacyStore && isLegacyInnerLoreStore(metadataValue) ? metadataValue : null;
     const initialStore = createInitialChatStore(chatId, legacyStore);
     // Chats with existing SQLite worlds always keep using the server backend;
     // everything else follows the configured backend (embedded = standalone).
@@ -1197,9 +1347,10 @@ async function reloadCurrentChatStore() {
     try {
         const chatId = currentChatId();
         if (!chatId || !runtime.storageWorldId) return;
+        // load() returns the stored record; the world itself is its store.
         const loaded = await activeStorageClient().load(runtime.storageWorldId);
-        if (loaded && loaded.chatId === chatId) {
-            runtime.store = normalizeStore(loaded, chatId);
+        if (loaded?.store && loaded.chatId === chatId) {
+            runtime.store = normalizeStore(loaded.store, chatId);
             runtime.committedEntityCount = Object.keys(runtime.store?.entities || {}).length;
             if (Number.isFinite(loaded.revision)) runtime.storageRevision = loaded.revision;
             updateUI();
@@ -1592,6 +1743,12 @@ function ensureDockStyles() {
 #il_cast_bar.il-dock{--il-gold:#ecd9ac;--il-line:rgba(255,255,255,.09);top:var(--il-dock-top,calc(env(safe-area-inset-top,0px) + 44px));left:0;right:0;width:auto;max-width:none;display:block;padding:0;background:linear-gradient(180deg,rgba(15,18,24,.97),rgba(10,12,17,.96));border-bottom:1px solid rgba(226,201,154,.16);box-shadow:0 8px 20px rgba(0,0,0,.35);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);color:#d6dbe4;font-size:calc(var(--mainFontSize,15px) * .93);line-height:1.3;pointer-events:auto}
 #il_cast_bar.il-dock *{box-sizing:border-box}
 body.il-dock-active #chat{padding-top:var(--il-dock-clearance,96px)}
+#il_menu_bar{--il-gold:#ecd9ac;flex:none;order:99;position:relative;z-index:30;display:flex;justify-content:center;gap:6px;padding:4px 10px calc(4px + env(safe-area-inset-bottom,0px));background:linear-gradient(180deg,rgba(14,17,23,.97),rgba(9,11,15,.98));border-top:1px solid rgba(226,201,154,.16);color:#aab3c0;font-size:calc(var(--mainFontSize,15px) * .78);line-height:1.2}
+#il_menu_bar *{box-sizing:border-box}
+.il-menu-item{flex:0 1 104px;min-width:68px;display:flex;flex-direction:column;align-items:center;gap:3px;padding:6px 6px 5px;border:0;border-radius:12px;background:none;color:inherit;font:inherit;letter-spacing:.02em;cursor:pointer}
+.il-menu-item svg{width:24px;height:24px;color:#e2c99a}
+.il-menu-item:hover,.il-menu-item:focus-visible{background:rgba(226,201,154,.09);color:var(--il-gold);outline:none}
+body.il-keyboard #il_menu_bar{display:none}
 .il-hud{display:flex;align-items:center;gap:10px;max-width:1180px;margin:0 auto;padding:6px 12px;min-height:54px}
 .il-hud-place{display:flex;align-items:center;gap:9px;flex:0 1 auto;min-width:0;max-width:min(34%,320px);padding:4px 8px 4px 4px;border:0;border-radius:12px;background:none;color:inherit;font:inherit;text-align:left;cursor:pointer}
 .il-hud-place:hover{background:rgba(255,255,255,.05)}
@@ -1611,6 +1768,21 @@ body.il-dock-active #chat{padding-top:var(--il-dock-clearance,96px)}
 .il-hud-avatar.is-recent .il-hud-face{opacity:.55;filter:saturate(.6)}
 .il-hud-avatar.is-more .il-hud-face{background:rgba(255,255,255,.08);color:#cfd6e0;box-shadow:0 0 0 1px var(--il-line)}
 .il-hud-name{max-width:50px;font-size:.7em;color:#aab3c0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.il-hud-face.has-portrait,.il-cast-portrait.has-portrait{background:#1a1f29;overflow:hidden}
+.il-hud-face img,.il-cast-portrait img,.il-entity-photo img{display:block;width:100%;height:100%;object-fit:cover;object-position:50% 22%;border-radius:inherit}
+.il-hud.has-cards .il-hud-place{flex:1 1 auto;max-width:none}
+.il-hud.has-cards .il-hud-cast{flex:none;padding-left:10px}
+.il-cast-row{display:flex;gap:8px;max-width:1180px;margin:0 auto;padding:0 12px 8px;overflow-x:auto;overflow-y:hidden;scrollbar-width:none}
+.il-cast-row::-webkit-scrollbar{display:none}
+.il-cast-card{flex:0 0 auto;display:flex;align-items:center;gap:9px;width:176px;padding:5px 10px 5px 5px;border:1px solid var(--il-line);border-radius:14px;background:rgba(255,255,255,.035);color:inherit;font:inherit;text-align:left;cursor:pointer}
+.il-cast-card:hover,.il-cast-card:focus-visible{border-color:rgba(226,201,154,.45);outline:none}
+.il-cast-card.is-recent{opacity:.62}
+.il-cast-portrait{position:relative;flex:none;width:46px;height:46px;border-radius:11px;display:grid;place-items:center;font-size:.82em;font-weight:700;color:#0d1016;background:hsl(var(--hue,210) 34% 64%)}
+.il-cast-card.is-drawing .il-cast-portrait::after{content:'';position:absolute;inset:0;border-radius:inherit;box-shadow:inset 0 0 0 2px rgba(226,201,154,.8);animation:il-drawing 1.4s ease-in-out infinite}
+@keyframes il-drawing{50%{opacity:.2}}
+.il-cast-text{min-width:0;display:flex;flex-direction:column;gap:1px}
+.il-cast-text b{font-size:.86em;font-weight:650;line-height:1.2;color:#e8ebf0;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere}
+.il-cast-text small{font-size:.72em;color:#8f99a8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .il-hud-actions{flex:none;display:flex;gap:6px}
 .il-hud-btn{width:40px;height:40px;border-radius:12px;display:grid;place-items:center;padding:0;border:1px solid var(--il-line);background:rgba(255,255,255,.04);color:#cfd6e0;cursor:pointer}
 .il-hud-btn:hover{border-color:rgba(226,201,154,.45);color:var(--il-gold)}
@@ -1645,6 +1817,15 @@ body.il-dock-active #chat{padding-top:var(--il-dock-clearance,96px)}
 .il-hud-name{display:none}
 .il-hud-face{width:32px;height:32px}
 .il-hud-btn{width:38px;height:38px}
+.il-cast-row{gap:6px;padding:0 8px 6px}
+.il-cast-card{width:164px;gap:7px}
+.il-cast-portrait{width:42px;height:42px}
+}
+@media (max-width:480px){
+.il-hud-place{max-width:36%}
+.il-hud-actions{gap:4px}
+.il-hud-btn{width:34px;height:34px}
+.il-hud-btn svg{width:17px;height:17px}
 }
 #il_entity_card{position:fixed!important;top:0!important;left:0!important;right:0!important;bottom:0!important;width:100vw!important;height:100vh!important;height:100dvh!important;max-width:none!important;z-index:42000;background:#0c0f15;color:#c9cfd9}
 .il-entity-card-inner{display:flex;flex-direction:column;width:100%;height:100%}
@@ -1654,6 +1835,14 @@ body.il-dock-active #chat{padding-top:var(--il-dock-clearance,96px)}
 .il-entity-title{font-weight:700;font-size:1.15em;color:#e2c99a;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .il-entity-photo{display:flex;width:52px;height:52px;align-items:center;justify-content:center;border:1px solid #4a5468;border-radius:12px;color:#9aa8be;background:radial-gradient(circle at 50% 30%, rgba(90,105,135,.4), rgba(28,32,42,.9))}
 .il-entity-photo svg{width:30px;height:30px}
+.il-entity-photo.has-portrait{overflow:hidden;border-color:rgba(226,201,154,.45)}
+.il-entity-portrait-slot{display:flex;flex-direction:column;align-items:center;gap:8px;margin-bottom:14px}
+.il-entity-portrait{position:relative;width:min(100%,300px);aspect-ratio:1;margin:0;border:1px solid rgba(226,201,154,.3);border-radius:16px;overflow:hidden;background:radial-gradient(circle at 50% 35%,rgba(90,105,135,.35),rgba(20,24,33,.95));box-shadow:0 10px 30px rgba(0,0,0,.45)}
+.il-entity-portrait img{display:block;width:100%;height:100%;object-fit:cover}
+.il-entity-portrait.is-empty{display:grid;place-items:center;padding:16px;text-align:center;color:#8f99a8;font-size:.85em;font-style:italic}
+.il-entity-portrait figcaption{position:absolute;left:0;right:0;bottom:0;padding:8px;background:linear-gradient(180deg,transparent,rgba(0,0,0,.75));color:#ecd9ac;font-size:.8em;text-align:center}
+.il-entity-redraw{padding:6px 12px;border:1px solid #4a5468;border-radius:10px;background:rgba(28,32,42,.8);color:#c3cad6;font:inherit;font-size:.82em;cursor:pointer}
+.il-entity-redraw:hover{border-color:rgba(226,201,154,.55);color:#ecd9ac}
 .il-entity-close{display:flex;width:40px;height:40px;align-items:center;justify-content:center;border:1px solid #4a5468;border-radius:10px;background:rgba(28,32,42,.8);color:#c3cad6;cursor:pointer}
 .il-entity-close svg{width:18px;height:18px}
 .il-entity-close:hover{border-color:#c96a6a;color:#e8a0a0}
@@ -1678,6 +1867,8 @@ const HUD_SVG = {
     map: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M9 4 3 6v14l6-2 6 2 6-2V4l-6 2-6-2z"/><path d="M9 4v14M15 6v14"/></svg>',
     compass: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m15.5 8.5-2 5-5 2 2-5z"/></svg>',
     chevron: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>',
+    backpack: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 4.6V3.5a2 2 0 0 1 4 0v1.1"/><path d="M6 10.5A5.9 5.9 0 0 1 12 4.6a5.9 5.9 0 0 1 6 5.9V19a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2z"/><path d="M6 12.5H4.5a1 1 0 0 0-1 1V18M18 12.5h1.5a1 1 0 0 1 1 1V18"/><rect x="8.5" y="14" width="7" height="4.5" rx="1.2"/><path d="M8.5 11h7"/></svg>',
+    trade: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8h14M14 4l4 4-4 4"/><path d="M20 16H6M10 12l-4 4 4 4"/></svg>',
 };
 // Avatars shown in the bar itself; the rest are one tap away in the drawer.
 const HUD_MAX_AVATARS = 6;
@@ -1744,6 +1935,199 @@ function renderMindInChat(name) {
     bubble.scrollIntoView({ behavior: 'smooth', block: 'end' });
 }
 
+/**
+ * NPC portraits: kept in the chat's metadata ({ name key: { name, path,
+ * prompt, seed, at } }) so they travel with the chat and its branches. The
+ * files live in SillyTavern's user images, under InnerLore/.
+ */
+function portraitsOn() {
+    const settings = getSettings();
+    return settings.enabled && settings.portraitsEnabled !== false;
+}
+
+function portraitRecords() {
+    const records = context().chatMetadata?.[PORTRAIT_METADATA_KEY];
+    return records && typeof records === 'object' ? records : {};
+}
+
+function portraitOf(name) {
+    const key = canonicalNameKey(name);
+    const entity = Object.values(getChatStore()?.entities || {})
+        .find(candidate => candidate?.type === 'character'
+            && (canonicalNameKey(candidate.name) === key || (candidate.aliases || []).some(alias => canonicalNameKey(alias) === key)));
+    return findPortrait(portraitRecords(), name, [entity?.name, ...(entity?.aliases || [])].filter(Boolean));
+}
+
+function portraitQueue() {
+    runtime.portraitQueue ||= createPortraitQueue({ run: drawPortrait, onChange: refreshPortraitViews });
+    return runtime.portraitQueue;
+}
+
+/**
+ * Queue a portrait for each person named who has none and whose looks the
+ * story has described. Shrinking and showing pictures needs a browser.
+ */
+function wantPortraits(names, { force = false } = {}) {
+    if (!portraitsOn() || typeof globalThis.Image !== 'function') return;
+    const chatId = currentChatId();
+    const store = getChatStore();
+    if (!chatId || !store) return;
+    const queue = portraitQueue();
+    queue.keepChat(chatId);
+    queue.want(names
+        .filter(name => force || (!portraitOf(name) && !queue.isDrawing(canonicalNameKey(name))))
+        .filter(name => portraitSource(store, name))
+        .map(name => ({ key: canonicalNameKey(name), name, chatId, force })));
+}
+
+function portraitServer() {
+    const sd = context().extensionSettings?.sd || {};
+    return {
+        url: cleanString(getSettings().portraitServerUrl, 300)
+            || (sd.source === 'auto' ? cleanString(sd.auto_url, 300) : '')
+            || PORTRAIT_DEFAULTS.serverUrl,
+        auth: sd.auto_auth || '',
+    };
+}
+
+// The server's picture (a 1024px PNG of about 1.5 MB from Local Dream) is
+// kept as a 384px WebP of a few dozen KB, cropped square from the top.
+async function shrinkPortrait(base64) {
+    try {
+        const picture = new Image();
+        picture.src = `data:image/png;base64,${base64}`;
+        await picture.decode();
+        const side = Math.min(picture.naturalWidth, picture.naturalHeight);
+        const canvas = document.createElement('canvas');
+        canvas.width = 384;
+        canvas.height = 384;
+        canvas.getContext('2d').drawImage(picture, (picture.naturalWidth - side) / 2, 0, side, side, 0, 0, 384, 384);
+        for (const [type, format] of [['image/webp', 'webp'], ['image/jpeg', 'jpg']]) {
+            const url = canvas.toDataURL(type, 0.86);
+            if (url.startsWith(`data:${type}`)) return { data: url.slice(url.indexOf(',') + 1), format };
+        }
+    } catch (error) {
+        console.warn('[InnerLore] Could not shrink a portrait; keeping it full size:', error);
+    }
+    return { data: base64, format: 'png' };
+}
+
+async function drawPortrait(job) {
+    const settings = getSettings();
+    const store = getChatStore();
+    const source = store && portraitSource(store, job.name, {
+        placeName: resolveSceneLocation(store, runtime.lastCompilation?.scene).name || '',
+    });
+    if (!source) throw new Error('the story has not described them yet');
+    const tags = await requestPortraitTags(settings, source);
+    const payload = portraitPayload(composePortraitPrompt(tags, settings.portraitStyle), {
+        negative: settings.portraitNegative,
+        steps: settings.portraitSteps,
+        cfg: settings.portraitCfg,
+    });
+    // Local Dream takes about 90 s a picture, and waits while it is not running.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 300_000);
+    let image;
+    try {
+        const response = await fetch('/api/sd/generate', {
+            method: 'POST',
+            headers: context().getRequestHeaders(),
+            body: JSON.stringify({ ...payload, ...portraitServer() }),
+            signal: controller.signal,
+        });
+        if (!response.ok) throw new Error(`the image server failed (HTTP ${response.status})`);
+        image = (await response.json())?.images?.[0];
+    } catch (error) {
+        const message = controller.signal.aborted ? 'the image server did not answer within 5 minutes' : error?.message || String(error);
+        throw Object.assign(new Error(message), { serverDown: true });
+    } finally {
+        clearTimeout(timer);
+    }
+    if (!image) throw new Error('the image server sent no picture');
+    if (currentChatId() !== job.chatId) return;
+    const picture = await shrinkPortrait(image);
+    const stem = `${job.chatId}-${job.key}`.toLocaleLowerCase().replace(/[^a-z0-9]+/gu, '-').slice(0, 90);
+    const upload = await fetch('/api/images/upload', {
+        method: 'POST',
+        headers: context().getRequestHeaders(),
+        body: JSON.stringify({ image: picture.data, format: picture.format, ch_name: 'InnerLore', filename: `${stem}-${payload.seed}` }),
+    });
+    if (!upload.ok) throw new Error(`the portrait could not be saved (HTTP ${upload.status})`);
+    const { path } = await upload.json();
+    const ctx = context();
+    if (!path || currentChatId() !== job.chatId || !ctx.chatMetadata) return;
+    ctx.chatMetadata[PORTRAIT_METADATA_KEY] = {
+        ...portraitRecords(),
+        [job.key]: { name: job.name, path, prompt: payload.prompt, seed: payload.seed, at: Date.now() },
+    };
+    ctx.saveMetadataDebounced?.();
+}
+
+// After the queue's own bookkeeping, never inside a cast refresh that queued it.
+function refreshPortraitViews() {
+    setTimeout(() => {
+        updateCastCards();
+        const popup = document.getElementById('il_entity_card');
+        if (popup) fillEntityPortrait(popup);
+    }, 0);
+}
+
+/** A person's face: their portrait, or their initials on their colour. */
+function personFace(name, className) {
+    const badge = personBadge(name);
+    const face = document.createElement('span');
+    face.className = className;
+    face.style.setProperty('--hue', String(badge.hue));
+    const portrait = portraitsOn() ? portraitOf(name) : null;
+    if (!portrait) {
+        face.textContent = badge.initials;
+        return face;
+    }
+    const image = document.createElement('img');
+    image.src = portrait.path;
+    image.alt = '';
+    image.decoding = 'async';
+    image.addEventListener('error', () => {
+        image.remove();
+        face.classList.remove('has-portrait');
+        face.textContent = badge.initials;
+    }, { once: true });
+    face.classList.add('has-portrait');
+    face.append(image);
+    return face;
+}
+
+// The portrait at the top of someone's page, with the button that draws a new one.
+function fillEntityPortrait(popup) {
+    const name = popup.dataset.name || '';
+    const portrait = portraitsOn() ? portraitOf(name) : null;
+    const photo = popup.querySelector('.il-entity-photo');
+    if (photo) {
+        photo.classList.toggle('has-portrait', Boolean(portrait));
+        photo.innerHTML = portrait ? `<img src="${escapeHtml(portrait.path)}" alt="">` : CAST_SVG.person;
+    }
+    const slot = popup.querySelector('.il-entity-portrait-slot');
+    if (!slot) return;
+    slot.classList.toggle('displayNone', !portraitsOn());
+    if (!portraitsOn()) return;
+    const drawing = runtime.portraitQueue?.isDrawing(canonicalNameKey(name)) || false;
+    const described = Boolean(getChatStore() && portraitSource(getChatStore(), name));
+    if (portrait) {
+        slot.innerHTML = `<figure class="il-entity-portrait"><img src="${escapeHtml(portrait.path)}" alt="Portrait of ${escapeHtml(name)}">${drawing ? '<figcaption>Drawing a new portrait…</figcaption>' : ''}</figure>`;
+    } else {
+        const note = drawing ? 'Drawing a portrait…' : described ? 'No portrait yet' : 'A portrait is drawn once the story describes them';
+        slot.innerHTML = `<figure class="il-entity-portrait is-empty"><span>${note}</span></figure>`;
+    }
+    if (drawing || !described) return;
+    const redraw = document.createElement('button');
+    redraw.type = 'button';
+    redraw.className = 'il-entity-redraw';
+    redraw.textContent = portrait ? 'Draw a new portrait' : 'Draw a portrait';
+    redraw.addEventListener('click', () => wantPortraits([name], { force: true }));
+    slot.append(redraw);
+}
+
 function showEntityCard(name, focus = 'details') {
     let popup = document.getElementById('il_entity_card');
     if (popup) popup.remove();
@@ -1753,11 +2137,18 @@ function showEntityCard(name, focus = 'details') {
     const entity = Object.values(store?.entities || {})
         .find(candidate => candidate?.type === 'character' && canonicalNameKey(candidate.name) === canonicalNameKey(name));
     const brain = store?.brains?.[canonicalNameKey(name)];
+    const standing = getSettings().gameEnabled !== false
+        ? normalizeGameState(store?.game).standings?.[canonicalNameKey(name)]
+        : null;
+    const standingHtml = standing
+        ? `<p class="il-entity-state"><b>Regards you:</b> ${standingTier(standing.score)} (${standing.score > 0 ? '+' : ''}${standing.score})${standing.notes?.at(-1)?.reason ? ` - ${escapeHtml(standing.notes.at(-1).reason)}` : ''}</p>`
+        : '';
     const facts = (entity?.facts || []).slice(0, 6)
         .map(fact => `<li>${String(typeof fact === 'string' ? fact : fact?.statement || '').replace(/</g, '&lt;')}</li>`).join('');
     const mindHtml = brain
         ? mindBubbleText(brain).split('\n').map(line => line ? `<p>${line.replace(/</g, '&lt;')}</p>` : '<hr/>').join('')
         : '<p class="is-dormant">(no InnerLore mind is tracked for this name yet)</p>';
+    popup.dataset.name = name;
     popup.innerHTML = `
         <div class="il-entity-card-inner">
             <div class="il-entity-head">
@@ -1769,9 +2160,11 @@ function showEntityCard(name, focus = 'details') {
                 <button type="button" class="il-entity-close" aria-label="Close" title="Close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg></button>
             </div>
             <div class="il-entity-body">
+                <section class="il-entity-portrait-slot"></section>
                 <section class="il-entity-details">
                     ${entity?.summary ? `<p class="il-entity-summary">${String(entity.summary).replace(/</g, '&lt;')}</p>` : ''}
                     ${entity?.currentState ? `<p class="il-entity-state"><b>Now:</b> ${String(entity.currentState).replace(/</g, '&lt;')}</p>` : ''}
+                    ${standingHtml}
                     ${facts ? `<ul class="il-entity-facts">${facts}</ul>` : ''}
                     ${!entity ? '<p class="is-dormant">(no entity record yet - it appears once the curator observes this NPC)</p>' : ''}
                 </section>
@@ -1782,6 +2175,7 @@ function showEntityCard(name, focus = 'details') {
             </div>
         </div>`;
     document.body.appendChild(popup);
+    fillEntityPortrait(popup);
     popup.querySelector('.il-entity-close').addEventListener('click', () => popup.remove());
     popup.addEventListener('click', event => {
         if (event.target === popup) popup.remove();
@@ -1813,9 +2207,112 @@ function resolveSceneLocationForDisplay(scene) {
     return scene;
 }
 
+// The scene the HUD and map show: normally the context compiler's. While the
+// store is quarantined for a history rebuild nothing is compiled, so derive it
+// from the chat the same model-free way a landed reply does.
+function displayScene(store) {
+    const compiled = runtime.lastCompilation?.scene;
+    const ctx = context();
+    if (compiled || !store || !Array.isArray(ctx.chat) || !ctx.chat.length) return compiled || null;
+    try {
+        return resolveSceneLocationForDisplay(deriveSceneState(ctx.chat, store, {
+            currentIndex: ctx.chat.length - 1,
+            playerName: ctx.name1,
+            lookbackMessages: getSettings().sceneLookbackMessages ?? 4,
+        }));
+    } catch (error) {
+        console.error('[InnerLore] Could not derive the scene for the HUD:', error);
+        return null;
+    }
+}
+
+// A reply's choices block leaves the story text, and so the history every
+// later prompt and background pass reads, and is kept on the message for the
+// buttons under it.
+function captureReplyChoices(messageIndex) {
+    const ctx = context();
+    const message = ctx.chat?.[messageIndex];
+    if (!message || message.is_user || message.is_system || typeof message.mes !== 'string') return false;
+    const { text, choices } = extractReplyChoices(message.mes);
+    if (text === message.mes) return false;
+    message.mes = text;
+    message.extra = { ...(message.extra || {}), [CHOICES_EXTRA_KEY]: choices };
+    if (typeof message.extra.display_text === 'string') {
+        message.extra.display_text = extractReplyChoices(message.extra.display_text).text;
+    }
+    // Like SillyTavern, leave a pristine greeting's swipes alone so their
+    // macros still resolve when swiped.
+    const swipeId = message.swipe_id;
+    if (ctx.chat.length > 1 && Number.isInteger(swipeId) && typeof message.swipes?.[swipeId] === 'string') {
+        message.swipes[swipeId] = text;
+        const info = message.swipe_info?.[swipeId];
+        if (info && typeof info === 'object') info.extra = { ...(info.extra || {}), [CHOICES_EXTRA_KEY]: choices };
+    }
+    try {
+        ctx.updateMessageBlock?.(messageIndex, message);
+    } catch (error) {
+        console.error('[InnerLore] Could not re-render a reply without its choices block:', error);
+    }
+    return true;
+}
+
+const CHOICE_ICONS = Object.freeze({ go: 'fa-person-walking', talk: 'fa-comment', do: 'fa-hand', look: 'fa-eye' });
+
+function fillMessageBox(text) {
+    const box = document.getElementById('send_textarea');
+    if (!box) return;
+    const current = box.value.trim();
+    // A tapped move replaces the previous tapped move; anything typed is kept.
+    box.value = !current || current === runtime.lastFilledChoice ? text : `${box.value.trimEnd()}\n${text}`;
+    runtime.lastFilledChoice = box.value === text ? text : '';
+    box.dispatchEvent(new Event('input', { bubbles: true }));
+    box.focus();
+    box.setSelectionRange?.(box.value.length, box.value.length);
+}
+
+// The next moves under the latest reply: the narrator's own choices, or moves
+// from the camera frame when it gave none.
+function renderPlayerChoices() {
+    if (typeof document === 'undefined' || typeof document.querySelector !== 'function') return;
+    const settings = getSettings();
+    const chat = context().chat || [];
+    const index = chat.length - 1;
+    const message = chat[index];
+    const show = settings.enabled && settings.guidedPlayEnabled !== false && !runtime.choicesHidden
+        && message && !message.is_user && !message.is_system;
+    let choices = show ? storedChoices(message) : [];
+    if (show && !choices.length) choices = extractReplyChoices(message.mes).choices;
+    if (show && !choices.length) choices = fallbackChoices(runtime.lastCompilation?.camera);
+    const block = choices.length ? document.querySelector(`#chat .mes[mesid="${index}"] .mes_block`) : null;
+    const signature = block ? `${index}|${JSON.stringify(choices)}` : '';
+    const existing = document.querySelectorAll('.il-choices');
+    if (signature && signature === runtime.choicesSignature && existing.length === 1 && block.contains(existing[0])) return;
+    existing.forEach(node => node.remove());
+    runtime.choicesSignature = signature;
+    if (!block) return;
+    const box = document.createElement('div');
+    box.className = 'il-choices';
+    for (const choice of choices) {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'il-choice';
+        button.dataset.kind = choice.kind;
+        button.title = 'Put this move in the message box';
+        const icon = document.createElement('i');
+        icon.className = `fa-solid ${CHOICE_ICONS[choice.kind] || 'fa-arrow-right'}`;
+        icon.setAttribute('aria-hidden', 'true');
+        button.append(icon, document.createTextNode(choice.text));
+        button.addEventListener('click', () => fillMessageBox(choice.text));
+        box.append(button);
+    }
+    block.append(box);
+}
+
 function updateCastCards() {
     if (typeof document === 'undefined' || typeof document.createElement !== 'function') return;
+    renderPlayerChoices();
     ensureDockStyles();
+    renderMenuBar();
     const bar = castBarElement();
     bar.innerHTML = '';
     bar.classList.add('il-dock');
@@ -1835,14 +2332,15 @@ function updateCastCards() {
         seen.add(key);
         participants.push({ name, recent });
     };
-    for (const item of (runtime.lastCompilation?.scene?.participants || [])) pushParticipant(item?.name);
+    const store = getChatStore();
+    const scene = displayScene(store);
+    for (const item of (scene?.participants || [])) pushParticipant(item?.name);
     for (const brain of (runtime.lastCompilation?.selectedBrains || [])) pushParticipant(brain?.name);
     // Recently-seen character entities: the narrator often refers to engaged
     // NPCs by descriptor ("the technician") rather than canonical name, so
     // mention matching alone can miss them - the curator's lastSeenMessage
     // watermark is the reliable presence signal.
     const chatLength = Array.isArray(context().chat) ? context().chat.length : 0;
-    const store = getChatStore();
     if (store) {
         const recent = [];
         for (const entity of Object.values(store.entities || {})) {
@@ -1860,7 +2358,6 @@ function updateCastCards() {
         bar.classList.add('displayNone');
         return;
     }
-    const scene = runtime.lastCompilation?.scene || null;
     const where = resolveSceneLocation(store, scene).name || scene?.location?.name || 'Somewhere';
     const clock = store?.progression?.clock;
     const compactDuration = seconds => {
@@ -1889,27 +2386,28 @@ function updateCastCards() {
     place.addEventListener('click', () => openWorldMap('scene'));
 
     // Who: the player, then everyone in the scene, then the recently seen.
+    // With cast cards on, the others are in the row of cards under the bar.
+    const cardsShown = getSettings().castCardsEnabled !== false && participants.length > 0;
     const cast = document.createElement('div');
     cast.className = 'il-hud-cast';
     cast.setAttribute('role', 'list');
     cast.setAttribute('aria-label', 'People in the scene');
     const avatar = (name, { isUser = false, recent = false } = {}) => {
-        const badge = personBadge(name);
         const button = document.createElement('button');
         button.type = 'button';
         button.className = 'il-hud-avatar' + (isUser ? ' is-user' : '') + (recent ? ' is-recent' : '');
         button.setAttribute('role', 'listitem');
         button.title = isUser ? `${name} (you)` : recent ? `${name} - seen recently` : `${name} - in the scene`;
-        button.innerHTML = '<span class="il-hud-face"></span><span class="il-hud-name"></span>';
-        button.querySelector('.il-hud-face').style.setProperty('--hue', String(badge.hue));
-        button.querySelector('.il-hud-face').textContent = badge.initials;
+        button.innerHTML = '<span class="il-hud-name"></span>';
+        button.prepend(personFace(name, 'il-hud-face'));
         button.querySelector('.il-hud-name').textContent = isUser ? 'You' : name.split(/\s+/)[0];
         button.addEventListener('click', () => (isUser ? toggleHudDrawer() : showEntityCard(name, 'details')));
         return button;
     };
     cast.append(avatar(userName, { isUser: true }));
-    for (const person of participants.slice(0, HUD_MAX_AVATARS)) cast.append(avatar(person.name, person));
-    const hiddenCast = participants.length - HUD_MAX_AVATARS;
+    const avatarCast = cardsShown ? [] : participants;
+    for (const person of avatarCast.slice(0, HUD_MAX_AVATARS)) cast.append(avatar(person.name, person));
+    const hiddenCast = avatarCast.length - HUD_MAX_AVATARS;
     if (hiddenCast > 0) {
         const more = document.createElement('button');
         more.type = 'button';
@@ -1941,17 +2439,65 @@ function updateCastCards() {
     drawerButton.addEventListener('click', () => toggleHudDrawer());
     actions.append(mapButton, drawerButton);
     hud.append(place, cast, actions);
+    hud.classList.toggle('has-cards', cardsShown);
     bar.append(hud);
+    if (cardsShown) bar.append(buildCastRow(participants, store));
     if (hudDrawerOpen()) bar.append(buildHudDrawer(store, scene, userName, participants));
+    wantPortraits(participants.map(person => person.name));
 
     // An open full map follows the same refreshes as the HUD: a landed reply,
     // a committed curator pass, and every injection build.
     if (runtime.mapPanel && !document.getElementById('il_map_overlay')?.classList.contains('displayNone')) {
         runtime.mapPanel.refresh(store, scene, userName);
     }
+    if (runtime.gamePanel?.isOpen()) runtime.gamePanel.refresh(store, scene, userName);
+    if (runtime.tradePanel?.isOpen()) runtime.tradePanel.refresh(store, scene, userName);
     bar.classList.remove('displayNone');
     positionDock();
     watchDockPlacement();
+}
+
+/**
+ * The people here as cards under the top bar: portrait, name, and what they
+ * are and how they regard the player. A card opens the person's page.
+ */
+function buildCastRow(participants, store) {
+    const row = document.createElement('div');
+    row.className = 'il-cast-row';
+    row.setAttribute('role', 'list');
+    row.setAttribute('aria-label', 'People here');
+    const game = getSettings().gameEnabled !== false && store ? normalizeGameState(store.game) : null;
+    const roles = new Map();
+    for (const stage of Object.values(game?.stages || {})) {
+        for (const person of stage.people || []) if (person.role) roles.set(canonicalNameKey(person.name), person.role);
+    }
+    const entities = Object.values(store?.entities || {}).filter(entity => entity?.type === 'character');
+    for (const person of participants) {
+        const key = canonicalNameKey(person.name);
+        const entity = entities.find(candidate => canonicalNameKey(candidate.name) === key);
+        // The planner's role, or the first clause of the curator's summary.
+        const role = roles.get(key) || cleanString(String(entity?.summary || '').split(/[,;.]/u)[0], 60);
+        const standing = game?.standings?.[key];
+        const detail = [standing ? standingTier(standing.score) : '', role].filter(Boolean).join(' · ')
+            || (person.recent ? 'Seen recently' : 'Here');
+        const card = document.createElement('button');
+        card.type = 'button';
+        card.className = 'il-cast-card' + (person.recent ? ' is-recent' : '')
+            + (runtime.portraitQueue?.isDrawing(key) ? ' is-drawing' : '');
+        card.setAttribute('role', 'listitem');
+        card.title = `${person.name}${person.recent ? ' - seen recently' : ''}${runtime.portraitQueue?.isDrawing(key) ? ' - drawing a portrait' : ''}`;
+        const text = document.createElement('span');
+        text.className = 'il-cast-text';
+        const name = document.createElement('b');
+        name.textContent = person.name;
+        const small = document.createElement('small');
+        small.textContent = detail;
+        text.append(name, small);
+        card.append(personFace(person.name, 'il-cast-portrait'), text);
+        card.addEventListener('click', () => showEntityCard(person.name, 'details'));
+        row.append(card);
+    }
+    return row;
 }
 
 /**
@@ -2020,16 +2566,14 @@ function buildHudDrawer(store, scene, userName, participants) {
         inner.append(element);
         return { element, list };
     };
-    const row = (list, { badge, title, detail, recent = false, onClick }) => {
+    const row = (list, { face, title, detail, recent = false, onClick }) => {
         const item = document.createElement('li');
         const button = document.createElement('button');
         button.type = 'button';
         button.className = 'il-hud-row' + (recent ? ' is-recent' : '');
-        const marker = document.createElement('span');
-        if (badge) {
-            marker.className = 'il-hud-face';
-            marker.style.setProperty('--hue', String(badge.hue));
-            marker.textContent = badge.initials;
+        let marker = document.createElement('span');
+        if (face) {
+            marker = face;
         } else {
             marker.className = 'il-hud-place-dot';
         }
@@ -2055,7 +2599,7 @@ function buildHudDrawer(store, scene, userName, participants) {
     const people = section('With you');
     for (const person of participants) {
         row(people.list, {
-            badge: personBadge(person.name),
+            face: personFace(person.name, 'il-hud-face'),
             title: person.name,
             detail: states.get(canonicalNameKey(person.name)) || (person.recent ? 'Seen recently' : 'In the scene'),
             recent: person.recent,
@@ -2095,13 +2639,110 @@ function buildHudDrawer(store, scene, userName, participants) {
     return drawer;
 }
 
+// The game menu along the bottom of the screen, under the message box. Each
+// item opens its own full screen; later screens join this list.
+const MENU_ITEMS = [
+    {
+        id: 'inventory',
+        label: 'Inventory',
+        icon: () => HUD_SVG.backpack,
+        title: store => `Inventory - purse: ${gameOverview(normalizeGameState(store?.game)).purse.text}`,
+        shown: settings => settings.gameEnabled !== false,
+        open: () => openGamePanel('bag'),
+    },
+    {
+        id: 'trade',
+        label: 'Trade',
+        icon: () => HUD_SVG.trade,
+        title: () => 'Trade - buy, sell, swap, or loot with whoever is here',
+        shown: settings => settings.gameEnabled !== false,
+        open: () => openTradePanel(),
+    },
+];
+
+function renderMenuBar() {
+    const settings = getSettings();
+    const items = settings.enabled && currentChatId() ? MENU_ITEMS.filter(item => item.shown(settings)) : [];
+    let bar = document.getElementById('il_menu_bar');
+    if (!items.length) {
+        bar?.remove();
+        return;
+    }
+    if (!bar) {
+        bar = document.createElement('nav');
+        bar.id = 'il_menu_bar';
+        bar.setAttribute('aria-label', 'Game menu');
+        bar.addEventListener('click', event => {
+            const id = event.target.closest('[data-menu]')?.dataset.menu;
+            MENU_ITEMS.find(item => item.id === id)?.open();
+        });
+        watchKeyboard();
+    }
+    // The last row of SillyTavern's chat column, so the chat makes room for it.
+    const host = document.getElementById('sheld') || document.body;
+    if (host.lastElementChild !== bar) host.append(bar);
+    const store = getChatStore();
+    bar.replaceChildren(...items.map(item => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'il-menu-item';
+        button.dataset.menu = item.id;
+        button.title = item.title(store);
+        button.innerHTML = `${item.icon()}<span></span>`;
+        button.querySelector('span').textContent = item.label;
+        return button;
+    }));
+}
+
+// The open keyboard leaves little room, so the menu steps aside while it is
+// up: the message box has focus and the visible screen is well short of its
+// full height at this width. Focus alone is not enough, because closing the
+// keyboard with Back leaves the box focused.
+function watchKeyboard() {
+    if (runtime.keyboardWatched) return;
+    runtime.keyboardWatched = true;
+    let width = 0;
+    let fullHeight = 0;
+    const update = () => {
+        const height = window.visualViewport?.height || window.innerHeight;
+        if (window.innerWidth !== width) {
+            width = window.innerWidth;
+            fullHeight = 0;
+        }
+        fullHeight = Math.max(fullHeight, height);
+        const typing = document.activeElement?.id === 'send_textarea';
+        document.body.classList.toggle('il-keyboard', typing && height < fullHeight - 150);
+    };
+    window.visualViewport?.addEventListener('resize', update);
+    window.addEventListener('resize', update);
+    document.addEventListener('focusin', update);
+    document.addEventListener('focusout', () => setTimeout(update, 0));
+    update();
+}
+
+function openGamePanel(tab = 'bag') {
+    if (!runtime.gamePanel) runtime.gamePanel = createGamePanel({ onPerson: name => showEntityCard(name, 'details') });
+    const store = getChatStore();
+    runtime.gamePanel.refresh(store, displayScene(store), cleanString(context().name1, 100) || 'You');
+    runtime.gamePanel.open(tab);
+}
+
+// A trade button writes the player's move into the message box; the story
+// narrates it and the ledger records whatever actually changes hands.
+function openTradePanel() {
+    if (!runtime.tradePanel) runtime.tradePanel = createTradePanel({ onAction: fillMessageBox });
+    const store = getChatStore();
+    runtime.tradePanel.refresh(store, displayScene(store), cleanString(context().name1, 100) || 'You');
+    runtime.tradePanel.open();
+}
+
 function openWorldMap(view = 'world') {
     if (!runtime.mapPanel) runtime.mapPanel = createMapPanel({ onPerson: name => showEntityCard(name, 'details') });
     runtime.mapPanel.open(view);
     const userName = cleanString(context().name1, 100) || 'You';
     const render = attempt => {
         const store = getChatStore();
-        runtime.mapPanel.refresh(store, runtime.lastCompilation?.scene || null, userName);
+        runtime.mapPanel.refresh(store, displayScene(store), userName);
         if (!store && attempt < 6) setTimeout(() => render(attempt + 1), 1_000);
     };
     render(0);
@@ -2136,16 +2777,18 @@ function registerContextMacros() {
     for (const macroName of Object.keys(INNERLORE_CONTEXT_MACROS)) {
         register(macroName, () => {
             const settings = context().extensionSettings?.[MODULE_KEY] || defaultSettings;
+            const textMode = storyIsTextCompletion();
             let value = macroContextValue(macroName, {
                 enabled: settings.enabled,
                 deliveryMode: settings.contextDeliveryMode,
-                prepared: runtime.preparedContext,
+                prepared: textMode ? null : runtime.preparedContext,
                 local: runtime.localContext,
                 key: runtime.activeContextKey,
             });
             // The full-state macro also carries the SQLite-backed narrative
             // history so story context arrives from one plugin-owned source.
-            if (macroName === 'innerlore_state_context' && settings.enabled && value) {
+            // A text-completion story already carries the chat as its story.
+            if (macroName === 'innerlore_state_context' && settings.enabled && value && !textMode) {
                 const derived = runtime.derivedContext;
                 if (derived) {
                     const historySettings = derived
@@ -2328,7 +2971,36 @@ function updateInjection({ isContinue = false } = {}) {
     runtime.localContext = compilation
         ? createLocalContextPacket(compilation, runtime.activeContextKey)
         : null;
-    const contextPacket = !historyFallback && !store?.needsRebuild
+    // A text-completion story model (NovelAI's Erato or Kayra) reads lore
+    // entries and an author's note, not the chat packet: the same compiled
+    // facts in its own format, sized so the story keeps most of its context.
+    const textMode = storyIsTextCompletion();
+    let textMemory = '';
+    if (textMode && compilation && runtime.localContext) {
+        const textPacket = renderTextPacket({
+            compilation,
+            store: promptStore,
+            playerName: ctx.name1,
+            gameText: compilation.blocks?.game,
+            budgetCharacters: textPacketBudget(ctx.maxContext),
+        });
+        // A story string without {{anchorAfter}} (a customised template)
+        // never shows in-prompt extension prompts: the memory then rides
+        // with the note.
+        const anchored = String(ctx.powerUserSettings?.context?.story_string || '').includes('{{anchorAfter}}');
+        textMemory = anchored ? textPacket.memory : '';
+        const note = anchored ? textPacket.note : [textPacket.memory, textPacket.note].filter(Boolean).join('\n');
+        runtime.localContext = { ...runtime.localContext, rendered: note, compact: note };
+    }
+    if (textMemory !== (runtime.lastTextMemory || '')) {
+        // 0 = in the prompt, right after the story string (NovelAI's memory).
+        ctx.setExtensionPrompt(TEXT_MEMORY_PROMPT_KEY, textMemory, 0, 0, false, 0);
+        if (textMemory) runtime.textMemoryHistory = [...(runtime.textMemoryHistory || []), textMemory].slice(-6);
+        runtime.lastTextMemory = textMemory;
+    }
+    const contextPacket = textMode
+        ? runtime.localContext
+        : !historyFallback && !store?.needsRebuild
         ? selectedContextPacket({
             prepared: runtime.preparedContext,
             local: runtime.localContext,
@@ -2336,6 +3008,11 @@ function updateInjection({ isContinue = false } = {}) {
         })
         : runtime.localContext;
     const deliveryMode = settings.contextDeliveryMode === 'macro' ? 'macro' : 'automatic';
+    runtime.deliveredPacketText = contextPacket?.rendered || injection || '';
+    // The prompt holds whichever version was current when SillyTavern built it.
+    if (runtime.deliveredPacketText && runtime.deliveredPacketHistory?.at(-1) !== runtime.deliveredPacketText) {
+        runtime.deliveredPacketHistory = [...(runtime.deliveredPacketHistory || []), runtime.deliveredPacketText].slice(-6);
+    }
     injection = deliveryMode === 'macro' ? '' : (contextPacket?.rendered || injection);
     const preparedStatus = contextPacket?.source === 'server'
         ? `Prepared SQLite state: revision ${contextPacket.revision ?? runtime.storageRevision}${contextPacket.cache?.status ? ` (${contextPacket.cache.status})` : ''}.`
@@ -2361,7 +3038,8 @@ function updateInjection({ isContinue = false } = {}) {
     // expression gates that the existing text already satisfies, so injecting
     // it makes the model emit an immediate stop and append nothing. Suppress it
     // for continuations; the next fresh turn rebuilds it.
-    const turnContract = settings.enabled && !isContinue
+    // A prose model cannot follow the chat contract; the text note carries its one line.
+    let turnContract = settings.enabled && !isContinue && !textMode
         ? buildLatestTurnContract(ctx.chat, {
             identityPlaceholders,
             playerName: ctx.name1,
@@ -2374,8 +3052,22 @@ function updateInjection({ isContinue = false } = {}) {
             expressionEmphasisAnchor,
             expressionAnchorTerms,
             expressionSurfaceCooldown,
+            guidedPlay: settings.guidedPlayEnabled !== false,
         })
         : '';
+    // NovelAI's chat models (Xialong, GLM) keep facts best when they sit
+    // beside the newest turn: the game lines are repeated at the end.
+    // The same holds for Featherless's models; they also get a cast lock.
+    const limitedStory = !textMode && isLimitedProvider(storyProvider());
+    const gameFacts = limitedStory
+        ? String(compilation?.blocks?.game || '').replace(/<\/?inner_lore_game_state[^>]*>/gu, '').split('\n')
+            .filter(line => line.trim() && !line.startsWith('This is the game ledger')).join('\n')
+        : '';
+    if (turnContract && limitedStory) {
+        const player = cleanString(ctx.name1, 100) || 'the player';
+        const castLock = buildCastLock((compilation?.scene?.participants || []).map(person => person?.name), ctx.name1);
+        turnContract = `${turnContract}${gameFacts ? `\nFacts for this reply (keep every price, coin and person exactly as given here):\n${gameFacts}` : ''}\n${castLock}\nWrite only the world's response to ${player}'s command: never ${player}'s own words, thoughts or further actions.`;
+    }
     if (turnContract !== runtime.lastTurnContract) {
         // Keep literal instructions from the newest user beside the generation
         // boundary. This prevents a long history from reviving superseded
@@ -2485,6 +3177,25 @@ function populateProfiles() {
         }
         element.value = selectedId;
     }
+    for (const [element, selectedId, sameLabel] of [
+        [document.getElementById('il_game_profile'), settings.gameConnectionProfileId, 'Same as the curator profile'],
+        [document.getElementById('il_planner_profile'), settings.plannerConnectionProfileId, 'Same as the progression profile'],
+        [document.getElementById('il_minds_profile'), settings.mindsConnectionProfileId, 'Same request as the curator'],
+    ]) {
+        if (!element) continue;
+        element.replaceChildren();
+        const same = document.createElement('option');
+        same.value = '';
+        same.textContent = sameLabel;
+        element.append(same);
+        for (const profile of profiles) {
+            const option = document.createElement('option');
+            option.value = profile.id;
+            option.textContent = `${profile.name}${profile.model ? ` — ${profile.model}` : ''}`;
+            element.append(option);
+        }
+        element.value = profiles.some(profile => profile.id === selectedId) ? selectedId : '';
+    }
     for (const [element, selectedId] of [
         [fallbackSelect, settings.fallbackConnectionProfileId],
         [progressionFallbackSelect, settings.progressionFallbackConnectionProfileId],
@@ -2536,7 +3247,7 @@ function updateContextBudgetUI() {
     const value = document.getElementById('il_context_maximum_value');
     const context = runtime.derivedContext;
     const shares = settings.derivedSectionShares || DERIVED_SHARE_DEFAULTS;
-    const shareText = `response ${shares.response}% · history ${shares.history}% · scene ${shares.scene}% · minds ${shares.minds}% · lore ${shares.lore}% · progression ${shares.progression}%`;
+    const shareText = `response ${shares.response}% · history ${shares.history}% · scene ${shares.scene}% · minds ${shares.minds}% · lore ${shares.lore}% · progression ${shares.progression}% · game ${shares.game ?? DERIVED_SHARE_DEFAULTS.game}%`;
     if (value) {
         value.textContent = context
             ? `Derived (always on) · packet ${Number(context.maximumCharacters).toLocaleString()} ch (~${approximateContextTokens(context.maximumCharacters).toLocaleString()} tok)`
@@ -2642,6 +3353,7 @@ function applySettingsToUI() {
         il_context_maximum: settings.contextMaximumCharacters,
         il_server_context_timeout: settings.serverContextTimeoutMs,
         il_custom_instructions: settings.customInstructions,
+        il_story_provider_body: settings.storyProviderBody,
         il_world_progression_enabled: settings.worldProgressionEnabled,
         il_progression_every: settings.progressionEveryAssistantTurns,
         il_progression_autonomy: settings.progressionAutonomy,
@@ -2679,8 +3391,31 @@ function applySettingsToUI() {
         il_derived_share_minds: (settings.derivedSectionShares || {}).minds,
         il_derived_share_lore: (settings.derivedSectionShares || {}).lore,
         il_derived_share_progression: (settings.derivedSectionShares || {}).progression,
+        il_derived_share_game: (settings.derivedSectionShares || {}).game,
         il_narration_length: settings.narrationLength,
+        il_guided_play: settings.guidedPlayEnabled !== false,
         il_debug: settings.debug,
+        il_parallel_passes: settings.parallelBackgroundPasses === true,
+        il_game_enabled: settings.gameEnabled !== false,
+        il_game_ledger_enabled: settings.gameLedgerEnabled !== false,
+        il_scene_planner_enabled: settings.scenePlannerEnabled !== false,
+        il_scene_planner_prefetch: settings.scenePlannerPrefetch !== false,
+        il_story_preempts_background: settings.storyPreemptsBackground !== false,
+        il_scene_planner_at_send: settings.scenePlannerAtSend !== false,
+        il_scene_planner_wait: settings.scenePlannerSendWaitSeconds,
+        il_scene_planner_places: settings.scenePlannerMaximumPlaces,
+        il_scene_planner_stale_hours: settings.scenePlannerStaleHours,
+        il_game_injection_budget: settings.gameInjectionBudget,
+        il_game_custom_instructions: settings.gameCustomInstructions,
+        il_planner_custom_instructions: settings.plannerCustomInstructions,
+        il_assisted_background: settings.assistedBackground || 'auto',
+        il_cast_cards: settings.castCardsEnabled !== false,
+        il_portraits_enabled: settings.portraitsEnabled !== false,
+        il_portrait_url: settings.portraitServerUrl,
+        il_portrait_style: settings.portraitStyle,
+        il_portrait_negative: settings.portraitNegative,
+        il_portrait_steps: settings.portraitSteps,
+        il_portrait_cfg: settings.portraitCfg,
     };
     for (const [id, value] of Object.entries(fields)) setInputValue(id, value);
     document.querySelectorAll('#il_entity_types input[type="checkbox"]').forEach(input => {
@@ -3536,37 +4271,82 @@ async function analyzeRange(targetStore, startIndex, endIndex, options = {}) {
         })
         : '';
 
-    // These agents commonly share one connection profile. Run them in series
-    // so a provider with tight concurrency limits cannot make two background
-    // requests race each other. Each result is committed independently below,
-    // allowing a successful subsystem to advance even if the other one fails.
-    let response = null;
-    let curatorError = null;
-    if (transcript) {
-        try {
-            response = await requestJsonPatch(settings, buildAnalysisMessages({
-                transcript,
-                store: targetStore,
-                currentIndex: curatorEnd,
-                characterCard: getCardContext(),
-                playerName: ctx.name1,
-                recentExpressionText: collectRecentStoryExpressions(ctx.chat, {
-                    endIndex: curatorEnd,
-                    maximumReplies: 3,
-                    maximumCharacters: 1_600,
-                }),
-                settings,
-            }), runtime.controller?.signal);
-        } catch (error) {
-            curatorError = error;
-        }
-    }
-    if (curatorError?.name === 'AbortError' || runtime.controller?.signal.aborted) throw curatorError;
+    // Game ledger: the same completed range as the curator, from its own
+    // watermark. The scene planner prepares where the player is and can go.
+    targetStore.game = normalizeGameState(targetStore.game);
+    const gameEnabled = settings.gameEnabled !== false && settings.gameLedgerEnabled !== false
+        && options.gameEnabled !== false;
+    const gameStart = Math.max(startIndex, targetStore.game.lastProcessedIndex + 1);
+    const gameEnd = lastCompletedStoryIndex(ctx.chat, endIndex);
+    const gameTranscript = gameEnabled && gameStart <= gameEnd
+        ? formatTranscript(ctx.chat, {
+            startIndex: gameStart,
+            endIndex: gameEnd,
+            userName: ctx.name1,
+            characterName: ctx.name2,
+            maximumCharacters: 40_000,
+        })
+        : '';
+    // The ledger may read from before the curator's range; a swipe or edit
+    // there during the pass discards its result too.
+    const gameSnapshot = gameTranscript ? snapshotMessageRange(ctx.chat, gameStart, gameEnd) : {};
+    const gameScene = settings.gameEnabled !== false && gameEnd >= 0
+        ? deriveSceneState(ctx.chat, targetStore, {
+            currentIndex: gameEnd,
+            playerName: ctx.name1,
+            lookbackMessages: settings.sceneLookbackMessages ?? 4,
+        })
+        : null;
+    const plannerWanted = options.plannerEnabled === true && settings.gameEnabled !== false
+        && settings.scenePlannerEnabled !== false && gameEnd >= 0;
+    // A brand-new world has no places until the curator reads the opening,
+    // so the planner waits for those first records instead of guessing.
+    const deferPlanner = plannerWanted && Boolean(transcript)
+        && !Object.values(targetStore.entities || {}).some(record => record?.type === 'location' && record.enabled !== false);
+    const plannerPlan = plannerWanted && !deferPlanner && gameScene
+        ? plannerPlanFor(targetStore, gameScene, gameEnd, settings, ctx.name1)
+        : null;
 
-    let progressionResponse = null;
-    let progressionError = null;
+    // The passes commonly share one connection profile, so by default they
+    // run one after another and a provider with tight concurrency limits never
+    // sees two at once. With parallel passes on they all leave together (the
+    // Claude bridge's agent pool runs them inside one request slot). Each
+    // result is committed independently below, so a successful subsystem
+    // advances even when another fails.
+    const signal = runtime.controller?.signal;
+    const tasks = [];
+    // With a minds profile the curator is two narrower requests: people,
+    // places and whereabouts on the curator profile, NPC minds on the minds
+    // profile, side by side (on two providers, truly at once).
+    const splitMinds = Boolean(transcript) && Boolean(settings.mindsConnectionProfileId)
+        && settings.innerSelfEnabled && settings.autoLoreEnabled;
+    const curatorRequest = passSettings => requestJsonPatch(passSettings, buildAnalysisMessages({
+        transcript,
+        store: targetStore,
+        currentIndex: curatorEnd,
+        characterCard: getCardContext(),
+        playerName: ctx.name1,
+        recentExpressionText: collectRecentStoryExpressions(ctx.chat, {
+            endIndex: curatorEnd,
+            maximumReplies: 3,
+            maximumCharacters: 1_600,
+        }),
+        assisted: assistedFor(passSettings.connectionProfileId || settings.connectionProfileId),
+        settings: passSettings,
+    }), signal);
+    if (transcript && splitMinds) {
+        tasks.push(['curator', () => curatorRequest({ ...settings, innerSelfEnabled: false, telemetryKind: 'curator' })]);
+        tasks.push(['minds', () => curatorRequest({
+            ...settings,
+            autoLoreEnabled: false,
+            connectionProfileId: settings.mindsConnectionProfileId,
+            telemetryKind: 'minds',
+        })]);
+    } else if (transcript) {
+        tasks.push(['curator', () => curatorRequest(settings)]);
+    }
     if (progressionTranscript) {
-        try {
+        tasks.push(['progression', () => {
             const eventEvaluationDefinitions = triggerEventAgentSnapshot(targetStore.progression, {
                 currentIndex: progressionEnd,
             });
@@ -3578,6 +4358,7 @@ async function analyzeRange(targetStore, startIndex, endIndex, options = {}) {
                 currentIndex: progressionEnd,
                 characterCard: getCardContext(),
                 playerName: ctx.name1,
+                assisted: assistedFor(settings.progressionConnectionProfileId || settings.connectionProfileId),
                 settings,
             });
             targetStore.progression.lastTriggerEvaluatorRequest = {
@@ -3592,10 +4373,10 @@ async function analyzeRange(targetStore, startIndex, endIndex, options = {}) {
                 promptCharacters: progressionMessages.reduce((sum, message) => sum + message.content.length, 0),
                 requestedAt: Date.now(),
             };
-            progressionResponse = await requestProgressionPatch(
+            return requestProgressionPatch(
                 settings,
                 progressionMessages,
-                runtime.controller?.signal,
+                signal,
                 {
                     expectedEventKeys: eventEvaluationKeys,
                     expectedEventContracts: Object.fromEntries(eventEvaluationDefinitions.map(definition => [
@@ -3613,14 +4394,43 @@ async function analyzeRange(targetStore, startIndex, endIndex, options = {}) {
                     passageStartIndex: progressionStart,
                     passageEndIndex: progressionEnd,
                     playerName: ctx.name1,
+                    assisted: assistedFor(settings.progressionConnectionProfileId || settings.connectionProfileId),
                 },
             );
-        } catch (error) {
-            progressionError = error;
-        }
+        }]);
     }
-    if (progressionError?.name === 'AbortError' || runtime.controller?.signal.aborted) throw progressionError;
-    if (!messageRangeMatchesSnapshot(ctx.chat, sourceSnapshot)) {
+    const ledgerAssisted = Boolean(gameTranscript) && assistedFor(settings.gameConnectionProfileId || settings.connectionProfileId);
+    if (gameTranscript) {
+        tasks.push(['game', () => requestGamePatch(settings, buildLedgerMessages({
+            game: targetStore.game,
+            store: targetStore,
+            scene: gameScene,
+            playerName: ctx.name1,
+            transcript: gameTranscript,
+            characterCard: getCardContext(),
+            settings,
+            assisted: ledgerAssisted,
+        }), signal, 'game')]);
+    }
+    if (plannerPlan) {
+        tasks.push(['planner', () => requestGamePatch(settings, plannerMessagesFor(targetStore, plannerPlan), signal, 'planner')]);
+    }
+    const outcomes = await runBackgroundTasks(tasks, settings.parallelBackgroundPasses === true, signal);
+    for (const outcome of Object.values(outcomes)) {
+        if (outcome.error?.name === 'AbortError') throw outcome.error;
+    }
+    if (signal?.aborted) throw new DOMException('InnerLore pass stopped', 'AbortError');
+    const response = outcomes.curator?.value ?? null;
+    const curatorError = outcomes.curator?.error ?? null;
+    const mindsResponse = splitMinds ? outcomes.minds?.value ?? null : response;
+    const mindsError = splitMinds ? outcomes.minds?.error ?? null : null;
+    const progressionResponse = outcomes.progression?.value ?? null;
+    const progressionError = outcomes.progression?.error ?? null;
+    const gameResponse = outcomes.game?.value ?? null;
+    const gameError = outcomes.game?.error ?? null;
+    const plannerResponse = outcomes.planner?.value ?? null;
+    const plannerError = outcomes.planner?.error ?? null;
+    if (!messageRangeMatchesSnapshot(ctx.chat, sourceSnapshot) || !messageRangeMatchesSnapshot(ctx.chat, gameSnapshot)) {
         targetStore.needsRebuild = true;
         const error = new Error('Chat history changed while InnerLore was analyzing it; the stale result was discarded.');
         error.name = 'InnerLoreHistoryChangedError';
@@ -3629,9 +4439,14 @@ async function analyzeRange(targetStore, startIndex, endIndex, options = {}) {
     const payload = response?.payload && typeof response.payload === 'object' ? response.payload : {};
     const entityOperations = payload.entities || payload.entity_operations || [];
     const alignedEntityOperations = alignExplicitLocationOperations(targetStore, entityOperations, transcript);
-    const playerKey = canonicalNameKey(ctx.name1);
-    const mindOperations = (payload.minds || payload.mind_operations || [])
-        .filter(operation => !playerKey || canonicalNameKey(operation?.character) !== playerKey);
+    // The player's record anchors the scene and must survive every cap; a
+    // provider that never writes one still gets it, and a mind written for
+    // the player under any of their names is dropped.
+    if (settings.autoLoreEnabled) ensurePlayerEntity(targetStore, { name: ctx.name1, persona: ctx.personaDescription, messageIndex: curatorEnd });
+    const playerKeys = playerEntityKeys(targetStore, ctx.name1);
+    const mindPayload = mindsResponse?.payload && typeof mindsResponse.payload === 'object' ? mindsResponse.payload : {};
+    const mindOperations = (mindPayload.minds || mindPayload.mind_operations || [])
+        .filter(operation => !playerKeys.has(canonicalNameKey(operation?.character)));
 
     const entityResult = response && settings.autoLoreEnabled
         ? mergeEntityOperations(targetStore, alignedEntityOperations, {
@@ -3641,7 +4456,7 @@ async function analyzeRange(targetStore, startIndex, endIndex, options = {}) {
             messageIndex: curatorEnd,
         })
         : { created: 0, updated: 0, skipped: alignedEntityOperations.length, changedIds: [] };
-    const mindResult = response && settings.innerSelfEnabled
+    const mindResult = mindsResponse && settings.innerSelfEnabled
         ? mergeMindOperations(targetStore, mindOperations, {
             maximumOperations: settings.maximumMindOperationsPerPass,
             maximumThoughts: settings.maximumThoughtsPerBrain,
@@ -3652,7 +4467,7 @@ async function analyzeRange(targetStore, startIndex, endIndex, options = {}) {
             messageIndex: curatorEnd,
         })
         : { created: 0, updated: 0, skipped: mindOperations.length, changedIds: [] };
-    if (response && settings.innerSelfEnabled && structuredFoundationBrains(targetStore).length) {
+    if (mindsResponse && settings.innerSelfEnabled && structuredFoundationBrains(targetStore).length) {
         // Readiness requires all four real card-backed capabilities; any JSON
         // response by itself is not enough to bless the narration path.
         targetStore.expressionFoundationVersion = EXPRESSION_FOUNDATION_VERSION;
@@ -3709,6 +4524,22 @@ async function analyzeRange(targetStore, startIndex, endIndex, options = {}) {
         targetStore.progression.lastProcessedIndex = endIndex;
     }
 
+    const gameCommit = commitGamePasses(targetStore, {
+        ctx,
+        settings,
+        gameEnabled,
+        gameStart,
+        gameEnd,
+        gameTranscript,
+        gameScene,
+        gameResponse,
+        gameError,
+        ledgerAssisted,
+        plannerPlan,
+        plannerResponse,
+        plannerError,
+    });
+
     const curatorSucceeded = !curatorEnabled || !transcript || Boolean(response);
     if (curatorEnabled && curatorStart <= curatorEnd && curatorSucceeded) {
         const curatorSnapshot = snapshotMessageRange(ctx.chat, curatorStart, curatorEnd);
@@ -3716,6 +4547,25 @@ async function analyzeRange(targetStore, startIndex, endIndex, options = {}) {
             if (fingerprint) targetStore.processedFingerprints[index] = fingerprint;
         }
         targetStore.lastProcessedIndex = Math.max(targetStore.lastProcessedIndex, curatorEnd);
+    }
+    // After the curator's watermark moves, so the scene trusts its new record
+    // of where the player is rather than reading the opening's prose.
+    if (deferPlanner && response) {
+        const scene = deriveSceneState(ctx.chat, targetStore, {
+            currentIndex: gameEnd,
+            playerName: ctx.name1,
+            lookbackMessages: settings.sceneLookbackMessages ?? 4,
+        });
+        const plan = plannerPlanFor(targetStore, scene, gameEnd, settings, ctx.name1);
+        if (plan) {
+            try {
+                const reply = await requestGamePatch(settings, plannerMessagesFor(targetStore, plan), signal, 'planner');
+                gameCommit.plannerResult = commitPlannerResponse(targetStore, plan, reply, ctx.name1);
+            } catch (error) {
+                if (error?.name === 'AbortError' || signal?.aborted) throw error;
+                targetStore.game.planner = { ...targetStore.game.planner, lastError: cleanString(error?.message || String(error), 1_000) };
+            }
+        }
     }
     targetStore.lastRunAt = Date.now();
     const curatorCodecStats = codecStatsFromResponse(response);
@@ -3728,8 +4578,13 @@ async function analyzeRange(targetStore, startIndex, endIndex, options = {}) {
         repaired: Boolean(response?.repaired),
         codec: curatorCodecStats,
         curatorError: curatorError ? cleanString(curatorError.message || String(curatorError), 1_000) : '',
+        mindsError: mindsError ? cleanString(mindsError.message || String(mindsError), 1_000) : '',
         progressionResult: progressionResult?.state?.lastRunStats || null,
         progressionError: progressionError ? cleanString(progressionError.message || String(progressionError), 1_000) : '',
+        gameResult: gameCommit.gameResult,
+        gameError: gameError ? cleanString(gameError.message || String(gameError), 1_000) : '',
+        plannerResult: gameCommit.plannerResult,
+        plannerError: plannerError ? cleanString(plannerError.message || String(plannerError), 1_000) : '',
     };
     targetStore.updatedAt = Date.now();
 
@@ -3754,8 +4609,125 @@ async function analyzeRange(targetStore, startIndex, endIndex, options = {}) {
         progressionResult,
         curatorError,
         progressionError,
-        skipped: !response && !progressionResponse,
+        gameResult: gameCommit.gameResult,
+        gameError,
+        plannerResult: gameCommit.plannerResult,
+        plannerError,
+        skipped: !response && !progressionResponse && !gameResponse && !plannerResponse,
     };
+}
+
+/**
+ * Run the background passes of one analysis, one after another or all at
+ * once. Returns { name: { value } | { error } } for every pass that ran.
+ */
+async function runBackgroundTasks(tasks, parallel, signal) {
+    const outcomes = {};
+    if (parallel && tasks.length > 1) {
+        const settled = await Promise.allSettled(tasks.map(([, run]) => run()));
+        tasks.forEach(([name], index) => {
+            outcomes[name] = settled[index].status === 'fulfilled'
+                ? { value: settled[index].value }
+                : { error: settled[index].reason };
+        });
+        return outcomes;
+    }
+    for (const [name, run] of tasks) {
+        try {
+            outcomes[name] = { value: await run() };
+        } catch (error) {
+            outcomes[name] = { error };
+            if (error?.name === 'AbortError' || signal?.aborted) break;
+        }
+    }
+    return outcomes;
+}
+
+function gamePlaceOf(scene, store) {
+    const name = cleanString(scene?.location?.name, 240);
+    if (!name) return null;
+    const entities = store?.entities || {};
+    return placeRefOf((scene.location.id && entities[scene.location.id]) || resolveLocationReference(entities, name), name);
+}
+
+/**
+ * Commit the game ledger and scene planner results of one analysis. People
+ * and objects the planner prepared earlier that the newest replies now show
+ * are marked as introduced first, so a stage prepared in this same pass is
+ * never mistaken for one the narrator has already used.
+ */
+function commitGamePasses(targetStore, pass) {
+    const { ctx, settings } = pass;
+    let gameResult = null;
+    let plannerResult = null;
+    if (settings.gameEnabled === false || pass.gameEnd < 0) return { gameResult, plannerResult };
+    const place = gamePlaceOf(pass.gameScene, targetStore);
+
+    const introducedFrom = Math.max(0, (Number.isInteger(targetStore.game.introducedThrough) ? targetStore.game.introducedThrough : -1) + 1);
+    const storyText = ctx.chat.slice(introducedFrom, pass.gameEnd + 1)
+        .filter(message => message && !message.is_user && !message.is_system)
+        .map(message => message.mes)
+        .join('\n\n');
+    const introductions = introductionOperations(targetStore.game, storyText, place);
+    if (introductions.length) {
+        targetStore.game = applyGameOperations(targetStore.game, introductions, { messageIndex: pass.gameEnd, source: 'scene' }).state;
+    }
+    targetStore.game.introducedThrough = Math.max(introducedFrom - 1, pass.gameEnd);
+    // A person the lore has folded into another name keeps one standing.
+    const identityFolds = reconcileGameIdentities(targetStore.game, targetStore.entities);
+    if (identityFolds.length) {
+        targetStore.game = applyGameOperations(targetStore.game, identityFolds, { messageIndex: pass.gameEnd, source: 'lore' }).state;
+    }
+
+    const advanceLedger = () => {
+        for (const [index, fingerprint] of Object.entries(snapshotMessageRange(ctx.chat, pass.gameStart, pass.gameEnd))) {
+            if (fingerprint) targetStore.game.processedFingerprints[index] = fingerprint;
+        }
+        targetStore.game.lastProcessedIndex = Math.max(targetStore.game.lastProcessedIndex, pass.gameEnd);
+    };
+    if (pass.gameResponse) {
+        const context = gameContext(targetStore.game, { playerName: ctx.name1, entities: targetStore.entities, scenePlace: place });
+        // A smaller model's records must quote PASSAGE; the rest are dropped.
+        const grounded = pass.ledgerAssisted
+            ? groundedRecords(pass.gameResponse.payload, pass.gameTranscript)
+            : { payload: pass.gameResponse.payload, dropped: [] };
+        const { ops, rejected } = normalizeGameRecords(grounded.payload, context, { source: 'ledger' });
+        const applied = applyGameOperations(targetStore.game, ops, { messageIndex: pass.gameEnd, source: 'ledger', rejected });
+        targetStore.game = applied.state;
+        // The story's stated prices replace what the planner had guessed for the same kind of thing here.
+        const retired = supersededPlannerPrices(targetStore.game, applied.applied.map(entry => entry.op));
+        if (retired.length) targetStore.game = applyGameOperations(targetStore.game, retired, { messageIndex: pass.gameEnd, source: 'lore' }).state;
+        advanceLedger();
+        gameResult = {
+            startIndex: pass.gameStart,
+            endIndex: pass.gameEnd,
+            applied: applied.applied.length,
+            introduced: introductions.length,
+            ungrounded: grounded.dropped.length,
+            rejected: applied.rejected.slice(0, 12),
+            shortfall: applied.applied.reduce((sum, entry) => sum + (entry.shortfall || 0), 0),
+            retiredPrices: retired.length,
+            repaired: Boolean(pass.gameResponse.repaired),
+            codec: codecStatsFromResponse(pass.gameResponse),
+        };
+        targetStore.game.lastRunStats = { ...gameResult, at: Date.now() };
+        targetStore.game.lastError = '';
+    } else if (pass.gameError) {
+        targetStore.game.lastError = cleanString(pass.gameError.message || String(pass.gameError), 1_000);
+    } else if (pass.gameEnabled && pass.gameStart <= pass.gameEnd && !pass.gameTranscript) {
+        // Nothing readable in the range (hidden or empty messages): skip it.
+        advanceLedger();
+    }
+
+    if (pass.plannerResponse && pass.plannerPlan) {
+        plannerResult = commitPlannerResponse(targetStore, pass.plannerPlan, pass.plannerResponse, ctx.name1);
+    } else if (pass.plannerError) {
+        targetStore.game.planner = {
+            ...targetStore.game.planner,
+            lastError: cleanString(pass.plannerError.message || String(pass.plannerError), 1_000),
+        };
+    }
+    return { gameResult, plannerResult };
 }
 
 function codecStatsFromResponse(response) {
@@ -3796,6 +4768,7 @@ function summarizeRun(result) {
     if (result.skipped && result.progressionError) {
         return `World progression deferred (${result.progressionError.message || result.progressionError}).`;
     }
+    if (result.skipped && result.gameError) return `Game ledger deferred (${result.gameError.message || result.gameError}).`;
     if (result.skipped) return 'No narrative text required analysis.';
     const entities = result.entityResult || {};
     const minds = result.mindResult || {};
@@ -3820,6 +4793,18 @@ function summarizeRun(result) {
         : result.progressionError
             ? `; progression deferred (${result.progressionError.message || result.progressionError})`
             : '';
+    const game = result.gameResult;
+    const gameText = game
+        ? `; game ledger ${game.applied} change${game.applied === 1 ? '' : 's'}${game.introduced ? `, ${game.introduced} prepared ${game.introduced === 1 ? 'thing' : 'things'} now in the story` : ''}${game.shortfall ? '; a payment was larger than the purse' : ''}`
+        : result.gameError
+            ? `; game ledger deferred (${result.gameError.message || result.gameError})`
+            : '';
+    const planner = result.plannerResult;
+    const plannerText = planner
+        ? `; planner prepared ${planner.places.length ? planner.places.join(', ') : 'nothing new'}${planner.startingKit ? ' and a starting kit' : ''}`
+        : result.plannerError
+            ? `; planner deferred (${result.plannerError.message || result.plannerError})`
+            : '';
     const director = result.eventDirectorResult;
     const directorText = director?.generated
         ? `; Event Director ${director.definition ? 'armed' : 'proposed'} “${director.proposal?.title || 'event'}”`
@@ -3840,7 +4825,7 @@ function summarizeRun(result) {
     const codecText = codecParts.length
         ? `; ${codecTotals.format === 'dsl' ? 'DSL' : 'JSON'}: ${codecParts.join(', ')}`
         : '';
-    return `${entities.created || 0} lore entries created, ${entities.updated || 0} updated; ${minds.created || 0} minds created, ${minds.updated || 0} updated${curatorText}${progressionText}${directorText}${codecText}.`;
+    return `${entities.created || 0} lore entries created, ${entities.updated || 0} updated; ${minds.created || 0} minds created, ${minds.updated || 0} updated${curatorText}${progressionText}${gameText}${plannerText}${directorText}${codecText}.`;
 }
 
 function pendingAnalysisState(store = getChatStore()) {
@@ -3851,8 +4836,10 @@ function pendingAnalysisState(store = getChatStore()) {
     const decision = decideInnerLoreMaintenance({ messages, store, settings, targetIndex });
     const curatorDue = (settings.innerSelfEnabled || settings.autoLoreEnabled) && decision.curatorDue;
     const progressionDue = settings.worldProgressionEnabled && decision.progressionDue;
+    const gameDue = gameLedgerDue(store, settings, targetIndex);
     return {
-        pending: curatorDue || progressionDue,
+        pending: curatorDue || progressionDue || gameDue,
+        gameDue,
         curatorPending: decision.curatorPendingTurns > 0,
         progressionPending: decision.progressionPendingTurns > 0,
         curatorDue,
@@ -3860,6 +4847,26 @@ function pendingAnalysisState(store = getChatStore()) {
         targetIndex,
         decision,
     };
+}
+
+/** The ledger runs after every completed reply it has not yet read. */
+function gameLedgerDue(store, settings, targetIndex) {
+    if (settings.gameEnabled === false || settings.gameLedgerEnabled === false || targetIndex < 0) return false;
+    const game = normalizeGameState(store?.game);
+    return game.lastProcessedIndex < targetIndex;
+}
+
+/**
+ * A chat that existed before the game system was switched on is not read
+ * from its first message: the ledger starts from the recent window, and the
+ * planner gives the player a starting kit consistent with where things stand.
+ */
+function adoptGameLedger(store, settings, targetIndex) {
+    if (settings.gameEnabled === false || !store) return;
+    store.game = normalizeGameState(store.game);
+    if (store.game.lastProcessedIndex >= 0 || store.game.journal.length) return;
+    const window = Math.max(2, Number(settings.lookbackMessages) || 10);
+    if (targetIndex >= window) store.game.lastProcessedIndex = targetIndex - window;
 }
 
 function clearAnalysisRetry() {
@@ -3893,6 +4900,9 @@ function throwForSubsystemFailure(result) {
     const failures = [];
     if (result?.curatorError) failures.push(`continuity curator: ${result.curatorError.message || result.curatorError}`);
     if (result?.progressionError) failures.push(`world progression: ${result.progressionError.message || result.progressionError}`);
+    // A failed ledger keeps its watermark, so the retry re-reads the same
+    // replies. The scene planner is preparation only and simply runs again.
+    if (result?.gameError) failures.push(`game ledger: ${result.gameError.message || result.gameError}`);
     if (!failures.length) return;
     const error = new Error(failures.join('; '));
     error.name = 'InnerLoreSubsystemError';
@@ -3971,7 +4981,9 @@ async function processPending({ force = false, silent = false } = {}) {
         && (force || decision.curatorDue);
     const runProgression = settings.worldProgressionEnabled
         && (force || decision.progressionDue);
-        if (!force && (!settings.autoUpdate || (!runCurator && !runProgression))) return;
+    adoptGameLedger(store, settings, targetIndex);
+    const runGame = gameLedgerDue(store, settings, targetIndex);
+    if (!force && (!settings.autoUpdate || (!runCurator && !runProgression && !runGame))) return;
 
     // Capture the completed-turn queue that this pass is responsible for. A
     // newer story reply may arrive while the model request is in flight; its
@@ -3986,7 +4998,10 @@ async function processPending({ force = false, silent = false } = {}) {
     const curatorStart = runCurator
         ? store.lastProcessedIndex + 1
         : Number.POSITIVE_INFINITY;
-    let startIndex = Math.max(0, Math.min(curatorStart, progressionStart));
+    const gameStart = runGame
+        ? normalizeGameState(store.game).lastProcessedIndex + 1
+        : Number.POSITIVE_INFINITY;
+    let startIndex = Math.max(0, Math.min(curatorStart, progressionStart, gameStart));
     const finalIndex = targetIndex;
     if (startIndex > finalIndex) {
         if (!force) return;
@@ -4011,6 +5026,9 @@ async function processPending({ force = false, silent = false } = {}) {
                 curatorEnabled: runCurator,
                 progressionEnabled: runProgression,
                 progressionFlush: runProgression,
+                gameEnabled: runGame,
+                // Prepare places once, against the newest reply.
+                plannerEnabled: batchEnd >= finalIndex,
             });
             throwForSubsystemFailure(latestResult);
             if (currentChatId() !== runChatId) throw new DOMException('Chat changed', 'AbortError');
@@ -4025,6 +5043,7 @@ async function processPending({ force = false, silent = false } = {}) {
                 progressionFlush: true,
                 curatorEnabled: false,
                 progressionEnabled: true,
+                gameEnabled: false,
             });
             throwForSubsystemFailure(latestResult);
             if (store.progression.lastProcessedIndex <= before) break;
@@ -4088,6 +5107,296 @@ async function processPending({ force = false, silent = false } = {}) {
             setTimeout(() => processPending({ silent: true }), 250);
         }
     }
+}
+
+/**
+ * What the planner should prepare for this scene: where the player is when it
+ * has no stage (or a stale one), places reachable from it, and the starting
+ * kit while the purse was never counted. Null when nothing is needed.
+ */
+function plannerPlanFor(store, scene, index, settings, playerName, { heading = false, prefetch = settings.scenePlannerPrefetch !== false } = {}) {
+    if (!scene?.location?.name) return null;
+    store.game = normalizeGameState(store.game);
+    const targets = plannerTargets(store.game, {
+        store,
+        scene,
+        heading,
+        camera: prefetch ? deriveCameraFrame(scene, store, { playerName }) : null,
+        clockSeconds: Number(store.progression?.clock?.estimatedSeconds),
+        staleSeconds: Math.max(1, Number(settings.scenePlannerStaleHours) || 8) * 3_600,
+        prefetch,
+        maximum: prefetch ? Math.max(1, Math.min(3, Number(settings.scenePlannerMaximumPlaces) || 2)) : 1,
+    });
+    const startingKit = needsStartingKit(store.game) && !store.game.planner?.kitOffered;
+    return targets.length || startingKit ? { targets, startingKit, index } : null;
+}
+
+/** The profile the scene planner runs on: its own, else the progression profile, else the curator's. */
+function plannerProfileId(settings) {
+    return settings.plannerConnectionProfileId || settings.progressionConnectionProfileId || settings.connectionProfileId;
+}
+
+function plannerMessagesFor(store, plan) {
+    const ctx = context();
+    const end = plan.atSend ? ctx.chat.length - 1 : plan.index;
+    return buildPlannerMessages({
+        game: store.game,
+        store,
+        targets: plan.targets,
+        startingKit: plan.startingKit,
+        assisted: assistedFor(plannerProfileId(getSettings())),
+        playerName: ctx.name1,
+        persona: ctx.personaDescription,
+        characterCard: getCardContext(),
+        clockLabel: store.progression?.clock?.currentTimeLabel,
+        recentTranscript: formatTranscript(ctx.chat, {
+            startIndex: Math.max(0, end - 3),
+            endIndex: end,
+            userName: ctx.name1,
+            characterName: ctx.name2,
+            maximumCharacters: 12_000,
+        }),
+        settings: getSettings(),
+    });
+}
+
+/** Apply a scene planner answer to the store's game state. */
+function commitPlannerResponse(targetStore, plan, response, playerName) {
+    targetStore.game = normalizeGameState(targetStore.game);
+    const context = gameContext(targetStore.game, { playerName, entities: targetStore.entities });
+    const assisted = assistedFor(plannerProfileId(getSettings()));
+    const { ops, rejected, adjusted } = normalizeGameRecords(response.payload, context, {
+        source: 'planner',
+        // The ledger may have just counted the purse from this same passage.
+        allowStartingKit: plan.startingKit && needsStartingKit(targetStore.game),
+        clockSeconds: Number(targetStore.progression?.clock?.estimatedSeconds),
+        // A smaller planner prepares a smaller cast.
+        ...(assisted ? { maximumPeoplePerStage: 2 } : {}),
+    });
+    const applied = applyGameOperations(targetStore.game, ops, { messageIndex: plan.index, source: 'planner', rejected });
+    targetStore.game = applied.state;
+    // The place the player is at comes first; a planner that prepared only
+    // somewhere else is noted, and the next pass targets the place again.
+    const placeKeyOf = value => canonicalNameKey(value).replace(/^(?:the|a|an)\s+/u, '');
+    const firstTarget = plan.targets[0];
+    const missedPlayerPlace = firstTarget && !ops.some(op => op.type === 'stage.set' && placeKeyOf(op.place) === placeKeyOf(firstTarget.name))
+        ? firstTarget.name
+        : '';
+    if (missedPlayerPlace) console.warn(`${LOG_PREFIX} Scene planner prepared nothing for ${missedPlayerPlace}; it is targeted again next pass.`);
+    const result = {
+        places: plan.targets.map(target => target.name),
+        startingKit: plan.startingKit,
+        applied: applied.applied.length,
+        rejected: applied.rejected.slice(0, 12),
+        ...(adjusted?.length ? { adjusted } : {}),
+        ...(missedPlayerPlace ? { missedPlayerPlace } : {}),
+        repaired: Boolean(response.repaired),
+        ...(plan.atSend ? { atSend: true } : {}),
+    };
+    targetStore.game.planner = {
+        ...targetStore.game.planner,
+        lastRunIndex: plan.index,
+        kitOffered: Boolean(targetStore.game.planner?.kitOffered || plan.startingKit),
+        lastRunStats: { ...result, at: Date.now() },
+        lastError: '',
+    };
+    return result;
+}
+
+/**
+ * When the player's newest turn heads for a place with nothing prepared, or
+ * stays somewhere that was never prepared, prepare it now, before the story
+ * is written. The story waits for it at prompt time (up to
+ * scenePlannerSendWaitSeconds), so the narrator describes the place with the
+ * planner's people, objects and prices.
+ */
+function maybeStageDestination() {
+    const settings = getSettings();
+    if (!settings.enabled || settings.gameEnabled === false || settings.scenePlannerEnabled === false
+        || settings.scenePlannerAtSend === false) return null;
+    if (runtime.rebuilding || runtime.destinationPlanner) return null;
+    // On a provider that serves one request at a time (NovelAI), a planner
+    // call now would only delay the story; the pass after the reply prepares
+    // the place instead.
+    if (!fitsBesideStory(plannerProfileId(settings))) return null;
+    const store = getChatStore();
+    const ctx = context();
+    if (!store || store.needsRebuild || !ctx.chat.at(-1)?.is_user) return null;
+    const scene = deriveSceneState(ctx.chat, store, {
+        currentIndex: ctx.chat.length - 1,
+        playerName: ctx.name1,
+        lookbackMessages: settings.sceneLookbackMessages ?? 4,
+    });
+    const plan = plannerPlanFor(store, scene, lastCompletedStoryIndex(ctx.chat), settings, ctx.name1, {
+        heading: scene.location?.source === 'explicit movement in latest turn',
+        prefetch: false,
+    });
+    if (!plan?.targets.length) return null;
+    plan.atSend = true;
+    runtime.destinationPlannerPlace = plan.targets[0].name;
+    runtime.destinationPlanner = runDestinationPlanner(store, plan).finally(() => {
+        runtime.destinationPlanner = null;
+        runtime.destinationPlannerPlace = '';
+    });
+    return runtime.destinationPlanner;
+}
+
+async function runDestinationPlanner(store, plan) {
+    const settings = getSettings();
+    const ctx = context();
+    const chatId = currentChatId();
+    setStatus('working', 'Preparing', `Preparing ${plan.targets[0].name} before the story arrives there…`);
+    try {
+        const response = await requestGamePatch(settings, plannerMessagesFor(store, plan), undefined, 'planner');
+        if (currentChatId() !== chatId || getChatStore() !== store) return;
+        const result = commitPlannerResponse(store, plan, response, ctx.name1);
+        await saveChatStore();
+        updateInjection();
+        setStatus('success', 'Prepared', `Planner prepared ${result.places.join(', ')} before the story arrives.`);
+    } catch (error) {
+        if (error?.name === 'AbortError') return;
+        console.warn(`${LOG_PREFIX} The scene planner could not prepare the destination:`, error);
+        store.game = normalizeGameState(store.game);
+        store.game.planner = { ...store.game.planner, lastError: cleanString(error?.message || String(error), 1_000) };
+        setStatus('idle', 'Idle', 'The planner could not prepare the destination; the story continues without it.');
+    }
+}
+
+/**
+ * SillyTavern assembles the prompt before it reports it ready, so a story
+ * that waited for background work would otherwise carry the packet from
+ * before the wait. Swap the delivered packet text for the fresh one.
+ */
+/**
+ * Everything that happens before a story request leaves: the destination
+ * planner gets its turn, background work runs first where the provider
+ * cannot serve both, `refresh` swaps in the packet if waiting changed it, and
+ * the story claims its request slot.
+ */
+async function departStory(settings, refresh) {
+    const packetBefore = runtime.deliveredPacketText || '';
+    // Background-first: everything already running - and anything
+    // scheduled but not yet started - completes before the story
+    // narrates, so the packet carries the freshest world state.
+    const scheduledBackground = () => Boolean(
+        runtime.queued || runtime.historyRebuildQueued || runtime.foundationPromise
+        || runtime.historyTimer || runtime.preparingFoundation);
+    const waitStart = Date.now();
+    if (runtime.destinationPlanner) {
+        const place = runtime.destinationPlannerPlace || 'the destination';
+        // A smaller planner takes 40 s and more: the story goes after a short
+        // wait and the prepared place lands for the next turn.
+        const cap = assistedFor(plannerProfileId(settings)) ? 15 : Infinity;
+        const limit = Math.min(cap, Math.max(0, Number(settings.scenePlannerSendWaitSeconds ?? 60))) * 1_000;
+        console.debug(`[InnerLore] Preparing ${place} before the story arrives there.`);
+        showNarratorPill(`Preparing ${place}`);
+        await Promise.race([runtime.destinationPlanner, new Promise(resolve => setTimeout(resolve, limit))]);
+        showNarratorPill('Narrating');
+    }
+    const sharedProvider = storyProvider();
+    // A story on a provider that serves one request at a time (NovelAI) would
+    // otherwise wait for the pass using it: the pass is stopped (its state is
+    // kept; it re-runs after the reply), once per watermark so fast typing
+    // cannot starve the world state. NovelAI frees the slot on an abort.
+    let preempted = false;
+    if (settings.storyPreemptsBackground !== false && isLimitedProvider(sharedProvider)
+        && !providerHasRoom(sharedProvider, storyCost()) && backgroundInFlightCount() > 0
+        && runtime.controller && !runtime.controller.signal.aborted) {
+        const watermark = `${currentChatId()}:${getChatStore()?.lastProcessedIndex ?? -1}`;
+        if (runtime.preemptedWatermark !== watermark) {
+            runtime.preemptedWatermark = watermark;
+            preempted = true;
+            console.debug(`[InnerLore] The story preempts the background pass on ${sharedProvider}; the pass re-runs after the reply.`);
+            showNarratorPill('Narrating');
+            runtime.controller.abort();
+            while (!providerHasRoom(sharedProvider, storyCost()) && Date.now() - waitStart < 5_000) {
+                await new Promise(resolve => setTimeout(resolve, 100));
+            }
+        }
+    }
+    if (providerConcurrency(settings) >= 2 && !providerHasRoom(sharedProvider, storyCost())) {
+        // The story runs on a provider with a request budget (NovelAI,
+        // Featherless) that background requests are using up: one more would
+        // be refused.
+        console.debug(`[InnerLore] The story waits for background requests on ${sharedProvider} to leave room.`);
+        showNarratorPill('Narrating - background work finishing first');
+        while (!providerHasRoom(sharedProvider, storyCost()) && Date.now() - waitStart < 180_000) {
+            await new Promise(resolve => setTimeout(resolve, 500));
+        }
+        showNarratorPill('Narrating');
+    } else if (providerConcurrency(settings) >= 2) {
+        console.debug('[InnerLore] Two request slots: the story leaves now; background work keeps the other slot.');
+    } else if (!preempted && (backgroundInFlightCount() > 0 || scheduledBackground())) {
+        console.debug(`[InnerLore] Background-first: story waiting behind ${backgroundInFlightCount()} in-flight background request(s)${scheduledBackground() ? ' + scheduled work' : ''}.`);
+        showNarratorPill('Narrating - background work finishing first');
+        try {
+            for (;;) {
+                await waitForBackgroundIdle();
+                if (!scheduledBackground() || Date.now() - waitStart > 120_000) break;
+                await new Promise(resolve => setTimeout(resolve, 750));
+            }
+        } finally {
+            console.debug(`[InnerLore] Background-first: background work done after ${Math.round((Date.now() - waitStart) / 1000)}s; the story request leaves now.`);
+            showNarratorPill('Narrating');
+        }
+    } else {
+        console.debug('[InnerLore] Background-first: no pending background work; the story request leaves immediately.');
+    }
+    if (Date.now() - waitStart > 250) refresh(packetBefore);
+    recordTelemetryEntry({
+        kind: 'story', phase: 'departed',
+        preemptedBackground: preempted,
+        waitedForBackgroundMs: Date.now() - waitStart,
+        timeSinceSentMs: runtime.turnSentAt ? Date.now() - runtime.turnSentAt : 0,
+    });
+    runtime.storyDepartedAt = Date.now();
+    runtime.storyRequestInFlight = true;
+    runtime.storyRequestInFlightAt = Date.now();
+    runtime.storyClaimIsQuiet = runtime.storyGenerationType === 'quiet';
+    runtime.announceStoryState?.(true);
+}
+
+function refreshTextPrompt(prompt, packetBefore, memoryBefore) {
+    const notes = [packetBefore, ...(runtime.deliveredPacketHistory || [])].filter(Boolean);
+    const memories = [memoryBefore, ...(runtime.textMemoryHistory || [])].filter(Boolean);
+    updateInjection();
+    let text = prompt;
+    for (const [earlier, after] of [[notes, runtime.deliveredPacketText || ''], [memories, runtime.lastTextMemory || '']]) {
+        const old = [...new Set(earlier)].filter(item => item !== after).sort((a, b) => b.length - a.length)
+            .find(item => text.includes(item));
+        if (old && after) text = text.replace(old, () => after);
+    }
+    if (text !== prompt) log('Story packet refreshed in the text prompt after waiting for background work.');
+    return text;
+}
+
+function refreshPacketInPrompt(prompt, before) {
+    const earlier = [before, ...(runtime.deliveredPacketHistory || [])].filter(Boolean);
+    updateInjection();
+    const after = runtime.deliveredPacketText || '';
+    const candidates = [...new Set(earlier)].filter(text => text !== after).sort((a, b) => b.length - a.length);
+    if (!after || !candidates.length) return false;
+    const messages = Array.isArray(prompt?.chat) ? prompt.chat : (Array.isArray(prompt?.messages) ? prompt.messages : null);
+    let replaced = false;
+    for (const message of messages || []) {
+        if (typeof message?.content !== 'string') continue;
+        const old = candidates.find(text => message.content.includes(text));
+        if (!old) continue;
+        message.content = message.content.replace(old, () => after);
+        replaced = true;
+    }
+    if (replaced) log('Story packet refreshed after waiting for background work.');
+    return replaced;
+}
+
+/**
+ * The prompt view of the story before `boundary`. The game journal is rewound
+ * exactly, so a reswipe never sees a purchase from the reply it replaces.
+ */
+function historyPrefixStore(store, boundary) {
+    const prefix = createHistoryPrefixPromptStore(store, boundary);
+    prefix.game = gameStateBefore(normalizeGameState(store?.game), Math.max(0, Number(boundary) || 0));
+    return prefix;
 }
 
 function carryManualState(oldStore, newStore) {
@@ -4171,6 +5480,9 @@ async function rebuildFromChat({ automatic = false } = {}) {
         : null;
     const temporary = createEmptyStore(runChatId);
     let rebuildStartIndex = 0;
+    // A full replay starts from the same card-declared canon a new chat gets.
+    // Checkpoints already carry the seeds they were captured with.
+    if (!resumeCheckpoint) seedNewStoreFromCard(temporary);
     if (resumeCheckpoint) {
         applyStoreCheckpoint(temporary, resumeCheckpoint);
         temporary.checkpoints = (oldStore.checkpoints || [])
@@ -4194,6 +5506,17 @@ async function rebuildFromChat({ automatic = false } = {}) {
     }
     temporary.progression = resetTriggerEventRuntime(temporary.progression, { replayCreationAnchors: true });
     temporary.lorebookName = oldStore.lorebookName;
+    // The game journal rewinds exactly: everything recorded before the first
+    // changed message stays, and the ledger re-reads only what follows. A
+    // manual rebuild re-reads every reply but keeps the planner's prepared
+    // places and the starting kit, which no reply produced.
+    const oldGame = normalizeGameState(oldStore.game);
+    temporary.game = automatic
+        ? gameStateBefore(oldGame, Math.min(
+            firstDivergenceIndex(ctx.chat, oldGame.processedFingerprints),
+            completedHistoryIndex + 1,
+        ))
+        : gameStateBefore(oldGame, completedHistoryIndex + 1, { keepSources: ['planner', 'scene'] });
     const eventCreationBoundaries = new Set(Object.values(temporary.progression.eventDefinitions)
         .map(definition => definition.createdAtMessage)
         .filter(index => Number.isInteger(index) && index >= 0 && index <= completedHistoryIndex));
@@ -4244,6 +5567,7 @@ async function rebuildFromChat({ automatic = false } = {}) {
                 sync: false,
                 progressionMode: 'rebuild',
                 progressionFlush: true,
+                gameEnabled: false,
             });
             throwForSubsystemFailure(result);
             if (temporary.progression.lastProcessedIndex <= before) break;
@@ -4280,7 +5604,9 @@ async function rebuildFromChat({ automatic = false } = {}) {
                 removeMissing: true,
             });
         }
-        await saveChatStore();
+        // The rebuilt store deliberately replaces the quarantined one, so
+        // dropping a discarded branch's entities is not a stale-store shrink.
+        await saveChatStore({ allowEntityShrink: true });
         clearHistoryFallback();
         updateInjection();
         const progressionStats = getProgressionStats(temporary.progression);
@@ -4379,7 +5705,7 @@ function scheduleHistoryRebuild(options = {}) {
     const store = getChatStore();
     if (!store) return;
     if (Number.isInteger(options.promptFallbackIndex)) {
-        runtime.historyFallbackStore = createHistoryPrefixPromptStore(store, options.promptFallbackIndex);
+        runtime.historyFallbackStore = historyPrefixStore(store, options.promptFallbackIndex);
         runtime.historyFallbackChatId = currentChatId();
         runtime.historyFallbackBoundary = options.promptFallbackIndex;
     }
@@ -4635,7 +5961,7 @@ async function runExpressionFoundationWarmup() {
     }
     if (deferWhileStoryWrites('foundation', () => scheduleExpressionFoundationWarmup(0))) return;
     const boundary = context().chat.length;
-    const staging = createHistoryPrefixPromptStore(store, boundary);
+    const staging = historyPrefixStore(store, boundary);
     try {
         await beginExpressionFoundation(staging, boundary);
         updateInjection();
@@ -5071,6 +6397,20 @@ async function generateAutomaticEventNow() {
     }
 }
 
+async function resetGameState() {
+    const store = getChatStore();
+    if (!store) return;
+    if (!confirm('Reset this chat\'s money, belongings, prices, standing, reputation and prepared places? The story itself is not changed.')) return;
+    store.game = createGameState();
+    // Start reading from now rather than replaying the whole chat.
+    store.game.lastProcessedIndex = lastCompletedStoryIndex(context().chat);
+    store.game.introducedThrough = store.game.lastProcessedIndex;
+    await saveChatStore();
+    updateInjection();
+    updateUI();
+    toastr.success('Game state reset. The ledger starts again from the next reply.', DISPLAY_NAME);
+}
+
 async function resetWorldProgression() {
     const store = getChatStore();
     if (!store || !confirm('Reset the private World Progression clock, goals, processes, and automatic beats for this chat? User-authored events will be preserved and re-armed; generated proposals will be discarded and can be derived again. Public lore and character minds are not changed.')) return;
@@ -5241,6 +6581,10 @@ function bindUIEvents() {
         getSettings().progressionFallbackConnectionProfileId = event.target.value;
         saveSettings();
     });
+    document.getElementById('il_story_provider_body')?.addEventListener('change', event => {
+        getSettings().storyProviderBody = cleanString(event.target.value, 2_000);
+        context().saveSettingsDebounced();
+    });
     document.getElementById('il_custom_instructions')?.addEventListener('change', event => {
         getSettings().customInstructions = cleanString(event.target.value, 4_000);
         saveSettings();
@@ -5249,6 +6593,45 @@ function bindUIEvents() {
         getSettings().progressionCustomInstructions = cleanString(event.target.value, 5_000);
         saveSettings();
     });
+    bindCheckbox('il_parallel_passes', 'parallelBackgroundPasses');
+    bindCheckbox('il_game_enabled', 'gameEnabled', () => {
+        updateInjection();
+        updateUI();
+    });
+    bindCheckbox('il_game_ledger_enabled', 'gameLedgerEnabled');
+    bindCheckbox('il_scene_planner_enabled', 'scenePlannerEnabled');
+    bindCheckbox('il_scene_planner_prefetch', 'scenePlannerPrefetch');
+    bindCheckbox('il_story_preempts_background', 'storyPreemptsBackground');
+    bindCheckbox('il_scene_planner_at_send', 'scenePlannerAtSend');
+    bindNumber('il_scene_planner_wait', 'scenePlannerSendWaitSeconds', 0, 180);
+    bindNumber('il_scene_planner_places', 'scenePlannerMaximumPlaces', 1, 3);
+    bindNumber('il_scene_planner_stale_hours', 'scenePlannerStaleHours', 1, 168);
+    bindNumber('il_game_injection_budget', 'gameInjectionBudget', 500, 20_000, () => updateInjection());
+    for (const [id, key] of [['il_game_profile', 'gameConnectionProfileId'], ['il_planner_profile', 'plannerConnectionProfileId'], ['il_minds_profile', 'mindsConnectionProfileId']]) {
+        document.getElementById(id)?.addEventListener('change', event => {
+            getSettings()[key] = event.target.value;
+            saveSettings();
+        });
+    }
+    for (const [id, key] of [['il_game_custom_instructions', 'gameCustomInstructions'], ['il_planner_custom_instructions', 'plannerCustomInstructions']]) {
+        document.getElementById(id)?.addEventListener('change', event => {
+            getSettings()[key] = cleanString(event.target.value, 3_000);
+            saveSettings();
+        });
+    }
+    bindSelect('il_assisted_background', 'assistedBackground', ['auto', 'on', 'off']);
+    bindCheckbox('il_cast_cards', 'castCardsEnabled', () => updateCastCards());
+    bindCheckbox('il_portraits_enabled', 'portraitsEnabled', () => updateCastCards());
+    bindNumber('il_portrait_steps', 'portraitSteps', 1, 60);
+    bindNumber('il_portrait_cfg', 'portraitCfg', 1, 20);
+    for (const [id, key, limit] of [['il_portrait_url', 'portraitServerUrl', 300], ['il_portrait_style', 'portraitStyle', 400], ['il_portrait_negative', 'portraitNegative', 1_000]]) {
+        document.getElementById(id)?.addEventListener('change', event => {
+            getSettings()[key] = cleanString(event.target.value, limit);
+            saveSettings();
+        });
+    }
+    document.getElementById('il_open_game_panel')?.addEventListener('click', () => openGamePanel('bag'));
+    document.getElementById('il_reset_game')?.addEventListener('click', resetGameState);
     document.getElementById('il_context_profile')?.addEventListener('change', event => {
         const profileId = cleanString(event.target.value, 64).toLocaleLowerCase();
         const profile = runtime.contextProfiles.find(item => item.id === profileId)
@@ -5341,7 +6724,7 @@ function bindUIEvents() {
     });
     // Budget mode is pinned to Derived and cannot be switched off; only the
     // share percentages and safety margin are configurable.
-    const derivedShareKeys = ['response', 'history', 'scene', 'minds', 'lore', 'progression'];
+    const derivedShareKeys = ['response', 'history', 'scene', 'minds', 'lore', 'progression', 'game'];
     for (const key of derivedShareKeys) {
         document.getElementById(`il_derived_share_${key}`)?.addEventListener('change', event => {
             const settings = getSettings();
@@ -5370,6 +6753,11 @@ function bindUIEvents() {
         const value = ['brief', 'standard', 'long'].includes(event.target.value) ? event.target.value : 'standard';
         getSettings().narrationLength = value;
         saveSettings();
+    });
+    document.getElementById('il_guided_play')?.addEventListener('change', event => {
+        getSettings().guidedPlayEnabled = event.target.checked;
+        saveSettings();
+        renderPlayerChoices();
     });
     document.getElementById('il_narrator_prompt')?.addEventListener('change', event => {
         const value = cleanString(event.target.value, 20_000);
@@ -5720,6 +7108,8 @@ function registerEvents() {
         runtime.currentTelemetryTurn = nextTelemetryTurn();
         runtime.turnSentAt = Date.now();
         recordTelemetryEntry({ kind: 'story', phase: 'sent' });
+            // A move to a place with nothing prepared starts the planner now.
+            maybeStageDestination();
             // GENERATION_STARTED fires before SillyTavern moves the textarea
             // into chat. Refresh again here so the current player action—and
             // an explicit time skip such as “five minutes pass”—is in the
@@ -5733,6 +7123,8 @@ function registerEvents() {
         });
     }
     eventSource.on(events.MESSAGE_RECEIVED, (messageIndex, generationType) => {
+        captureReplyChoices(messageIndex);
+        runtime.choicesHidden = false;
         const store = getChatStore();
         const message = context().chat[messageIndex];
         if (!store && message && !message.is_user && !message.is_system) {
@@ -5822,6 +7214,11 @@ function registerEvents() {
         // Quiet generations (auto-title on a new chat's first message) share
         // the same single-slot provider and are serialized the same way.
         const storyStart = generationType !== 'impersonate';
+        // The moves under the previous reply go stale once a new reply starts.
+        if (!isDryRun && storyStart && generationType !== 'quiet') {
+            runtime.choicesHidden = true;
+            renderPlayerChoices();
+        }
         if (!isDryRun && storyStart && !runtime.activeStoryGenerationId) {
             runtime.activeStoryGenerationId = `story:pending:${Date.now().toString(36)}`;
             runtime.announceStoryState?.(true);
@@ -5912,6 +7309,26 @@ function registerEvents() {
             }
         });
     }
+    if (events.CHAT_COMPLETION_SETTINGS_READY) {
+        // SillyTavern drops top_k, min_p and the preset's custom body on the
+        // custom source unless the preset is bound to the connection. A story
+        // on Featherless or NovelAI gets them here.
+        eventSource.on(events.CHAT_COMPLETION_SETTINGS_READY, generateData => {
+            try {
+                const settings = getSettings();
+                if (!settings.enabled || !generateData || generateData.chat_completion_source !== 'custom' || !runtime.storyRequestInFlight) return;
+                const ctx = context();
+                const provider = limitedHost(generateData.custom_url || ctx.chatCompletionSettings?.custom_url);
+                const lines = storyProviderBodyLines(provider, generateData.custom_include_body, ctx.chatCompletionSettings || {}, settings.storyProviderBody);
+                if (!lines.length) return;
+                const existing = String(generateData.custom_include_body || '').trim();
+                generateData.custom_include_body = `${existing}${existing ? '\n' : ''}${lines.join('\n')}`;
+                log(`Story request body for ${provider}: +${lines.join(' / ')}`);
+            } catch (error) {
+                console.warn(`${LOG_PREFIX} story request body:`, error);
+            }
+        });
+    }
     if (events.CHAT_COMPLETION_PROMPT_READY) {
         // Derived mode (and explicit history-in-macro) delivers the curated
         // packet - including history - from the state macro, so SillyTavern's
@@ -5921,41 +7338,7 @@ function registerEvents() {
         eventSource.on(events.CHAT_COMPLETION_PROMPT_READY, async prompt => {
             const settings = getSettings();
             if (!settings.enabled || !runtime.activeStoryGenerationId) return;
-            // Background-first: everything already running - and anything
-            // scheduled but not yet started - completes before the story
-            // narrates, so the packet carries the freshest world state.
-            const scheduledBackground = () => Boolean(
-                runtime.queued || runtime.historyRebuildQueued || runtime.foundationPromise
-                || runtime.historyTimer || runtime.preparingFoundation);
-            const waitStart = Date.now();
-            if (providerConcurrency(settings) >= 2) {
-                console.debug('[InnerLore] Two request slots: the story leaves now; background work keeps the other slot.');
-            } else if (backgroundInFlightCount() > 0 || scheduledBackground()) {
-                console.debug(`[InnerLore] Background-first: story waiting behind ${backgroundInFlightCount()} in-flight background request(s)${scheduledBackground() ? ' + scheduled work' : ''}.`);
-                showNarratorPill('Narrating - background work finishing first');
-                try {
-                    for (;;) {
-                        await waitForBackgroundIdle();
-                        if (!scheduledBackground() || Date.now() - waitStart > 120_000) break;
-                        await new Promise(resolve => setTimeout(resolve, 750));
-                    }
-                } finally {
-                    console.debug(`[InnerLore] Background-first: background work done after ${Math.round((Date.now() - waitStart) / 1000)}s; the story request leaves now.`);
-                    showNarratorPill('Narrating');
-                }
-            } else {
-                console.debug('[InnerLore] Background-first: no pending background work; the story request leaves immediately.');
-            }
-            recordTelemetryEntry({
-                kind: 'story', phase: 'departed',
-                waitedForBackgroundMs: Date.now() - waitStart,
-                timeSinceSentMs: runtime.turnSentAt ? Date.now() - runtime.turnSentAt : 0,
-            });
-            runtime.storyDepartedAt = Date.now();
-            runtime.storyRequestInFlight = true;
-            runtime.storyRequestInFlightAt = Date.now();
-            runtime.storyClaimIsQuiet = runtime.storyGenerationType === 'quiet';
-            runtime.announceStoryState?.(true);
+            await departStory(settings, packetBefore => refreshPacketInPrompt(prompt, packetBefore));
             if (!runtime.derivedContext) return;
             // SillyTavern 1.18 passes { chat }; older builds passed { messages }.
             // The array must be mutated in place - reassignment is ignored.
@@ -5985,6 +7368,18 @@ function registerEvents() {
                 if (!keep.has(i)) messages.splice(i, 1);
             }
             log(`History bypass: delivering history once via the state macro (${removed} rendered turns removed from this request).`);
+        });
+    }
+    if (events.GENERATE_AFTER_COMBINE_PROMPTS) {
+        // Text completion: the same departure as a chat story; the assembled
+        // prompt string then carries the freshest note and memory.
+        eventSource.on(events.GENERATE_AFTER_COMBINE_PROMPTS, async data => {
+            const settings = getSettings();
+            if (!settings.enabled || data?.dryRun || typeof data?.prompt !== 'string' || !runtime.activeStoryGenerationId) return;
+            const memoryBefore = runtime.lastTextMemory || '';
+            await departStory(settings, packetBefore => {
+                data.prompt = refreshTextPrompt(data.prompt, packetBefore, memoryBefore);
+            });
         });
     }
     if (events.GENERATION_ENDED) {
@@ -6044,6 +7439,8 @@ function registerEvents() {
         context().setExtensionPrompt(PROMPT_KEY, '', 1, 0, false, 0);
         context().setExtensionPrompt(TURN_CONTRACT_PROMPT_KEY, '', 1, 0, false, 0);
         context().setExtensionPrompt(TRIGGER_DELIVERY_PROMPT_KEY, '', 1, 0, false, 0);
+        context().setExtensionPrompt(TEXT_MEMORY_PROMPT_KEY, '', 0, 0, false, 0);
+        runtime.lastTextMemory = '';
         runtime.lastInjection = '';
         runtime.lastTurnContract = '';
         runtime.lastTriggerDeliveryPrompt = '';
@@ -6086,6 +7483,19 @@ function registerEvents() {
     };
     eventSource.on(events.MESSAGE_EDITED, scheduleExternalHistoryRebuild);
     eventSource.on(events.MESSAGE_SWIPED, scheduleSwipeHistoryRebuild);
+    eventSource.on(events.MESSAGE_SWIPED, messageIndex => {
+        captureReplyChoices(messageIndex);
+        renderPlayerChoices();
+    });
+    for (const event of [events.CHARACTER_MESSAGE_RENDERED, events.MESSAGE_SENT, events.MESSAGE_DELETED]) {
+        if (event) eventSource.on(event, () => renderPlayerChoices());
+    }
+    for (const event of [events.GENERATION_ENDED, events.GENERATION_STOPPED]) {
+        if (event) eventSource.on(event, () => {
+            runtime.choicesHidden = false;
+            renderPlayerChoices();
+        });
+    }
     eventSource.on(events.MESSAGE_DELETED, scheduleExternalHistoryRebuild);
     if (events.CHAT_DELETED) {
         eventSource.on(events.CHAT_DELETED, async chatId => {
