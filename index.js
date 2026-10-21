@@ -138,14 +138,22 @@ import { isTextCompletionApi, renderTextPacket, textPacketBudget } from './text-
 import { createGamePanel, createTradePanel } from './game-view.js?v=1';
 import {
     PORTRAIT_DEFAULTS,
+    PORTRAIT_FOLDER,
+    PORTRAIT_FOLDER_PATH,
     PORTRAIT_METADATA_KEY,
+    chatPortraitFiles,
     composePortraitPrompt,
     createPortraitQueue,
     findPortrait,
+    foreignPortraitRecords,
+    isLegacyPortraitFileOf,
+    orphanPortraitFiles,
+    portraitFileName,
+    portraitFileStem,
     portraitPayload,
     portraitSource,
     requestPortraitTags,
-} from './portrait.js?v=1';
+} from './portrait.js?v=2';
 import {
     applyProgressionPatch,
     createProgressionState,
@@ -186,7 +194,7 @@ const TRIGGER_DELIVERY_PROMPT_KEY = 'inner_lore_trigger_delivery';
 // For a text-completion story model: InnerLore's lore entries, after the story string.
 const TEXT_MEMORY_PROMPT_KEY = 'inner_lore_text_memory';
 const DISPLAY_NAME = 'InnerLore';
-const EXTENSION_VERSION = '0.26.0';
+const EXTENSION_VERSION = '0.27.1';
 const LOG_PREFIX = '[InnerLore]';
 
 /**
@@ -1034,8 +1042,21 @@ async function cleanupDeletedChat(chatId, { silent = false } = {}) {
         if (!silent) toastr.warning('The chat was deleted, but its InnerLore SQLite world could not be permanently deleted yet. Cleanup will retry automatically.', DISPLAY_NAME);
     }
     saveSettings();
-    log('Cleaned deleted chat state', id, { ...loreResult, storage: storageResult });
-    return { ...loreResult, storage: storageResult, storageError: storageError?.message || '' };
+
+    // The chat's portrait files. A failure here is retried by the startup
+    // sweep, which removes every file whose chat no longer exists.
+    let portraitResult = { candidates: [], deleted: [], failed: [] };
+    try {
+        portraitResult = await deleteChatPortraits(id);
+    } catch (error) {
+        console.error(`${LOG_PREFIX} Could not remove the portraits of ${id}:`, error);
+        portraitResult.failed = ['(listing failed)'];
+    }
+    if (portraitResult.failed.length && !silent) {
+        toastr.warning('The chat was deleted, but its InnerLore portraits could not all be removed yet. The next start will retry.', DISPLAY_NAME);
+    }
+    log('Cleaned deleted chat state', id, { ...loreResult, storage: storageResult, portraits: portraitResult });
+    return { ...loreResult, storage: storageResult, storageError: storageError?.message || '', portraits: portraitResult };
 }
 
 /**
@@ -1093,7 +1114,16 @@ async function sweepOrphanedChatState() {
         }
     }
     if (swept.length) console.info(`${LOG_PREFIX} Removed InnerLore state of ${swept.length} deleted chat(s): ${swept.join(', ')}`);
-    return { swept, existing: existing.size };
+    // Portrait files no existing chat could have drawn: left by chats deleted
+    // elsewhere, by a deletion whose file removal failed, or by a rename.
+    let portraits = { candidates: [], deleted: [], failed: [] };
+    try {
+        portraits = await deletePortraitFiles(orphanPortraitFiles(await listPortraitFiles(), [...existing, current]));
+        if (portraits.deleted.length) console.info(`${LOG_PREFIX} Removed ${portraits.deleted.length} portrait file(s) of deleted chats: ${portraits.deleted.join(', ')}`);
+    } catch (error) {
+        console.warn(`${LOG_PREFIX} Orphan sweep could not check the portrait files:`, error);
+    }
+    return { swept, existing: existing.size, portraits };
 }
 
 async function retryPendingChatCleanups() {
@@ -2106,11 +2136,10 @@ async function drawPortrait(job) {
     if (!image) throw new Error('the image server sent no picture');
     if (currentChatId() !== job.chatId) return;
     const picture = await shrinkPortrait(image);
-    const stem = `${job.chatId}-${job.key}`.toLocaleLowerCase().replace(/[^a-z0-9]+/gu, '-').slice(0, 90);
     const upload = await fetch('/api/images/upload', {
         method: 'POST',
         headers: context().getRequestHeaders(),
-        body: JSON.stringify({ image: picture.data, format: picture.format, ch_name: 'InnerLore', filename: `${stem}-${payload.seed}` }),
+        body: JSON.stringify({ image: picture.data, format: picture.format, ch_name: PORTRAIT_FOLDER, filename: `${portraitFileStem(job.chatId, job.key)}-${payload.seed}` }),
     });
     if (!upload.ok) throw new Error(`the portrait could not be saved (HTTP ${upload.status})`);
     const { path } = await upload.json();
@@ -2121,6 +2150,116 @@ async function drawPortrait(job) {
         [job.key]: { name: job.name, path, prompt: payload.prompt, seed: payload.seed, at: Date.now() },
     };
     ctx.saveMetadataDebounced?.();
+}
+
+/** The portrait files on the server (names only); an empty list when the folder was never made. */
+async function listPortraitFiles() {
+    const headers = context().getRequestHeaders();
+    const folders = await fetch('/api/images/folders', { method: 'POST', headers, body: '{}' });
+    if (!folders.ok) throw new Error(`image folders could not be listed: HTTP ${folders.status}`);
+    if (!(await folders.json()).includes(PORTRAIT_FOLDER)) return [];
+    const response = await fetch('/api/images/list', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ folder: PORTRAIT_FOLDER }),
+    });
+    if (!response.ok) throw new Error(`portrait files could not be listed: HTTP ${response.status}`);
+    const files = await response.json();
+    return Array.isArray(files) ? files.map(portraitFileName).filter(Boolean) : [];
+}
+
+/** Delete the named portrait files; a file already gone counts as deleted. */
+async function deletePortraitFiles(files) {
+    const deleted = [];
+    const failed = [];
+    for (const file of files) {
+        try {
+            const response = await fetch('/api/images/delete', {
+                method: 'POST',
+                headers: context().getRequestHeaders(),
+                body: JSON.stringify({ path: `${PORTRAIT_FOLDER_PATH}/${file}` }),
+            });
+            if (!response.ok && response.status !== 404) throw new Error(`HTTP ${response.status}`);
+            deleted.push(file);
+        } catch (error) {
+            failed.push(file);
+            console.warn(`${LOG_PREFIX} Could not delete the portrait file ${file}:`, error);
+        }
+    }
+    return { candidates: [...files], deleted, failed };
+}
+
+/** Delete every portrait file a chat drew. Files from before the hash naming are left to the startup sweep. */
+async function deleteChatPortraits(chatId) {
+    return deletePortraitFiles(chatPortraitFiles(chatId, await listPortraitFiles()));
+}
+
+/** Copy a portrait file into one named for this chat; '' when the original is gone. */
+async function copyPortraitFile(path, chatId, key, seed) {
+    const original = await fetch(path, { cache: 'no-store' });
+    if (original.status === 404) return '';
+    if (!original.ok) throw new Error(`HTTP ${original.status} reading ${path}`);
+    const blob = await original.blob();
+    const data = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result).slice(String(reader.result).indexOf(',') + 1));
+        reader.onerror = () => reject(reader.error || new Error('the portrait could not be read'));
+        reader.readAsDataURL(blob);
+    });
+    const format = portraitFileName(path).split('.').pop().toLowerCase() || 'webp';
+    const upload = await fetch('/api/images/upload', {
+        method: 'POST',
+        headers: context().getRequestHeaders(),
+        body: JSON.stringify({ image: data, format, ch_name: PORTRAIT_FOLDER, filename: `${portraitFileStem(chatId, key)}-${seed || Date.now()}` }),
+    });
+    if (!upload.ok) throw new Error(`the portrait copy could not be saved (HTTP ${upload.status})`);
+    return (await upload.json())?.path || '';
+}
+
+/**
+ * A chat shows the portraits in its metadata but owns only the files named
+ * for it. Records inherited from the chat this one was branched, renamed or
+ * started from (SillyTavern copies the metadata), or drawn before files were
+ * named for their chat, are copied into this chat's own files, so deleting
+ * either chat never takes the other's faces. A record whose file is gone is
+ * dropped, and the person is drawn again. One adoption runs per chat at a
+ * time; the promise lets a rename wait for it.
+ */
+function adoptPortraits() {
+    const chatId = currentChatId();
+    if (!chatId) return Promise.resolve();
+    if (runtime.portraitAdoption?.chatId === chatId) return runtime.portraitAdoption.promise;
+    const promise = (async () => {
+        const ctx = context();
+        for (const [key, record] of foreignPortraitRecords(portraitRecords(), chatId)) {
+            if (currentChatId() !== chatId) return;
+            const copy = await copyPortraitFile(record.path, chatId, key, record.seed);
+            if (currentChatId() !== chatId || !ctx.chatMetadata) return;
+            const records = { ...portraitRecords() };
+            if (copy) records[key] = { ...record, path: copy };
+            else delete records[key];
+            ctx.chatMetadata[PORTRAIT_METADATA_KEY] = records;
+            ctx.saveMetadataDebounced?.();
+            // The chat's own file under the old naming has no other owner now.
+            if (copy && isLegacyPortraitFileOf(chatId, record.path)) await deletePortraitFiles([portraitFileName(record.path)]);
+            refreshPortraitViews();
+        }
+    })().catch(error => {
+        console.warn(`${LOG_PREFIX} Could not adopt inherited portraits:`, error);
+    }).finally(() => {
+        if (runtime.portraitAdoption?.promise === promise) runtime.portraitAdoption = null;
+    });
+    runtime.portraitAdoption = { chatId, promise };
+    return promise;
+}
+
+/** After a rename: the chat copies its faces under the new name, then the old name's files go. */
+async function migratePortraits(oldChatId, newChatId) {
+    const oldId = cleanString(oldChatId, 300);
+    const newId = cleanString(newChatId, 300);
+    if (!oldId || !newId || oldId === newId) return null;
+    if (currentChatId() === newId) await adoptPortraits();
+    return deleteChatPortraits(oldId);
 }
 
 // After the queue's own bookkeeping, never inside a cast refresh that queued it.
@@ -7514,6 +7653,7 @@ function registerEvents() {
         }
         setStatus('idle', 'Idle', currentChatId() ? 'Ready for the next story reply.' : 'Waiting for a chat.');
         updateUI();
+        void adoptPortraits();
         // Prime the compiled packet (and the cast cards' scene participants)
         // before the first generation of the session, so the world state is
         // visible and injected from the moment a saved chat opens.
@@ -7575,6 +7715,11 @@ function registerEvents() {
                 console.error(`${LOG_PREFIX} Could not rename the SQLite chat world:`, error);
                 toastr.warning('The chat was renamed, but InnerLore storage could not update its chat identity yet.', DISPLAY_NAME);
             }
+            try {
+                await migratePortraits(oldFileName, newFileName);
+            } catch (error) {
+                console.warn(`${LOG_PREFIX} Could not move the portraits of the renamed chat (the next start will tidy the old files):`, error);
+            }
         });
     }
 }
@@ -7606,6 +7751,7 @@ async function initializeServerState() {
     } catch (error) {
         console.warn(`${LOG_PREFIX} Orphan sweep skipped:`, error);
     }
+    void adoptPortraits();
     updateInjection();
     void prepareServerContext();
     setStatus('idle', 'Idle', currentChatId() ? 'Ready for the next story reply.' : 'Waiting for a chat.');

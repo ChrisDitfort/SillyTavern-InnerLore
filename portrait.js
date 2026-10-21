@@ -5,7 +5,7 @@
  * LDBridge, by default the server SillyTavern's own image generation uses),
  * and the picture is kept per chat in the chat's metadata, keyed by name.
  */
-import { canonicalNameKey, cleanString } from './core.js?v=48';
+import { canonicalNameKey, cleanString, hashString } from './core.js?v=48';
 import { normalizeGameState } from './game.js?v=2';
 import { gameRequestSettings } from './game-client.js?v=1';
 import { sendInnerLoreRequest } from './llm-client.js?v=16';
@@ -174,6 +174,74 @@ export function portraitPayload(prompt, options = {}) {
         batch_size: 1,
         n_iter: 1,
     };
+}
+
+/*
+ * Portrait files live in SillyTavern's user images, under InnerLore/, and are
+ * named after the chat that drew them: the chat's id hash first, then the
+ * chat and the person for a human reader, then the seed. The hash makes a
+ * chat's files exact on disk: deleting the chat deletes its files and nothing
+ * else's, and the startup sweep removes the files of chats that no longer
+ * exist. Files from before the hash (the chat slug alone) are told apart only
+ * by that slug, which a chat named like the start of another may share, so
+ * they are never deleted on a chat's behalf: only once no existing chat could
+ * own them, or once their own chat has copied them into named files.
+ */
+export const PORTRAIT_FOLDER = 'InnerLore';
+export const PORTRAIT_FOLDER_PATH = `user/images/${PORTRAIT_FOLDER}`;
+const PORTRAIT_STEM_LIMIT = 90;
+
+function portraitSlug(text) {
+    return String(text ?? '').toLocaleLowerCase().replace(/[^a-z0-9]+/gu, '-');
+}
+
+/** The file name (without seed and extension) of a person's portrait drawn for a chat. */
+export function portraitFileStem(chatId, key) {
+    return `${hashString(chatId)}-${portraitSlug(`${chatId}-${key}`).slice(0, PORTRAIT_STEM_LIMIT - 9)}`;
+}
+
+/** The start every file drawn for a chat shares. */
+export function portraitFilePrefix(chatId) {
+    return chatId ? `${hashString(chatId)}-` : '';
+}
+
+function legacyPortraitFilePrefix(chatId) {
+    return chatId ? portraitSlug(`${chatId}-`).slice(0, PORTRAIT_STEM_LIMIT) : '';
+}
+
+export function portraitFileName(pathOrName) {
+    return String(pathOrName ?? '').split('/').pop();
+}
+
+/** Whether a file was drawn for this chat under the current naming. */
+export function ownsPortraitFile(chatId, pathOrName) {
+    const prefix = portraitFilePrefix(chatId);
+    return Boolean(prefix) && portraitFileName(pathOrName).startsWith(prefix);
+}
+
+/** Whether a file from before the hash naming carries this chat's slug (which another chat's may begin with). */
+export function isLegacyPortraitFileOf(chatId, pathOrName) {
+    const prefix = legacyPortraitFilePrefix(chatId);
+    const file = portraitFileName(pathOrName);
+    return Boolean(prefix) && !ownsPortraitFile(chatId, file) && file.startsWith(prefix);
+}
+
+/** The files a deleted chat drew, exactly: never a legacy file, which the sweep decides. */
+export function chatPortraitFiles(chatId, files) {
+    return (files || []).map(portraitFileName).filter(file => ownsPortraitFile(chatId, file));
+}
+
+/** The files no existing chat could own, under either naming. */
+export function orphanPortraitFiles(files, existingChatIds) {
+    const ids = [...new Set((existingChatIds || []).filter(Boolean))];
+    return (files || []).map(portraitFileName)
+        .filter(file => file && !ids.some(id => ownsPortraitFile(id, file) || isLegacyPortraitFileOf(id, file)));
+}
+
+/** The records a chat shows but whose files it does not own: inherited from the chat it was branched, renamed or started from, or drawn before the hash naming. */
+export function foreignPortraitRecords(records, chatId) {
+    return Object.entries(records && typeof records === 'object' ? records : {})
+        .filter(([, record]) => typeof record?.path === 'string' && record.path && !ownsPortraitFile(chatId, record.path));
 }
 
 /** Someone's portrait record, found by name or by any alias the story gave them. */

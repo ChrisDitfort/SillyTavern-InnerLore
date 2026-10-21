@@ -122,3 +122,57 @@ test('portraits are drawn one at a time; a failure waits, a dead server pauses t
     assert.equal(queue.active.key, 'g', 'switching chats forgets the old chat\'s waiting people');
     await settle();
 });
+
+test('portrait files are named for their chat and told apart exactly', async () => {
+    const { hashString } = await import('../core.js?v=48');
+    const { chatPortraitFiles, isLegacyPortraitFileOf, ownsPortraitFile, portraitFileStem } = await import('../portrait.js');
+    // Renamed chats carry whatever name the player gave them: one may begin like another.
+    const chat = 'Tavern';
+    const nested = 'Tavern night';
+    const stem = portraitFileStem(chat, 'hob garrow');
+    assert.equal(stem, `${hashString(chat)}-tavern-hob-garrow`);
+    assert.ok(ownsPortraitFile(chat, `/user/images/InnerLore/${stem}-123.webp`));
+    assert.equal(ownsPortraitFile(nested, `${stem}-123.webp`), false);
+    assert.equal(ownsPortraitFile('', `${stem}-123.webp`), false);
+    const long = `${'A'.repeat(120)} - 2026-10-21@19h12m45s191ms`;
+    assert.ok(portraitFileStem(long, 'x').length <= 90, 'the file name stays short');
+    assert.ok(ownsPortraitFile(long, `${portraitFileStem(long, 'x')}-1.webp`), 'the hash is never cut off');
+    const files = [
+        `${stem}-123.webp`,
+        `${portraitFileStem(nested, 'hob garrow')}-9.webp`,
+        'tavern-hob-garrow-5.webp',
+        'tavern-night-hob-garrow-6.webp',
+    ];
+    assert.deepEqual(chatPortraitFiles(chat, files), [files[0]], 'a deleted chat takes only the files named for it');
+    assert.ok(isLegacyPortraitFileOf(chat, files[2]));
+    assert.ok(isLegacyPortraitFileOf(chat, files[3]), 'a pre-hash file of a chat named like the start of this one cannot be told apart');
+    assert.equal(isLegacyPortraitFileOf(nested, files[2]), false);
+    assert.equal(isLegacyPortraitFileOf(chat, files[0]), false, 'an own hashed file is not legacy');
+});
+
+test('the sweep keeps every portrait file an existing chat could own, under either naming', async () => {
+    const { orphanPortraitFiles, portraitFileStem } = await import('../portrait.js');
+    const fracture = 'The Fracture - 2026-10-19@04h33m36s237ms';
+    const squire = 'Your useless squire - 2026-10-21@19h12m45s191ms';
+    const files = [
+        'the-fracture-2026-10-19-04h33m36s237ms-warden-captain-elka-draven-3368285486.webp',
+        `${portraitFileStem(squire, 'hob garrow')}-1.webp`,
+        `${portraitFileStem('Gone - 2026-01-01@00h00m00s000ms', 'nobody')}-2.webp`,
+        'gone-chat-2026-01-01-00h00m00s000ms-nobody-3.webp',
+    ];
+    assert.deepEqual(orphanPortraitFiles(files, [fracture, squire, '']), [files[2], files[3]]);
+    assert.deepEqual(orphanPortraitFiles(files.map(file => `/user/images/InnerLore/${file}`), [fracture, squire]), [files[2], files[3]], 'paths are read by their file name');
+});
+
+test('inherited and pre-hash portrait records are foreign to the chat that shows them', async () => {
+    const { foreignPortraitRecords, portraitFileStem } = await import('../portrait.js');
+    const chat = 'Branch - 2026-10-21@20h00m00s000ms';
+    const records = {
+        elka: { name: 'Elka', path: `/user/images/InnerLore/${portraitFileStem(chat, 'elka')}-1.webp` },
+        hob: { name: 'Hob', path: '/user/images/InnerLore/parent-2026-10-21-19h12m45s191ms-hob-7.webp' },
+        mags: { name: 'Mags', path: `/user/images/InnerLore/${portraitFileStem('Parent - 2026-10-21@19h12m45s191ms', 'mags')}-8.webp` },
+        broken: { name: 'Broken' },
+    };
+    assert.deepEqual(foreignPortraitRecords(records, chat).map(([key]) => key), ['hob', 'mags']);
+    assert.deepEqual(foreignPortraitRecords(null, chat), []);
+});
