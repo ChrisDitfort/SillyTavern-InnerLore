@@ -873,3 +873,16 @@ button.il-mv-card-toggle {
 #il_mic_button.is-live{color:#7ee787}
 #il_mic_button.is-live.is-recording{color:#ff6b6b}
 #il_menu_bar .il-menu-item.is-live{color:#7ee787}
+
+/* --- Private conversations in the story log (texts, mind-speech, quiet words) --- */
+.il-private-message .mes_text .il-private-card{display:flex;flex-direction:column;gap:6px;margin:2px 0;padding:10px 12px;border-radius:14px;border:1px solid rgba(255,255,255,.1);background:rgba(10,13,20,.55)}
+.il-private-card .il-private-head{font-size:.72em;letter-spacing:.1em;text-transform:uppercase;color:#8f99a8;margin-bottom:2px}
+.il-private-card .il-sms-log{display:flex;flex-direction:column;gap:5px}
+.il-private-card .il-sms-bubble{max-width:82%;padding:7px 11px;border-radius:15px;line-height:1.35;font-size:.94em;white-space:pre-wrap;overflow-wrap:anywhere}
+.il-private-card .il-sms-bubble.is-person{align-self:flex-start;background:#1e2634;color:#e2e7ef;border-bottom-left-radius:5px}
+.il-private-card .il-sms-bubble.is-player{align-self:flex-end;background:linear-gradient(135deg,#7a6230,#9a7a35);color:#fff7e2;border-bottom-right-radius:5px}
+.il-private-card .il-sms-bubble.is-note{align-self:center;max-width:92%;background:none;color:#8f99a8;font-size:.8em;font-style:italic;text-align:center;padding:2px 8px}
+.il-private-card.is-mind .il-sms-bubble.is-person{background:#241f3a;color:#e6dcff;font-style:italic}
+.il-private-card.is-mind .il-sms-bubble.is-player{background:linear-gradient(135deg,#4c3a86,#6a4fb8);color:#f3edff;font-style:italic}
+.il-private-card.is-aside .il-sms-bubble.is-person{background:#1c2a22;color:#e2efe5}
+.il-private-card.is-aside .il-sms-bubble.is-player{background:linear-gradient(135deg,#3b5e45,#4f7a5a);color:#eefbf1}

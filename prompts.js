@@ -34,11 +34,14 @@ export function formatTranscript(messages, options = {}) {
     for (let index = start; index <= end; index++) {
         const message = messages[index];
         if (!message || (message.is_system && !isSummaryceptionGhosted(message)) || !cleanString(message.mes)) continue;
+        const privately = message.extra?.inner_lore_private;
         const role = message.is_user
             ? `PLAYER — ${message.name || userName}`
             : isSummaryceptionGhosted(message)
                 ? 'COMPRESSED STORY MEMORY — prior events, avoid double-counting restatements'
-                : `STORY — ${message.name || characterName}`;
+                : privately
+                    ? `PRIVATE EXCHANGE — ${message.name || characterName} (${privately.channel === 'text' ? 'by message device' : privately.channel === 'mind' ? 'mind to mind' : 'a quiet word in person'}; the lines are what each said)`
+                    : `STORY — ${message.name || characterName}`;
         blocks.push(`[message ${index}; ${role}]\n${cleanString(stripVoiceTags(message.mes), 30_000)}`);
     }
 

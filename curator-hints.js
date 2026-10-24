@@ -3,7 +3,7 @@
 // in the passage match no record, and the amounts, times and commitments the
 // passage states. Pure functions over the store and the passage text.
 import { passageProperNames, unnamedDescriptorPeople } from './core.js?v=48';
-import { amountMentions, normalizeGameState } from './game.js?v=3';
+import { amountMentions, normalizeGameState } from './game.js?v=4';
 
 const TIME_PATTERN = /\b(?:at|by|before|after|until|till|come|around|near)\s+(?:dawn|first light|sunrise|sunup|noon|midday|dusk|sundown|sunset|nightfall|midnight|the (?:\w+ )?bell|the (?:morning|evening|afternoon|night)|the hour|\d+ o'?clock|the tide|high tide|low tide|the turn of the tide)\b|\b(?:tonight|tomorrow|at first light|by morning|next (?:morning|day|week|tide)|in (?:an|one|two|three|\d+) (?:hour|hours|day|days|week|weeks)|within the hour|in a quarter hour|a quarter hour)\b/giu;
 const COMMITMENT_PATTERN = /\b(?:offer(?:s|ed)?|promis(?:e|es|ed)|swear(?:s)?|swore|vow(?:s|ed)?|owe(?:s|d)?|agree(?:s|d)? to|will (?:pay|bring|send|come|sail|meet|return|wait|find|tell|take|give|keep|hold|be)|shall (?:pay|bring|send|come|sail|meet|return)|wants? (?:you|him|her|them) to|needs? (?:you|him|her|them) to|hire(?:s|d)?|job for|errand|passage (?:north|south|east|west|to)|sails? (?:at|on|with|tomorrow|tonight)|leaves? (?:at|on|tomorrow|tonight)|due (?:at|by|on|back)|be back by|barred? (?:at|by|in)|looking for (?:a|an|someone)|a word with|meet (?:me|you|him|her) (?:at|by|in))\b/giu;

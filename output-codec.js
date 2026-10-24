@@ -9,8 +9,12 @@ const TASKS = Object.freeze({
     event_director: 'EVENT_DIRECTOR',
     game: 'GAME',
     planner: 'PLANNER',
+    abilities: 'ABILITIES',
 });
-const TASK_HEADER_WORDS = 'CURATOR|PROGRESSION|EVENT[_-]DIRECTOR|GAME|PLANNER';
+const TASK_HEADER_WORDS = 'CURATOR|PROGRESSION|EVENT[_-]DIRECTOR|GAME|PLANNER|ABILITIES';
+// Tasks that share the game ledger's record grammar (one-line headers, CURRENCY/PURSE/DEVICE singletons).
+const GAME_LIKE_TASKS = new Set(['game', 'planner', 'abilities']);
+const SINGLETON_RECORDS = new Set(['CURRENCY', 'PURSE', 'DEVICE']);
 
 const ENTITY_TYPES = new Set([
     'location', 'item', 'character', 'faction', 'organization', 'creature', 'event', 'concept',
@@ -28,6 +32,7 @@ const ROOT_ITEM_PATHS = Object.freeze({
     event_director: new Set(['source_refs']),
     game: new Set(['units']),
     planner: new Set(['units']),
+    abilities: new Set([]),
 });
 const ITEM_IDENTITY_FIELDS = Object.freeze({
     units: 'name',
@@ -52,11 +57,13 @@ const PRIMITIVE_LIST_PATHS = Object.freeze({
     event_director: new Set(['subjects']),
     game: new Set([]),
     planner: new Set(['hooks', 'sells']),
+    abilities: new Set([]),
 });
-// Game ledger and planner record words, and the payload list each fills.
+// Game ledger, planner and ability-judge record words, and the payload list each fills.
 const GAME_RECORDS = Object.freeze({
-    game: { OBJECT: ['objects', 'key'], MONEY: ['money', ''], PRICE: ['prices', 'key'], STANDING: ['standings', 'character'], REPUTATION: ['reputation', 'group'], DEATH: ['deaths', 'character'] },
+    game: { OBJECT: ['objects', 'key'], MONEY: ['money', ''], PRICE: ['prices', 'key'], STANDING: ['standings', 'character'], REPUTATION: ['reputation', 'group'], DEATH: ['deaths', 'character'], ABILITY: ['abilities', 'holder'], CONTACT: ['contacts', 'character'] },
     planner: { STAGE: ['stages', 'place'], PERSON: ['people', 'name'], OBJECT: ['objects', 'key'], PRICE: ['prices', 'key'] },
+    abilities: { ABILITY: ['abilities', 'holder'], CONTACT: ['contacts', 'character'] },
 });
 
 export function normalizeOutputFormat(value) {
@@ -308,13 +315,14 @@ function openRecord(task, line, result, lineNumber) {
         target.push(record);
         return record;
     }
-    if (task === 'game' || task === 'planner') {
+    if (GAME_LIKE_TASKS.has(task)) {
         // "price = 3" inside an OBJECT is a field, not a PRICE record.
-        const match = /^(CURRENCY|PURSE|OBJECT|MONEY|PRICE|STANDING|REPUTATION|DEATH|STAGE|PERSON)(?:\s+(?!\+?=)(.+))?$/iu.exec(line);
+        const match = /^(CURRENCY|PURSE|DEVICE|OBJECT|MONEY|PRICE|STANDING|REPUTATION|DEATH|STAGE|PERSON|ABILITY|CONTACT)(?:\s+(?!\+?=)(.+))?$/iu.exec(line);
         if (!match) return null;
         const word = match[1].toLocaleUpperCase();
         const value = decodedHeaderValue(match[2] || '', lineNumber);
-        if (word === 'CURRENCY' || word === 'PURSE') {
+        if (SINGLETON_RECORDS.has(word)) {
+            if (word === 'DEVICE' && task === 'planner') return null;
             const field = word.toLocaleLowerCase();
             if (result[`__${field}Seen`]) throw dslError(lineNumber, `${word} may appear only once.`);
             result[`__${field}Seen`] = true;
@@ -345,8 +353,9 @@ function initialPayload(task) {
             time: {}, goals: [], processes: [], events: [], event_evaluations: [], __timeSeen: false,
         };
     }
-    if (task === 'game') return { objects: [], money: [], prices: [], standings: [], reputation: [], deaths: [] };
+    if (task === 'game') return { objects: [], money: [], prices: [], standings: [], reputation: [], deaths: [], abilities: [], contacts: [] };
     if (task === 'planner') return { stages: [], people: [], objects: [], prices: [] };
+    if (task === 'abilities') return { abilities: [], contacts: [] };
     return { proposal: null, reason: '', __proposalSeen: false, __reasonSeen: false };
 }
 
@@ -357,8 +366,9 @@ function isTopLevelDeclaration(task, line) {
     if (task === 'progression') {
         return /^(?:TIME|GOAL|PROCESS|EVENT|EVALUATION)(?:\s+.+)?$/iu.test(line);
     }
-    if (task === 'game' || task === 'planner') {
-        return new RegExp(`^(?:CURRENCY|PURSE|${Object.keys(GAME_RECORDS[task]).join('|')})(?:\\s+(?!\\+?=).+)?$`, 'iu').test(line);
+    if (GAME_LIKE_TASKS.has(task)) {
+        const singletons = task === 'planner' ? 'CURRENCY|PURSE' : 'CURRENCY|PURSE|DEVICE';
+        return new RegExp(`^(?:${singletons}|${Object.keys(GAME_RECORDS[task]).join('|')})(?:\\s+(?!\\+?=).+)?$`, 'iu').test(line);
     }
     return /^(?:PROPOSAL(?:\s+.+)?|NO_PROPOSAL|REASON\s*=\s*.+)$/iu.test(line);
 }
@@ -693,6 +703,7 @@ export function parseInnerLoreDsl(value, requestedTask) {
     }
     delete result.__currencySeen;
     delete result.__purseSeen;
+    delete result.__deviceSeen;
     pruneEmptyListMaps(result, diagnostics);
     attachDiagnostics(result, diagnostics);
     return result;
@@ -944,9 +955,10 @@ export function stringifyInnerLoreDsl(payload, requestedTask) {
                 pushRecord(lines, `${declaration}${record?.key ? ` ${encodeText(record.key)}` : ''}`, record, ['key']);
             }
         }
-    } else if (task === 'game' || task === 'planner') {
+    } else if (GAME_LIKE_TASKS.has(task)) {
         if (payload?.currency && Object.keys(payload.currency).length) pushRecord(lines, 'CURRENCY', payload.currency);
         if (payload?.purse && Object.keys(payload.purse).length) pushRecord(lines, 'PURSE', payload.purse);
+        if (task !== 'planner' && payload?.device && Object.keys(payload.device).length) pushRecord(lines, 'DEVICE', payload.device);
         for (const [word, [field, identity]] of Object.entries(GAME_RECORDS[task])) {
             for (const record of Array.isArray(payload?.[field]) ? payload[field] : []) {
                 const header = identity && record?.[identity] ? `${word} ${encodeText(record[identity])}` : word;
@@ -1093,6 +1105,32 @@ seller = the soup stall by the steps
 END
 DONE`;
     }
+    if (task === 'abilities') {
+        return `INNERLORE ABILITIES 1
+ABILITY player
+key = telepathy
+name = mind-speech
+level = 0
+evidence = Nothing in the card or the story gives Jet any gift of the mind.
+END
+ABILITY Mother Ysolde
+key = mind_ward
+name = warded mind
+level = 65
+evidence = The card calls her a hedge-witch who "keeps her thoughts behind a closed door".
+END
+DEVICE
+present = TRUE
+name = phone
+channel = text
+evidence = Jet checks his phone for the time in the opening.
+END
+CONTACT Mara Venn
+number = 0771 442 118
+evidence = Mara scrawls her number on a beer mat for Jet.
+END
+DONE`;
+    }
     return `INNERLORE EVENT_DIRECTOR 1
 NO_PROPOSAL
 REASON = No sufficiently grounded proposal is available.
@@ -1150,7 +1188,17 @@ PRICE stable_key fields: name, kind (item|food|drink|lodging|service|transport|f
 STANDING canonical character name fields: delta, set, group and lean (a first meeting only), reason, evidence
 REPUTATION group name fields: kind (faction|organization|place|people|other), delta, set, reason, evidence
 DEATH canonical name or descriptor fields: place (where the body lies), cause, evidence
+ABILITY holder (player, or a person's canonical name) fields: key (telepathy, mind_ward, or a lower_snake_case name), name, level (0-100, when newly established) or delta (growth or loss), evidence
+CONTACT canonical character name fields: number (or handle/address), op (add|remove), evidence
+DEVICE (at most once): present (TRUE|FALSE), name (phone, sending stone...), channel (text, sending...), evidence
 Write the player as holder/to/from = player. Emit only records for changes this passage establishes; an empty document is just the header and DONE.`;
+    }
+    if (task === 'abilities') {
+        return `DSL FIELD REFERENCE
+ABILITY holder (player, or a person's canonical name) fields: key (telepathy for mind-speech, mind_ward for sensing and shutting out mental contact, or a lower_snake_case name for another notable gift), name (what the world calls it), level (0-100: 0 none, 1-19 latent, 20-39 novice, 40-69 adept, 70-89 expert, 90-100 master), evidence
+DEVICE (at most once): present (TRUE|FALSE), name (what the player's message device is called), channel (what a message on it is called), evidence
+CONTACT canonical character name fields: number (or handle/address, when the story gives one), evidence
+Emit an ABILITY record for every holder and key the request asks about, with level 0 when the evidence shows no such gift.`;
     }
     if (task === 'planner') {
         return `DSL FIELD REFERENCE
@@ -1196,10 +1244,12 @@ export function dslOutputContract(requestedTask) {
         : task === 'progression'
             ? 'Use exactly one TIME record and zero or more GOAL, PROCESS, and EVENT records. Put each stable key after the record word. When a DSL_EVALUATION_KEYS block is present, emit its EVALUATION records first, immediately after the header line; otherwise emit EVALUATION records after the other records.'
             : task === 'game'
-                ? 'Use CURRENCY, PURSE, OBJECT, MONEY, PRICE, STANDING, REPUTATION, or DEATH records. Put the object or price key, the character name, or the group name after the record word; MONEY, CURRENCY and PURSE take nothing after it.'
+                ? 'Use CURRENCY, PURSE, OBJECT, MONEY, PRICE, STANDING, REPUTATION, DEATH, ABILITY, CONTACT, or DEVICE records. Put the object or price key, the character name, the group name, or the ability holder after the record word; MONEY, CURRENCY, PURSE and DEVICE take nothing after it.'
                 : task === 'planner'
                     ? 'Use STAGE, PERSON, OBJECT, and PRICE records, plus CURRENCY and PURSE only when allowed. Put the place name, person name, or object or price key after the record word.'
-                    : 'Use one PROPOSAL record with its stable key, or the single line NO_PROPOSAL. After it, emit exactly one top-level REASON = text line.';
+                    : task === 'abilities'
+                        ? 'Use ABILITY, CONTACT, and DEVICE records. Put the holder (player, or the person\'s canonical name) after ABILITY and the character name after CONTACT; DEVICE takes nothing after it.'
+                        : 'Use one PROPOSAL record with its stable key, or the single line NO_PROPOSAL. After it, emit exactly one top-level REASON = text line.';
     return `<INNERLORE_DSL_OUTPUT priority="hard">
 Return InnerLore DSL v1, not JSON. The application parses this DSL into the canonical object shape described later and then runs the same strict local validators.
 

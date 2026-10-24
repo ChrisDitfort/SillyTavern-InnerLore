@@ -32,7 +32,7 @@ import {
     rootHolder,
     standingTier,
     wordsContained,
-} from './game.js?v=3';
+} from './game.js?v=4';
 
 export const ACTION_SOURCE = 'action';
 const MAX_ACTIONS_PER_TURN = 8;

@@ -8,9 +8,9 @@
 import { cleanString, compilePromptInjection } from './core.js?v=48';
 import { contextProfileOverrides } from './context-config.js';
 import { collectRecentStoryExpressions } from './expression-cooldown.js';
-import { renderGamePacket } from './game.js?v=3';
+import { renderGamePacket } from './game.js?v=4';
 import { compileProgressionInjection } from './progression.js';
-import { deriveCameraFrame, deriveSceneState, renderCameraPacket } from './scene.js?v=7';
+import { deriveCameraFrame, deriveSceneState, renderCameraPacket } from './scene.js?v=8';
 
 function reasonText(reasons) {
     return Array.isArray(reasons) && reasons.length ? reasons.join(', ') : 'not active in current scene';

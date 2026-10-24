@@ -33,9 +33,11 @@ import {
     snapshotMessageRange,
     summaryceptionRecallText,
     uniqueStrings,
+    normalizeEntityType,
+    curatedLocationOf,
 } from './core.js?v=48';
-import { compileContext } from './context-compiler.js?v=6';
-import { deriveCameraFrame, deriveSceneState } from './scene.js?v=7';
+import { compileContext } from './context-compiler.js?v=7';
+import { deriveCameraFrame, deriveSceneState } from './scene.js?v=8';
 import {
     createMapPanel,
     describeSurroundings,
@@ -60,6 +62,9 @@ import { collectRecentStoryExpressions } from './expression-cooldown.js';
 import {
     backgroundInFlightCount,
     chooseDefaultProfileId,
+    extractResponseText,
+    sendInnerLoreRequest,
+    shell,
     getTelemetry,
     nextTelemetryTurn,
     providerConcurrency,
@@ -82,7 +87,7 @@ import {
     providerHasRoom,
     storyCost,
     storyProvider,
-} from './llm-client.js?v=17';
+} from './llm-client.js?v=18';
 import {
     deleteInnerLorebooksForChat,
     openInnerLorebook,
@@ -96,9 +101,9 @@ import {
     formatTranscript,
     insufficientResponseCap,
     planNarratorPromptDelivery,
-} from './prompts.js?v=9';
+} from './prompts.js?v=10';
 import { compileTriggerEventDeliveryPreview } from './event-delivery.js?v=2';
-import { requestEventDirectorProposal } from './event-director-client.js?v=2';
+import { requestEventDirectorProposal } from './event-director-client.js?v=3';
 import { buildEventDirectorMessages } from './event-director-prompts.js';
 import {
     addEventProposal,
@@ -109,7 +114,7 @@ import {
     rejectEventProposal,
     removeEventProposal,
     recordEventDirectorAttempt,
-} from './event-director.js?v=2';
+} from './event-director.js?v=3';
 import { decideInnerLoreMaintenance } from './maintenance-scheduler.js?v=4';
 import { CHOICES_EXTRA_KEY, extractReplyChoices, fallbackChoices, storedChoices } from './player-choices.js?v=1';
 import { EmbeddedStorageClient } from './embedded-storage.js?v=1';
@@ -134,11 +139,44 @@ import {
     normalizeGameState,
     placeRefOf,
     plannerTargets,
-} from './game.js?v=3';
-import { buildLedgerMessages, buildPlannerMessages } from './game-prompts.js?v=3';
-import { requestGamePatch } from './game-client.js?v=1';
+    ABILITY_KEYS,
+    abilityList,
+    abilitiesKnown,
+    contactList,
+    contactOf,
+    deviceOf,
+} from './game.js?v=4';
+import { buildAbilityJudgeMessages, buildLedgerMessages, buildPlannerMessages } from './game-prompts.js?v=4';
+import {
+    CHANNELS,
+    CHANNEL_KEYS,
+    MAX_BUBBLE_CHARS,
+    PRIVATE_EXTRA_KEY,
+    THREADS_METADATA_KEY,
+    appendBubble,
+    buildPrivateReplyMessages,
+    buildPrivateReplyTextPrompt,
+    canWriteTo,
+    channelAvailability,
+    createThread,
+    hasPendingStory,
+    isChannel,
+    markFlushed,
+    normalizeThreads,
+    parsePersonReply,
+    pendingBubbles,
+    personBrief,
+    renderPrivateCard,
+    renderTranscript,
+    sharedNumber,
+    sortedThreads,
+    threadKey,
+    threadPreview,
+} from './private-chat.js?v=1';
+import { PHONE_ICON, createPhonePanel } from './phone-view.js?v=1';
+import { requestGamePatch } from './game-client.js?v=2';
 import { isTextCompletionApi, renderTextPacket, textPacketBudget } from './text-packet.js?v=1';
-import { createGamePanel, createTradePanel } from './game-view.js?v=2';
+import { createGamePanel, createTradePanel } from './game-view.js?v=3';
 import {
     ACTION_SOURCE,
     GAME_TOOLS,
@@ -151,7 +189,7 @@ import {
     renderResolvedActions,
     renderToolGuidance,
     resolveGameAction,
-} from './game-actions.js?v=1';
+} from './game-actions.js?v=2';
 import { TONE_NAMES, castVoices, cleanForSpeech, inferGender, isChild, prosodyFor, segmentSpeech, settledSegmentCount, stripVoiceTags, toneText, voiceForSegment } from './speech.js?v=11';
 import { applyToneEffects, pitchShift } from './voice-fx.js?v=4';
 import { TARGET_RATE, bytesToBase64, concatChunks, createSilenceTracker, encodeWav, resample, tidyTranscript, trimSilence } from './voice-input.js?v=1';
@@ -213,7 +251,7 @@ const TRIGGER_DELIVERY_PROMPT_KEY = 'inner_lore_trigger_delivery';
 // For a text-completion story model: InnerLore's lore entries, after the story string.
 const TEXT_MEMORY_PROMPT_KEY = 'inner_lore_text_memory';
 const DISPLAY_NAME = 'InnerLore';
-const EXTENSION_VERSION = '0.28.0';
+const EXTENSION_VERSION = '0.29.0';
 const LOG_PREFIX = '[InnerLore]';
 
 /**
@@ -724,6 +762,16 @@ const defaultSettings = Object.freeze({
     portraitCfg: PORTRAIT_DEFAULTS.cfg,
     // The people here as a row of cards under the top bar.
     castCardsEnabled: true,
+    // Private conversations apart from the narration: a quiet word with
+    // someone here, a text on the world's message device to someone with a
+    // known contact, or mind to mind when the player has the gift (the
+    // ability judge settles that from the card and the story). The person
+    // answers through the story's own model; the story gets a transcript when
+    // the conversation closes.
+    privateChatEnabled: true,
+    privateChatTemperature: 0.8,
+    privateChatMaximumTokens: 220,
+    privateChatCustomInstructions: '',
     // Voice narration through InnerLore's local voice server (server/tts):
     // the narration in one voice, every person's lines in their own.
     voiceEnabled: true,
@@ -2088,11 +2136,26 @@ body.il-keyboard #il_menu_bar{display:none}
 .il-entity-mind p{margin:4px 0;font-size:.85em}
 .il-entity-mind hr{border:none;border-top:1px solid #2c313c;margin:8px 0}
 .is-dormant{color:#6d7684;font-style:italic}
+.il-entity-state.is-gifts{color:#d6c9ff}
+.il-entity-talk{background:rgba(26,30,40,.55);border:1px solid #2c313c;border-radius:12px;padding:12px 14px;margin-bottom:14px}
+.il-entity-talk h4{margin:0 0 10px;font-size:.95em;color:#ecd9ac}
+.il-entity-talk-buttons{display:flex;gap:8px;flex-wrap:wrap}
+.il-entity-talk-btn{flex:1 1 0;min-width:96px;display:flex;align-items:center;justify-content:center;gap:7px;padding:10px 12px;border-radius:12px;border:1px solid #4a5468;background:rgba(28,32,42,.85);color:#e4e8ef;font:inherit;font-size:.9em;cursor:pointer}
+.il-entity-talk-btn svg{width:18px;height:18px;flex:none}
+.il-entity-talk-btn.is-aside{border-color:rgba(142,230,162,.45);color:#cdeed4}
+.il-entity-talk-btn.is-text{border-color:rgba(226,201,154,.5);color:#ecd9ac}
+.il-entity-talk-btn.is-mind{border-color:rgba(167,139,250,.55);color:#dcd0ff}
+.il-entity-talk-btn.is-unknown{border-style:dashed}
+.il-entity-talk-btn.is-off{opacity:.42;cursor:not-allowed}
+.il-entity-talk-btn:not(:disabled):hover{background:rgba(255,255,255,.07)}
+.il-entity-talk-hint{margin:10px 0 0;font-size:.82em;color:#8f99a8}
+.il-entity-talk-again{margin-top:8px;padding:5px 10px;border:1px solid #4a5468;border-radius:9px;background:rgba(28,32,42,.8);color:#c3cad6;font:inherit;font-size:.78em;cursor:pointer}
 `;
     document.head.appendChild(style);
 }
 
 const HUD_SVG = {
+    phone: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6.5" y="2.5" width="11" height="19" rx="2.4"/><path d="M10.5 5.2h3M11 18.6h2"/><path d="M9.2 10.2h5.6M9.2 13h3.4"/></svg>',
     live: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21M9 21h6"/></svg>',
     voice: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 9.5v5h3.5L12 18.5v-13L7.5 9.5z"/><path d="M15.5 9a4 4 0 0 1 0 6"/><path d="M18 6.5a7.5 7.5 0 0 1 0 11"/></svg>',
     pin: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 21s-6.5-5.6-6.5-11a6.5 6.5 0 0 1 13 0C18.5 15.4 12 21 12 21z"/><circle cx="12" cy="10" r="2.4"/></svg>',
@@ -2513,6 +2576,10 @@ function showEntityCard(name, focus = 'details') {
     const standingHtml = standing
         ? `<p class="il-entity-state"><b>Regards you:</b> ${standingTier(standing.score)} (${standing.score > 0 ? '+' : ''}${standing.score})${standing.notes?.at(-1)?.reason ? ` - ${escapeHtml(standing.notes.at(-1).reason)}` : ''}</p>`
         : '';
+    const gifts = getSettings().gameEnabled !== false ? abilityList(normalizeGameState(store?.game), { name }) : [];
+    const giftsHtml = gifts.length
+        ? `<p class="il-entity-state is-gifts"><b>Gifts:</b> ${gifts.map(gift => `${escapeHtml(gift.name)} (${gift.tier})`).join(', ')}</p>`
+        : '';
     const facts = (entity?.facts || []).slice(0, 6)
         .map(fact => `<li>${String(typeof fact === 'string' ? fact : fact?.statement || '').replace(/</g, '&lt;')}</li>`).join('');
     const mindHtml = brain
@@ -2535,6 +2602,7 @@ function showEntityCard(name, focus = 'details') {
                     ${entity?.summary ? `<p class="il-entity-summary">${String(entity.summary).replace(/</g, '&lt;')}</p>` : ''}
                     ${entity?.currentState ? `<p class="il-entity-state"><b>Now:</b> ${String(entity.currentState).replace(/</g, '&lt;')}</p>` : ''}
                     ${standingHtml}
+                    ${giftsHtml}
                     ${facts ? `<ul class="il-entity-facts">${facts}</ul>` : ''}
                     ${!entity ? '<p class="is-dormant">(no entity record yet - it appears once the curator observes this NPC)</p>' : ''}
                 </section>
@@ -2547,6 +2615,7 @@ function showEntityCard(name, focus = 'details') {
     document.body.appendChild(popup);
     fillEntityPortrait(popup);
     fillEntityVoice(popup);
+    fillEntityTalk(popup);
     popup.querySelector('.il-entity-close').addEventListener('click', () => popup.remove());
     popup.addEventListener('click', event => {
         if (event.target === popup) popup.remove();
@@ -3043,6 +3112,14 @@ const MENU_ITEMS = [
         open: () => openTradePanel(),
     },
     {
+        id: 'phone',
+        label: () => phoneLabel(),
+        icon: () => HUD_SVG.phone,
+        title: () => 'Private conversations: texts and mind-speech with people elsewhere, quiet words with those here',
+        shown: settings => settings.privateChatEnabled !== false && settings.gameEnabled !== false,
+        open: () => showPhone({ view: 'home' }),
+    },
+    {
         id: 'live',
         label: () => (runtime.voiceInput?.live ? 'Live on' : 'Live chat'),
         icon: () => HUD_SVG.live,
@@ -3133,6 +3210,689 @@ function openGamePanel(tab = 'bag') {
     const store = getChatStore();
     runtime.gamePanel.refresh(store, displayScene(store), cleanString(context().name1, 100) || 'You');
     runtime.gamePanel.open(tab);
+}
+
+// --- Private chat, phone and mind ----------------------------------------------------
+// A conversation with one person apart from the narration: a quiet word in
+// person, a text on the world's message device, or mind to mind. The thread is
+// kept in chat metadata; when the screen closes, the story gets a transcript
+// as a message from that person, so the narrator and every pass know of it.
+
+const TALK_SVG = Object.freeze({ aside: PHONE_ICON.aside, text: PHONE_ICON.phone, mind: PHONE_ICON.mind });
+
+function privateChatState() {
+    if (!runtime.privateChat) {
+        runtime.privateChat = {
+            panel: null, activeKey: '', inFlight: '', stub: null, judgeStub: null, allowLive: false,
+            judging: new Set(), threads: null, threadsChatId: '', controller: null, preemptedFor: '', lastError: '',
+        };
+    }
+    return runtime.privateChat;
+}
+
+function privateChatOn() {
+    const settings = getSettings();
+    return Boolean(settings.enabled && settings.privateChatEnabled !== false && settings.gameEnabled !== false && currentChatId());
+}
+
+/** This chat's conversations, in its metadata so they travel with the save and its branches. */
+function threadsRecords() {
+    const ctx = context();
+    if (!ctx.chatMetadata) return {};
+    const state = privateChatState();
+    const chatId = currentChatId();
+    if (state.threadsChatId !== chatId || !state.threads || ctx.chatMetadata[THREADS_METADATA_KEY] !== state.threads) {
+        state.threads = normalizeThreads(ctx.chatMetadata[THREADS_METADATA_KEY]);
+        ctx.chatMetadata[THREADS_METADATA_KEY] = state.threads;
+        state.threadsChatId = chatId;
+    }
+    return state.threads;
+}
+
+function saveThreads() {
+    context().saveMetadataDebounced?.();
+}
+
+function gameStateNow() {
+    return normalizeGameState(getChatStore()?.game);
+}
+
+/** The people with the player right now, from the camera frame. */
+function presentPeopleNow() {
+    const store = getChatStore();
+    if (!store) return [];
+    try {
+        const scene = displayScene(store);
+        return deriveCameraFrame(scene, store, { playerName: context().name1 }).withYou.map(person => person.name);
+    } catch (error) {
+        console.error(`${LOG_PREFIX} Could not derive who is present:`, error);
+        return [];
+    }
+}
+
+function personPresent(name) {
+    const key = canonicalNameKey(name);
+    return presentPeopleNow().some(candidate => canonicalNameKey(candidate) === key);
+}
+
+/** Which channels reach this person now: in person, by the world's device, or mind to mind. */
+function privateAvailability(name) {
+    return channelAvailability(gameStateNow(), name, { present: personPresent(name) });
+}
+
+function knownPeopleNames() {
+    const store = getChatStore();
+    return Object.values(store?.entities || {})
+        .filter(record => ['character', 'creature'].includes(normalizeEntityType(record?.type)) && record.enabled !== false && !record.player
+            && canonicalNameKey(record.name) !== canonicalNameKey(context().name1))
+        .sort((a, b) => (Number(b.lastSeenMessage) || 0) - (Number(a.lastSeenMessage) || 0))
+        .map(record => record.name);
+}
+
+function phoneLabel() {
+    const device = deviceOf(gameStateNow());
+    const name = device.present ? device.name : 'phone';
+    return name.charAt(0).toUpperCase() + name.slice(1);
+}
+
+function phonePanel() {
+    const state = privateChatState();
+    if (!state.panel) {
+        state.panel = createPhonePanel({
+            faceFor: (name, className) => personFace(name, className),
+            onSend: (key, text) => void sendPrivateMessage(key, text),
+            onOpenThread: key => showPhone({ view: 'thread', key }),
+            onStart: (name, channel) => void openPrivateChat(name, channel),
+            onPerson: name => showEntityCard(name, 'details'),
+            onBack: () => showPhone({ view: 'home' }),
+            onClose: () => void closePhone(),
+        });
+    }
+    return state.panel;
+}
+
+function phoneModel() {
+    const ctx = context();
+    const state = gameStateNow();
+    const store = getChatStore();
+    const device = deviceOf(state);
+    const present = new Set(presentPeopleNow().map(canonicalNameKey));
+    const mind = channelAvailability(state, '', { present: false, personKnown: false }).mind;
+    const reachable = knownPeopleNames().map(name => {
+        const availability = channelAvailability(state, name, { present: present.has(canonicalNameKey(name)) });
+        const channels = CHANNEL_KEYS
+            .filter(channel => availability[channel].ok || availability[channel].judge)
+            .map(channel => ({ channel, unknown: !availability[channel].ok }));
+        const record = Object.values(store?.entities || {}).find(entity => canonicalNameKey(entity?.name) === canonicalNameKey(name));
+        return { name, channels, present: present.has(canonicalNameKey(name)), location: record ? curatedLocationOf(store.entities, record)?.name || '' : '' };
+    }).filter(person => person.channels.length).slice(0, 24);
+    return {
+        playerName: cleanString(ctx.name1, 100) || 'You',
+        deviceKnown: device.known,
+        devicePresent: device.present,
+        deviceName: device.present ? phoneLabel() : 'Phone',
+        mind,
+        threads: sortedThreads(threadsRecords()).map(threadPreview),
+        contacts: contactList(state).map(contact => ({ name: contact.name, number: contact.number || '', note: contact.note || '' })),
+        reachable,
+    };
+}
+
+function threadViewData(key) {
+    const thread = threadsRecords()[key];
+    if (!thread) return null;
+    const ctx = context();
+    const store = getChatStore();
+    const state = gameStateNow();
+    const chatLength = Array.isArray(ctx.chat) ? ctx.chat.length : 0;
+    const availability = privateAvailability(thread.person)[thread.channel];
+    const writable = canWriteTo(thread, chatLength);
+    const busy = privateChatState().inFlight === key;
+    const brief = personBrief(store, thread.person, state, { playerName: ctx.name1 });
+    const scene = displayScene(store);
+    let status = null;
+    if (busy) status = { kind: 'typing' };
+    else if (thread.status === 'rejected') status = { kind: 'closed', text: writable.ok ? `${thread.person} shut you out. You may reach for them again.` : writable.reason };
+    else if (!availability.ok && !availability.judge) status = { kind: 'blocked', text: availability.reason };
+    else if (privateChatState().lastError) status = { kind: 'closed', text: privateChatState().lastError };
+    return {
+        thread,
+        location: brief.location,
+        present: personPresent(thread.person),
+        placeName: resolveSceneLocation(store, scene).name || scene?.location?.name || '',
+        status,
+        canSend: !busy && writable.ok && (availability.ok || availability.judge === true),
+        blockedReason: !writable.ok ? writable.reason : (!availability.ok && !availability.judge ? availability.reason : ''),
+    };
+}
+
+function showPhone({ view = 'home', key = '' } = {}) {
+    if (!privateChatOn()) {
+        toastr.info('Private chat is off in the InnerLore settings.', DISPLAY_NAME);
+        return;
+    }
+    const state = privateChatState();
+    const panel = phonePanel();
+    panel.refresh(phoneModel());
+    const data = view === 'thread' && key ? threadViewData(key) : null;
+    state.activeKey = data ? key : '';
+    if (data) panel.showThread(data);
+    else panel.showHome();
+    panel.open();
+}
+
+/** Repaint the open screen after state changed. */
+function paintPhone() {
+    const state = privateChatState();
+    if (!state.panel?.isOpen()) return;
+    state.panel.refresh(phoneModel());
+    const data = state.activeKey ? threadViewData(state.activeKey) : null;
+    if (data) state.panel.showThread(data);
+    else state.panel.showHome();
+}
+
+async function closePhone() {
+    const state = privateChatState();
+    state.panel?.close();
+    state.activeKey = '';
+    state.lastError = '';
+    try {
+        await flushPrivateThreads();
+    } catch (error) {
+        console.error(`${LOG_PREFIX} Could not hand a private conversation to the story:`, error);
+        toastr.error(`The story could not be told of the conversation: ${error?.message || error}`, DISPLAY_NAME);
+    }
+}
+
+/**
+ * Open (or resume) a conversation with someone over one channel. A channel
+ * the world has not settled yet (does the player have the gift? a phone?)
+ * asks the ability judge first.
+ */
+async function openPrivateChat(name, channel) {
+    if (!privateChatOn() || !isChannel(channel) || !cleanString(name)) return false;
+    let availability = privateAvailability(name)[channel];
+    if (!availability.ok && availability.judge) {
+        const judged = await runAbilityJudge(name, { reason: channel });
+        if (!judged) return false;
+        availability = privateAvailability(name)[channel];
+    }
+    refreshEntityTalk();
+    if (!availability.ok) {
+        toastr.info(availability.reason, DISPLAY_NAME);
+        return false;
+    }
+    const threads = threadsRecords();
+    const key = threadKey(name, channel);
+    if (!threads[key]) {
+        threads[key] = createThread(name, channel);
+        saveThreads();
+    }
+    // The person's page gives way to the conversation.
+    document.getElementById('il_entity_card')?.remove();
+    showPhone({ view: 'thread', key });
+    return true;
+}
+
+/** What the person is briefed with and how they are asked, for one reply. */
+function buildPrivateReplyRequest(thread, availability) {
+    const ctx = context();
+    const store = getChatStore();
+    const state = gameStateNow();
+    const settings = getSettings();
+    const brief = personBrief(store, thread.person, state, { playerName: ctx.name1 });
+    const scene = displayScene(store);
+    const placeName = resolveSceneLocation(store, scene).name || scene?.location?.name || '';
+    const recent = (ctx.chat || [])
+        .filter(message => message && !message.is_system && cleanString(message.mes))
+        .slice(-3)
+        .map(message => ({ name: message.is_user ? ctx.name1 : (message.name || ctx.name2 || 'Story'), text: stripVoiceTags(message.mes) }));
+    const clock = store?.progression?.clock;
+    const common = {
+        thread,
+        playerName: ctx.name1,
+        personBrief: brief.text,
+        personLocation: brief.location,
+        placeName,
+        worldCard: getCardContext(),
+        persona: ctx.personaDescription,
+        recentStory: recent,
+        device: deviceOf(state),
+        canReject: availability?.canReject === true,
+        clockLabel: clock?.currentTimeLabel || clock?.lastExactAnchor || '',
+        customInstructions: settings.privateChatCustomInstructions,
+    };
+    return {
+        chatId: currentChatId(),
+        thread,
+        person: thread.person,
+        messages: buildPrivateReplyMessages(common),
+        text: buildPrivateReplyTextPrompt(common),
+    };
+}
+
+/**
+ * On a provider that serves one request at a time (NovelAI), a running
+ * background pass would make the person wait a minute or more: the pass is
+ * stopped once per conversation screen and re-runs after, as the story does.
+ */
+async function preemptBackgroundForPrivate(key) {
+    const state = privateChatState();
+    const provider = storyProvider();
+    if (!isLimitedProvider(provider) || providerHasRoom(provider, storyCost()) || backgroundInFlightCount() <= 0) return;
+    if (state.preemptedFor === key || !runtime.controller || runtime.controller.signal.aborted) return;
+    state.preemptedFor = key;
+    log(`A private conversation preempts the background pass on ${provider}; the pass re-runs after.`);
+    runtime.controller.abort();
+    const started = Date.now();
+    while (!providerHasRoom(provider, storyCost()) && Date.now() - started < 5_000) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+    }
+}
+
+/**
+ * The person's reply from the story's own model: through the shell's
+ * connection with streaming (NovelAI's chat endpoint answers nothing without
+ * it), or SillyTavern's raw generation on the main API, which also covers a
+ * text-completion story (Erato, Kayra) with the transcript prompt.
+ */
+async function requestPrivateReply(build) {
+    const state = privateChatState();
+    if (typeof state.stub === 'function') return String(await state.stub(build) ?? '');
+    if (shellTestMode() && !state.allowLive) throw new Error('test mode: a private reply needs a stubbed replier');
+    const settings = getSettings();
+    const ctx = context();
+    const tokens = Math.max(60, Math.min(600, Number(settings.privateChatMaximumTokens) || 220));
+    const temperature = Math.max(0, Math.min(1.5, Number(settings.privateChatTemperature ?? 0.8)));
+    state.controller?.abort();
+    const controller = new AbortController();
+    state.controller = controller;
+    if (storyIsTextCompletion()) {
+        if (typeof ctx.generateRaw !== 'function') throw new Error('SillyTavern generateRaw() is unavailable.');
+        const { prompt, prefill } = build.text;
+        // NovelAI refuses more than 250 tokens in one request.
+        const raw = await ctx.generateRaw({ prompt: [{ role: 'system', content: prompt }], prefill, responseLength: Math.min(tokens, 200), trimNames: false });
+        return typeof raw === 'string' ? raw : extractResponseText(raw);
+    }
+    const connection = shell()?.activeConnection?.();
+    const profileId = connection?.mode === 'cc' && listConnectionProfiles().some(profile => profile.id === connection.id) ? connection.id : '';
+    if (profileId) {
+        await preemptBackgroundForPrivate(build.thread.key);
+        return await sendInnerLoreRequest({
+            ...settings,
+            connectionSource: 'profile',
+            connectionProfileId: profileId,
+            fallbackConnectionProfileId: '',
+            fallbackConnectionProfileIds: [],
+            temperature,
+            maximumResponseTokens: tokens,
+            requestMaximumAttempts: 2,
+            requestTimeoutSeconds: 120,
+            requestCircuitBreakerSeconds: 150,
+            telemetryKind: 'private',
+        }, build.messages, controller.signal);
+    }
+    if (typeof ctx.generateRaw !== 'function') throw new Error('SillyTavern generateRaw() is unavailable.');
+    const systemPrompt = build.messages.filter(message => message.role === 'system').map(message => message.content).join('\n\n');
+    const raw = await ctx.generateRaw({ prompt: build.messages.filter(message => message.role !== 'system'), systemPrompt, responseLength: tokens, trimNames: false });
+    return typeof raw === 'string' ? raw : extractResponseText(raw);
+}
+
+/** The player writes; the person answers in one to a few bubbles, or shuts the link. */
+async function sendPrivateMessage(key, text) {
+    const clean = cleanString(text, MAX_BUBBLE_CHARS);
+    const state = privateChatState();
+    const threads = threadsRecords();
+    const thread = threads[key];
+    if (!clean || !thread || state.inFlight) return false;
+    const ctx = context();
+    const writable = canWriteTo(thread, Array.isArray(ctx.chat) ? ctx.chat.length : 0);
+    if (!writable.ok) {
+        toastr.info(writable.reason, DISPLAY_NAME);
+        return false;
+    }
+    const availability = privateAvailability(thread.person)[thread.channel];
+    if (!availability.ok) {
+        toastr.info(availability.reason, DISPLAY_NAME);
+        paintPhone();
+        return false;
+    }
+    if (thread.status !== 'open') {
+        thread.status = 'open';
+        thread.closedAtLength = -1;
+    }
+    appendBubble(thread, 'player', clean);
+    state.lastError = '';
+    saveThreads();
+    state.inFlight = key;
+    paintPhone();
+    const started = Date.now();
+    try {
+        const build = buildPrivateReplyRequest(thread, availability);
+        const raw = await requestPrivateReply(build);
+        if (currentChatId() !== build.chatId) return false;
+        const parsed = parsePersonReply(raw, { personName: thread.person, playerName: ctx.name1, channel: thread.channel });
+        for (const line of parsed.bubbles) appendBubble(thread, 'person', line);
+        if (parsed.rejected) {
+            thread.status = 'rejected';
+            thread.outcome = 'rejected';
+            thread.closedAtLength = Array.isArray(ctx.chat) ? ctx.chat.length : 0;
+        } else if (parsed.ended) {
+            thread.status = 'ended';
+            thread.outcome = 'ended';
+        }
+        if (!parsed.bubbles.length && !parsed.rejected) {
+            state.lastError = `${thread.person} gave no answer this time.`;
+            log(`Private reply from ${thread.person} held no usable line: ${JSON.stringify(String(raw).slice(0, 200))}`);
+        }
+        // A number given over the phone or in person goes straight into the contacts.
+        if (thread.channel !== 'mind' && parsed.bubbles.length) {
+            const number = parsed.bubbles.map(sharedNumber).find(Boolean);
+            const gameState = gameStateNow();
+            if (number && deviceOf(gameState).present && !contactOf(gameState, thread.person)?.number) {
+                recordPrivateOps([{ type: 'contact.add', name: thread.person, number, note: `shared in a private ${CHANNELS[thread.channel].noun}` }]);
+            }
+        }
+        thread.updated = Date.now();
+        saveThreads();
+        recordTelemetryEntry({ kind: 'private', phase: 'reply', durationMs: Date.now() - started, channel: thread.channel, lines: parsed.bubbles.length, rejected: parsed.rejected });
+        return true;
+    } catch (error) {
+        if (error?.name === 'AbortError') return false;
+        console.error(`${LOG_PREFIX} Private reply failed:`, error);
+        state.lastError = `${thread.person} could not answer: ${cleanString(error?.message || String(error), 200)}`;
+        toastr.error(state.lastError, DISPLAY_NAME);
+        return false;
+    } finally {
+        if (state.inFlight === key) state.inFlight = '';
+        paintPhone();
+    }
+}
+
+/** Game changes made by a private conversation itself (a number shared), at the newest message. */
+function recordPrivateOps(ops, { source = 'private' } = {}) {
+    const store = getChatStore();
+    if (!store || !Array.isArray(ops) || !ops.length) return null;
+    const at = Math.max(0, (context().chat?.length || 1) - 1);
+    const applied = applyGameOperations(store.game, ops, { messageIndex: at, source });
+    store.game = applied.state;
+    void saveChatStore().catch(error => console.error(`${LOG_PREFIX} Could not save the game after a private conversation:`, error));
+    updateInjection();
+    return applied;
+}
+
+/** A holder the judge stayed silent on counts as judged absent, so the question is settled either way. */
+function ensureJudgedRecords(ops, personName) {
+    const has = (holderKind, name, key) => ops.some(op => op.type === 'ability.set' && op.key === key
+        && (holderKind === 'player' ? op.holder?.kind === 'player' : op.holder?.kind === 'character' && canonicalNameKey(op.holder.name) === canonicalNameKey(name)));
+    if (!has('player', '', ABILITY_KEYS.telepathy)) {
+        ops.push({ type: 'ability.set', holder: { kind: 'player' }, key: ABILITY_KEYS.telepathy, name: 'mind-speech', level: 0, note: 'judged: no sign of such a gift' });
+    }
+    if (personName) {
+        if (!has('character', personName, ABILITY_KEYS.mindWard)) {
+            ops.push({ type: 'ability.set', holder: { kind: 'character', name: personName }, key: ABILITY_KEYS.mindWard, name: 'warded mind', level: 0, note: 'judged: an ordinary, open mind' });
+        }
+    }
+    if (!ops.some(op => op.type === 'device.set')) {
+        ops.push({ type: 'device.set', present: false, name: '', channel: '', note: 'judged: nothing of the kind in reach' });
+    }
+}
+
+/**
+ * Ask the world whether the player has the gift of mind-speech, whether this
+ * person could refuse it, and whether a message device exists. The verdict
+ * is journaled like any game change, so a swipe or rebuild rewinds it.
+ */
+async function runAbilityJudge(name, { reason = '' } = {}) {
+    const state = privateChatState();
+    const store = getChatStore();
+    const ctx = context();
+    if (!store) {
+        toastr.info('The world is still loading; try again in a moment.', DISPLAY_NAME);
+        return false;
+    }
+    const key = canonicalNameKey(name) || '*';
+    if (state.judging.has(key)) return false;
+    state.judging.add(key);
+    const chatId = currentChatId();
+    const notice = toastr.info(`The world weighs what ${cleanString(ctx.name1, 60) || 'you'} can do…`, DISPLAY_NAME, { timeOut: 0, extendedTimeOut: 0 });
+    const started = Date.now();
+    try {
+        const settings = getSettings();
+        const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
+        const messages = buildAbilityJudgeMessages({
+            game: normalizeGameState(store.game),
+            store,
+            playerName: ctx.name1,
+            personName: name,
+            characterCard: getCardContext(),
+            persona: ctx.personaDescription,
+            transcript: formatTranscript(chat, { startIndex: Math.max(0, chat.length - 10), userName: ctx.name1, characterName: ctx.name2, maximumCharacters: 12_000 }),
+        });
+        let payload;
+        if (typeof state.judgeStub === 'function') payload = await state.judgeStub(messages, name);
+        else if (shellTestMode() && !state.allowLive) throw new Error('test mode: the ability judge needs a stub');
+        else payload = (await requestGamePatch(settings, messages, undefined, 'abilities')).payload;
+        if (currentChatId() !== chatId) return false;
+        const gameState = normalizeGameState(store.game);
+        const normalized = normalizeGameRecords(payload, gameContext(gameState, { playerName: ctx.name1, entities: store.entities }), { source: 'judge' });
+        ensureJudgedRecords(normalized.ops, name);
+        const at = Math.max(0, chat.length - 1);
+        store.game = applyGameOperations(store.game, normalized.ops, { messageIndex: at, source: 'judge', rejected: normalized.rejected }).state;
+        await saveChatStore();
+        updateInjection();
+        recordTelemetryEntry({ kind: 'judge', phase: 'verdict', durationMs: Date.now() - started, reason, ops: normalized.ops.length });
+        const verdict = channelAvailability(normalizeGameState(store.game), name, { present: personPresent(name) });
+        log(`Ability judge for ${name}: mind ${verdict.mind.ok ? `yes (${verdict.mind.tier})` : verdict.mind.reason}; text ${verdict.text.ok ? 'yes' : verdict.text.reason}.`);
+        refreshEntityTalk();
+        paintPhone();
+        return true;
+    } catch (error) {
+        console.error(`${LOG_PREFIX} The ability judge failed:`, error);
+        toastr.error(`The world could not settle it: ${cleanString(error?.message || String(error), 200)}`, DISPLAY_NAME);
+        return false;
+    } finally {
+        toastr.clear(notice);
+        state.judging.delete(key);
+    }
+}
+
+/** A fresh verdict: the old one is retired by setting the question unsettled through a new judge run. */
+async function rejudgeAbilities(name) {
+    return runAbilityJudge(name, { reason: 'reassess' });
+}
+
+/**
+ * Hand every conversation with unspoken lines to the story: one message per
+ * thread, from that person, with the lines as a transcript. The curator and
+ * the ledger read it like any reply; the scene derivation leaves it alone.
+ */
+async function flushPrivateThreads() {
+    const ctx = context();
+    if (!Array.isArray(ctx.chat)) return 0;
+    const threads = threadsRecords();
+    const dirty = sortedThreads(threads).reverse().filter(hasPendingStory);
+    if (!dirty.length) return 0;
+    const timestamp = await messageTimestamp();
+    for (const thread of dirty) {
+        const pending = pendingBubbles(thread);
+        const text = renderTranscript(thread, { playerName: ctx.name1, bubbles: pending, outcome: thread.outcome });
+        const portrait = portraitsOn() ? portraitOf(thread.person) : null;
+        const message = {
+            name: thread.person,
+            is_user: false,
+            is_system: false,
+            send_date: timestamp,
+            mes: text,
+            extra: {
+                [PRIVATE_EXTRA_KEY]: { person: thread.person, channel: thread.channel, key: thread.key, lines: pending.length, outcome: thread.outcome },
+                api: 'innerlore',
+                model: 'private-chat',
+            },
+            ...(portrait?.path ? { force_avatar: portrait.path } : {}),
+        };
+        ctx.chat.push(message);
+        try {
+            ctx.addOneMessage?.(message);
+        } catch (error) {
+            console.error(`${LOG_PREFIX} Could not render the private conversation in the story:`, error);
+        }
+        markFlushed(thread);
+    }
+    saveThreads();
+    try {
+        await ctx.saveChat?.();
+    } catch (error) {
+        console.error(`${LOG_PREFIX} Could not save the chat with the private conversation:`, error);
+    }
+    decoratePrivateMessages();
+    const store = getChatStore();
+    if (store) queueCompletedAssistantTurn(store);
+    updateCastCards();
+    return dirty.length;
+}
+
+async function messageTimestamp() {
+    try {
+        const module = await import('/scripts/RossAscends-mods.js');
+        if (typeof module?.getMessageTimeStamp === 'function') return module.getMessageTimeStamp();
+    } catch { /* not in the browser */ }
+    return new Date().toLocaleString();
+}
+
+/** The transcripts in the story log as message cards with bubbles. */
+function decoratePrivateMessages() {
+    if (typeof document === 'undefined' || typeof document.querySelectorAll !== 'function') return;
+    const ctx = context();
+    const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
+    for (const element of document.querySelectorAll('#chat .mes')) {
+        const index = Number(element.getAttribute('mesid'));
+        const info = chat[index]?.extra?.[PRIVATE_EXTRA_KEY];
+        const textNode = element.querySelector('.mes_text');
+        if (!info || !textNode || textNode.querySelector('.il-private-card')) continue;
+        textNode.innerHTML = renderPrivateCard(chat[index].mes, { playerName: ctx.name1, channel: info.channel });
+        element.classList.add('il-private-message');
+    }
+}
+
+/** The person's page: the ways to talk to them, and their gifts. */
+function fillEntityTalk(popup) {
+    if (!privateChatOn()) return;
+    const name = popup.dataset.name || '';
+    if (!name || canonicalNameKey(name) === canonicalNameKey(context().name1)) return;
+    const availability = privateAvailability(name);
+    const state = gameStateNow();
+    const section = document.createElement('section');
+    section.className = 'il-entity-talk';
+    const gifts = abilityList(state, { name });
+    const judged = abilitiesKnown(state, { name });
+    section.innerHTML = `<h4>Talk to ${escapeHtml(name)}</h4><div class="il-entity-talk-buttons"></div><p class="il-entity-talk-hint"></p>`;
+    const buttons = section.querySelector('.il-entity-talk-buttons');
+    const hints = [];
+    for (const channel of CHANNEL_KEYS) {
+        const way = availability[channel];
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = `il-entity-talk-btn is-${channel}${way.ok ? '' : way.judge ? ' is-unknown' : ' is-off'}`;
+        button.innerHTML = `${TALK_SVG[channel]}<span>${escapeHtml(CHANNELS[channel].label)}${way.judge ? '…' : ''}</span>`;
+        button.title = way.ok ? `${CHANNELS[channel].label}: ${channel === 'aside' ? 'a quiet word apart from the others' : channel === 'text' ? `a message on your ${deviceOf(state).name}` : 'reach their mind'}` : way.reason;
+        button.disabled = !way.ok && !way.judge;
+        button.addEventListener('click', () => void openPrivateChat(name, channel));
+        buttons.append(button);
+        if (!way.ok) hints.push(way.judge ? `${CHANNELS[channel].label}: ${way.reason}.` : `${CHANNELS[channel].label}: ${way.reason}.`);
+    }
+    const giftText = gifts.length ? `Gifts: ${gifts.map(gift => `${gift.name} (${gift.tier})`).join(', ')}.` : judged ? 'No notable gifts.' : '';
+    section.querySelector('.il-entity-talk-hint').textContent = [giftText, ...hints].filter(Boolean).join(' ');
+    if (judged) {
+        const again = document.createElement('button');
+        again.type = 'button';
+        again.className = 'il-entity-talk-again';
+        again.textContent = 'Reassess gifts';
+        again.title = 'Ask the world again what you and they can do';
+        again.addEventListener('click', () => void rejudgeAbilities(name));
+        section.querySelector('.il-entity-talk-hint').after(again);
+    }
+    const slot = popup.querySelector('.il-entity-portrait-slot');
+    if (slot) slot.after(section);
+    else popup.querySelector('.il-entity-body')?.prepend(section);
+}
+
+function refreshEntityTalk() {
+    if (typeof document === 'undefined' || typeof document.getElementById !== 'function') return;
+    const popup = document.getElementById('il_entity_card');
+    if (!popup) return;
+    popup.querySelector('.il-entity-talk')?.remove();
+    fillEntityTalk(popup);
+}
+
+/** `window.InnerLore.test`: the hooks the UI harness drives private conversations with. */
+function publishExtensionApi() {
+    if (typeof window === 'undefined') return;
+    const api = window.InnerLore && typeof window.InnerLore === 'object' ? window.InnerLore : {};
+    api.version = EXTENSION_VERSION;
+    api.test = Object.freeze({
+        openEntity: name => { showEntityCard(name, 'details'); return true; },
+        people: () => knownPeopleNames(),
+        present: () => presentPeopleNow(),
+        availability: name => privateAvailability(name),
+        openPrivate: (name, channel) => openPrivateChat(name, channel),
+        sendPrivate: text => sendPrivateMessage(privateChatState().activeKey, text),
+        setReplier: fn => { privateChatState().stub = typeof fn === 'function' ? fn : null; return true; },
+        setJudge: fn => { privateChatState().judgeStub = typeof fn === 'function' ? fn : null; return true; },
+        allowLive: flag => { privateChatState().allowLive = flag !== false; return privateChatState().allowLive; },
+        threads: () => structuredClone(threadsRecords()),
+        game: () => structuredClone(gameStateNow()),
+        judge: name => runAbilityJudge(name, { reason: 'test' }),
+        recordOps: ops => Boolean(recordPrivateOps(ops)),
+        openPhone: () => { showPhone({ view: 'home' }); return true; },
+        closePhone: () => closePhone(),
+        flush: () => flushPrivateThreads(),
+        phoneState: () => {
+            const state = privateChatState();
+            return { open: Boolean(state.panel?.isOpen()), view: state.panel?.view?.() || '', thread: state.activeKey, inFlight: state.inFlight, lastError: state.lastError };
+        },
+        chatLength: () => (Array.isArray(context().chat) ? context().chat.length : 0),
+        lastMessage: () => structuredClone(context().chat?.at(-1) || null),
+        deleteLastMessage: () => context().deleteLastMessage?.(),
+        /** Test clean-up: forget every private conversation of this chat. */
+        clearThreads: () => {
+            const ctx = context();
+            if (ctx.chatMetadata) delete ctx.chatMetadata[THREADS_METADATA_KEY];
+            privateChatState().threads = null;
+            saveThreads();
+            return true;
+        },
+        /** Test clean-up: drop journal entries from these sources (a stubbed judge's verdict) and save. */
+        dropOps: async (sources = ['judge', 'private']) => {
+            const store = getChatStore();
+            if (!store) return false;
+            const drop = new Set(sources);
+            store.game = gameStateWithout(store.game, entry => drop.has(entry.source));
+            await saveChatStore();
+            updateInjection();
+            return true;
+        },
+        /** The store's people as the extension sees them (name, type, enabled, player flag). */
+        storePeople: () => Object.values(getChatStore()?.entities || {}).map(record => ({ name: record?.name, type: record?.type, enabled: record?.enabled, player: record?.player === true })),
+        storeFlags: () => {
+            const store = getChatStore();
+            return store ? { needsRebuild: Boolean(store.needsRebuild), lastProcessedIndex: store.lastProcessedIndex, journal: normalizeGameState(store.game).journal.length, rebuilding: Boolean(runtime.rebuilding), queued: Boolean(runtime.historyRebuildQueued) } : null;
+        },
+        /** Test clean-up: lift the rebuild quarantine a deleted test message provoked (nothing processed was touched). */
+        clearRebuild: async () => {
+            const store = getChatStore();
+            if (!store) return false;
+            clearTimeout(runtime.historyTimer);
+            runtime.historyTimer = null;
+            runtime.historyRebuildQueued = false;
+            store.needsRebuild = false;
+            await saveChatStore();
+            updateInjection();
+            updateUI();
+            return true;
+        },
+    });
+    window.InnerLore = api;
 }
 
 // --- Voice narration -------------------------------------------------------------
@@ -5150,6 +5910,10 @@ function applySettingsToUI() {
         il_planner_custom_instructions: settings.plannerCustomInstructions,
         il_assisted_background: settings.assistedBackground || 'auto',
         il_cast_cards: settings.castCardsEnabled !== false,
+        il_private_chat_enabled: settings.privateChatEnabled !== false,
+        il_private_chat_temperature: settings.privateChatTemperature ?? 0.8,
+        il_private_chat_tokens: settings.privateChatMaximumTokens ?? 220,
+        il_private_chat_custom_instructions: settings.privateChatCustomInstructions || '',
         il_portraits_enabled: settings.portraitsEnabled !== false,
         il_game_tools: settings.gameToolsEnabled !== false,
         il_voice_enabled: settings.voiceEnabled !== false,
@@ -7207,6 +7971,13 @@ function maybeRecordCheckpoint(store, settings = getSettings()) {
 
 async function rebuildFromChat({ automatic = false } = {}) {
     const settings = getSettings();
+    // The fork's test mode runs no background passes: a quarantine stays
+    // until a normal session rebuilds, instead of spending a model here.
+    if (automatic && shellTestMode()) {
+        runtime.historyRebuildQueued = false;
+        setStatus('idle', 'Rebuild deferred', 'Test mode: the history rebuild waits for a normal session.');
+        return;
+    }
     if (runtime.processing || runtime.rebuilding || runtime.preparingFoundation) {
         if (automatic) runtime.historyRebuildQueued = true;
         else toastr.warning('Stop or wait for the current InnerLore pass first.', DISPLAY_NAME);
@@ -8392,6 +9163,16 @@ function bindUIEvents() {
     }
     bindSelect('il_assisted_background', 'assistedBackground', ['auto', 'on', 'off']);
     bindCheckbox('il_cast_cards', 'castCardsEnabled', () => updateCastCards());
+    bindCheckbox('il_private_chat_enabled', 'privateChatEnabled', () => {
+        if (!getSettings().privateChatEnabled) privateChatState().panel?.close();
+        renderMenuBar();
+    });
+    bindNumber('il_private_chat_temperature', 'privateChatTemperature', 0, 1.5);
+    bindNumber('il_private_chat_tokens', 'privateChatMaximumTokens', 60, 600);
+    document.getElementById('il_private_chat_custom_instructions')?.addEventListener('change', event => {
+        getSettings().privateChatCustomInstructions = cleanString(event.target.value, 2_000);
+        saveSettings();
+    });
     bindCheckbox('il_portraits_enabled', 'portraitsEnabled', () => updateCastCards());
     bindNumber('il_portrait_steps', 'portraitSteps', 1, 60);
     bindNumber('il_portrait_cfg', 'portraitCfg', 1, 20);
@@ -9327,6 +10108,19 @@ function registerEvents() {
     for (const event of [events.CHARACTER_MESSAGE_RENDERED, events.CHAT_CHANGED, events.MESSAGE_SWIPED, events.MORE_MESSAGES_LOADED]) {
         if (event) eventSource.on(event, () => setTimeout(ensureVoiceButtons, 0));
     }
+    // Private conversations in the story log are shown as message cards.
+    for (const event of [events.CHARACTER_MESSAGE_RENDERED, events.CHAT_CHANGED, events.MORE_MESSAGES_LOADED, events.MESSAGE_EDITED, events.MESSAGE_UPDATED]) {
+        if (event) eventSource.on(event, () => setTimeout(decoratePrivateMessages, 0));
+    }
+    if (events.CHAT_CHANGED) eventSource.on(events.CHAT_CHANGED, () => {
+        const state = privateChatState();
+        state.panel?.close();
+        state.activeKey = '';
+        state.inFlight = '';
+        state.lastError = '';
+        state.preemptedFor = '';
+        state.controller?.abort();
+    });
     if (events.CHAT_CHANGED) eventSource.on(events.CHAT_CHANGED, () => {
         stopSpeaking();
         ensureMicButton();
@@ -9412,6 +10206,7 @@ async function initializeServerState() {
     } else if (!expressionFoundationReady(getChatStore())) {
         scheduleExpressionFoundationWarmup(250);
     }
+    publishExtensionApi();
     console.log(`${LOG_PREFIX} v${EXTENSION_VERSION} loaded with prepared SQLite narrative state, prompt macros, and verified trigger-event delivery.`);
 }
 

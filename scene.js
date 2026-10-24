@@ -189,6 +189,9 @@ function relevantMessages(messages, maximum = 6) {
         .map((message, index) => ({ message, index }))
         .filter(({ message }) => message
             && (!message.is_system || message.extra?.sc_ghosted === true)
+            // A private conversation (a text, a thought, a quiet word) is not
+            // narration: nobody moves and nobody arrives because of it.
+            && !message.extra?.inner_lore_private
             && cleanString(message.mes))
         .slice(-Math.max(1, maximum));
 }

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { createEmptyStore, mergeEntityOperations } from '../core.js';
-import { deriveCameraFrame, renderCameraPacket } from '../scene.js?v=7';
+import { deriveCameraFrame, renderCameraPacket } from '../scene.js?v=8';
 
 function harbourWorld() {
     const store = createEmptyStore('camera-chat');

@@ -14,7 +14,7 @@ import {
     curatedLocationOf,
     resolveLocationReference,
 } from './core.js?v=48';
-import { deriveSceneState } from './scene.js?v=7';
+import { deriveSceneState } from './scene.js?v=8';
 
 const MAP_VIEWBOX = { width: 1000, height: 700 };
 const MAX_NODE_CHIPS = 4;

@@ -7,9 +7,9 @@
  */
 
 import { canonicalNameKey, cleanString, escapeHtml, resolveLocationReference } from './core.js?v=48';
-import { gameOverview, normalizeGameState, placeRefOf, tradeOverview } from './game.js?v=3';
+import { gameOverview, normalizeGameState, placeRefOf, tradeOverview } from './game.js?v=4';
 
-const STYLE_ID = 'il_game_inline_styles_v2';
+const STYLE_ID = 'il_game_inline_styles_v3';
 const STYLES = `
 /* An explicit size: a theme or extension can transform <html>, and inset:0 then measures against it, not the screen. */
 .il-screen{--il-gold:#ecd9ac;--il-line:rgba(255,255,255,.09);--il-muted:#8f99a8;position:fixed;top:0;left:0;width:100vw;height:100vh;height:100dvh;z-index:31000;background:#070a0f;display:flex;justify-content:center;color:#d6dbe4;font-size:14px;line-height:1.38}
@@ -50,6 +50,7 @@ const STYLES = `
 .il-game-bar{position:relative;height:6px;border-radius:3px;background:rgba(255,255,255,.07);margin-top:6px;overflow:hidden}
 .il-game-bar span{position:absolute;top:0;bottom:0;border-radius:3px}
 .il-game-bar::after{content:'';position:absolute;left:50%;top:0;bottom:0;width:1px;background:rgba(255,255,255,.22)}
+.il-game-bar.is-plain::after{display:none}
 .il-game-empty{color:#6d7684;font-style:italic;font-size:.88em;margin:6px 0}
 .il-game-change{display:flex;gap:9px;padding:7px 2px;border-bottom:1px solid var(--il-line);font-size:.9em}
 .il-game-change small{flex:none;color:#7d8796;min-width:44px}
@@ -113,12 +114,18 @@ function itemRow(item, { nested = false } = {}) {
     </li>`;
 }
 
+/** A left-to-right bar for a gift's level. */
+function giftBar(level) {
+    const value = Math.max(0, Math.min(100, Number(level) || 0));
+    return `<div class="il-game-bar is-plain" aria-hidden="true"><span style="left:0;width:${value}%;background:rgba(167,139,250,.75)"></span></div>`;
+}
+
 function standingRow(record, { person = false } = {}) {
     const reason = record.notes?.at(-1)?.reason;
     return `<li class="il-game-row">
         <button type="button" ${person ? `data-person="${escapeHtml(record.name)}"` : 'data-toggle="1"'}>
             <span class="il-game-main"><b>${escapeHtml(record.name)}</b><span class="il-game-tier ${tierClass(record.score)}">${escapeHtml(record.tier)}</span>
-            ${reason ? `<small>${escapeHtml(reason)}</small>` : ''}${scoreBar(record.score)}</span>
+            ${reason ? `<small>${escapeHtml(reason)}</small>` : ''}${record.gifts?.length ? `<small>Gifts: ${escapeHtml(record.gifts.map(gift => `${gift.name} (${gift.tier})`).join(', '))}</small>` : ''}${scoreBar(record.score)}</span>
             <span class="il-game-side">${record.score > 0 ? '+' : ''}${record.score}</span>
         </button>
         ${person ? '' : `<div class="il-game-more"><ol>${(record.notes || []).slice(-6).map(note => `<li>${note.delta > 0 ? '+' : ''}${note.delta}${note.reason ? ` — ${escapeHtml(note.reason)}` : ''}</li>`).join('')}</ol></div>`}
@@ -163,10 +170,15 @@ export function renderGameTab(tab, overview, { place = '' } = {}) {
         const people = overview.people.length
             ? `<ul class="il-game-list">${overview.people.map(record => standingRow(record, { person: true })).join('')}</ul>`
             : empty('Nobody has formed an opinion of you yet.');
+        const contacts = overview.device?.present
+            ? `<div class="il-game-section">${escapeHtml(overview.device.name || 'phone')} contacts</div>${overview.contacts?.length
+                ? `<ul class="il-game-list">${overview.contacts.map(contact => `<li class="il-game-row"><button type="button" data-person="${escapeHtml(contact.name)}"><span class="il-game-main"><b>${escapeHtml(contact.name)}</b>${contact.number ? `<small>${escapeHtml(contact.number)}</small>` : ''}</span></button></li>`).join('')}</ul>`
+                : empty('No contacts yet.')}`
+            : '';
         const groups = overview.reputation.length
             ? `<ul class="il-game-list">${overview.reputation.map(record => standingRow(record)).join('')}</ul>`
             : empty('No group knows your name yet.');
-        return `<div class="il-game-section">How people regard you</div>${people}<div class="il-game-section">Reputation</div>${groups}`;
+        return `<div class="il-game-section">How people regard you</div>${people}<div class="il-game-section">Reputation</div>${groups}${contacts}`;
     }
     if (tab === 'ledger') {
         return overview.ledger.length
@@ -177,7 +189,10 @@ export function renderGameTab(tab, overview, { place = '' } = {}) {
     const bag = overview.carrying.length
         ? `<ul class="il-game-list">${nestedItems(overview.carrying)}</ul>`
         : empty('You are not carrying anything the ledger knows about yet.');
-    return `${purse}<div class="il-game-section">Carrying</div>${bag}`;
+    const gifts = overview.abilities?.length
+        ? `<ul class="il-game-list">${overview.abilities.map(gift => `<li class="il-game-row"><button type="button" data-toggle="1"><span class="il-game-main"><b>${escapeHtml(gift.name)}</b><span class="il-game-tier ${gift.level >= 40 ? 'is-good' : ''}">${escapeHtml(gift.tier)}</span>${giftBar(gift.level)}</span><span class="il-game-side">${gift.level}</span></button><div class="il-game-more">${escapeHtml(gift.note || 'Judged from the story and your character.')}</div></li>`).join('')}</ul>`
+        : empty(overview.abilitiesJudged ? 'No notable gifts: the world has weighed it.' : 'Nothing judged yet. Reaching for someone\'s mind, or for a phone, asks the world what you can do.');
+    return `${purse}<div class="il-game-section">Carrying</div>${bag}<div class="il-game-section">Gifts and skills</div>${gifts}`;
 }
 
 /** The scene's place as the game state names it. */

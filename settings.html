@@ -698,7 +698,38 @@
                 </div>
             </div>
 
-            <div class="inline-drawer">
+                        <div class="inline-drawer">
+                <div class="inline-drawer-toggle inline-drawer-header">
+                    <b><i class="fa-solid fa-comments"></i> Private Chat, Phone and Mind</b>
+                    <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+                </div>
+                <div class="inline-drawer-content">
+                    <label class="checkbox_label" for="il_private_chat_enabled">
+                        <input id="il_private_chat_enabled" type="checkbox" />
+                        <span>Private conversations with people, apart from the narration</span>
+                    </label>
+                    <small class="inner-lore-hint">
+                        A person's page offers three ways to talk: a <b>private chat</b> (a quiet word, only with someone here with
+                        you), a <b>text</b> on the world's message device (once you have their number), and <b>mind</b>-speech when
+                        you have the gift. The first time you reach for a mind or a phone, the ability judge reads the card, your
+                        persona and the story and settles what you can do and whether the other person could shut you out; the
+                        verdict is kept in the game journal, so swipes and rebuilds rewind it, and the ledger updates it when the
+                        story grants or takes a gift, a number or a device. The person answers through the story's own model in
+                        short messages. When you close the conversation, the story gets the transcript as a message from that
+                        person, so the narrator and the background passes know what was said. The <b>Phone</b> item in the menu bar
+                        lists conversations, contacts and who can be reached.
+                    </small>
+                    <div class="inner-lore-grid two-columns">
+                        <label for="il_private_chat_temperature">Reply temperature</label>
+                        <input id="il_private_chat_temperature" class="text_pole" type="number" min="0" max="1.5" step="0.05" />
+                        <label for="il_private_chat_tokens">Reply length (tokens)</label>
+                        <input id="il_private_chat_tokens" class="text_pole" type="number" min="60" max="600" step="10" />
+                    </div>
+                    <label for="il_private_chat_custom_instructions">Additional instructions for private replies</label>
+                    <textarea id="il_private_chat_custom_instructions" class="text_pole" rows="2" placeholder="e.g. People in this world text in lower case and never use emoji."></textarea>
+                </div>
+            </div>
+<div class="inline-drawer">
                 <div class="inline-drawer-toggle inline-drawer-header">
                     <b><i class="fa-solid fa-image-portrait"></i> Portraits and Cast Cards</b>
                     <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>

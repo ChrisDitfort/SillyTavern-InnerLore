@@ -1,26 +1,38 @@
-import { sendInnerLoreRequest } from './llm-client.js?v=17';
-import { buildGameRepairMessages } from './game-prompts.js?v=3';
+import { sendInnerLoreRequest } from './llm-client.js?v=18';
+import { buildGameRepairMessages } from './game-prompts.js?v=4';
 import {
     escalateRepairSettings,
     normalizeOutputFormat,
     outputParseDiagnostics,
     parseInnerLoreOutput,
     prepareOutputMessages,
-} from './output-codec.js?v=3';
+} from './output-codec.js?v=4';
 
 const LIST_FIELDS = Object.freeze({
-    game: ['objects', 'money', 'prices', 'standings', 'reputation', 'deaths'],
+    game: ['objects', 'money', 'prices', 'standings', 'reputation', 'deaths', 'abilities', 'contacts'],
     planner: ['stages', 'people', 'objects', 'prices'],
+    abilities: ['abilities', 'contacts'],
 });
 const LIST_LIMITS = Object.freeze({
-    objects: 60, money: 30, prices: 40, standings: 30, reputation: 20, deaths: 10, stages: 4, people: 16,
+    objects: 60, money: 30, prices: 40, standings: 30, reputation: 20, deaths: 10, stages: 4, people: 16, abilities: 20, contacts: 20,
 });
+const TASK_LABELS = Object.freeze({ game: 'Game Ledger', planner: 'Scene Planner', abilities: 'Ability Judge' });
 
 /**
  * Settings for one game request. The ledger rides on the curator's
  * profile and the planner on the progression profile unless either has its own.
  */
 export function gameRequestSettings(settings, task) {
+    if (task === 'abilities') {
+        // The judge weighs a few facts and answers briefly: the ledger's model, a little warmer.
+        return {
+            ...settings,
+            connectionProfileId: settings.gameConnectionProfileId || settings.connectionProfileId,
+            maximumResponseTokens: 1_500,
+            temperature: 0.2,
+            telemetryKind: 'judge',
+        };
+    }
     if (task === 'planner') {
         return {
             ...settings,
@@ -49,7 +61,7 @@ export function gameRequestSettings(settings, task) {
 /** Shape check: lists are lists, records are objects, sizes are bounded. */
 export function validateGamePayload(payload, task) {
     if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
-        throw new Error(`InnerLore ${task === 'planner' ? 'Scene Planner' : 'Game Ledger'} returned a non-object value.`);
+        throw new Error(`InnerLore ${TASK_LABELS[task] || 'Game Ledger'} returned a non-object value.`);
     }
     for (const field of LIST_FIELDS[task]) {
         const value = payload[field];
@@ -63,7 +75,7 @@ export function validateGamePayload(payload, task) {
         }
         payload[field] = payload[field].slice(0, LIST_LIMITS[field] || 40);
     }
-    for (const field of ['currency', 'purse']) {
+    for (const field of ['currency', 'purse', 'device']) {
         if (payload[field] !== undefined && payload[field] !== null
             && (typeof payload[field] !== 'object' || Array.isArray(payload[field]))) {
             throw new Error(`Game response field "${field}" must be a record.`);

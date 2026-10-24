@@ -75,6 +75,84 @@ export function reputationTier(score) {
     return REPUTATION_TIERS.find(([floor]) => value >= floor)[1];
 }
 
+// --- abilities, devices and contacts ------------------------------------------
+
+/** The gifts the private-chat system reads: mind-speech, and the ward that can shut it out. */
+export const ABILITY_KEYS = Object.freeze({ telepathy: 'telepathy', mindWard: 'mind_ward' });
+/** A gift is usable from this level; below it, it is only latent. */
+export const USABLE_ABILITY_LEVEL = 20;
+const ABILITY_LIMIT = 100;
+
+export function abilityTier(level) {
+    const value = Number(level) || 0;
+    if (value <= 0) return 'none';
+    if (value < USABLE_ABILITY_LEVEL) return 'latent';
+    if (value < 40) return 'novice';
+    if (value < 70) return 'adept';
+    if (value < 90) return 'expert';
+    return 'master';
+}
+
+export function abilityKey(value) {
+    return gameKey(value).slice(0, 48);
+}
+
+function abilityHolderKey(holder) {
+    if (!holder) return '';
+    if (holder.kind === 'player' || holder === 'player') return 'player';
+    return nameKey(holder.name || holder);
+}
+
+/** One holder's abilities (a map by ability key), or null when nothing was ever judged or recorded for them. */
+export function abilitiesOf(state, holder) {
+    const key = abilityHolderKey(holder);
+    const record = key ? state?.abilities?.[key] : null;
+    return record ? record.abilities : null;
+}
+
+/** The level of one ability, 0 when none is recorded. */
+export function abilityLevel(state, holder, key) {
+    return Number(abilitiesOf(state, holder)?.[abilityKey(key)]?.level) || 0;
+}
+
+/** Whether a holder's gifts have been judged or recorded at all. */
+export function abilitiesKnown(state, holder) {
+    return abilitiesOf(state, holder) !== null;
+}
+
+/** A holder's abilities as a list for display, strongest first; gifts judged absent are left out unless asked for. */
+export function abilityList(state, holder, { includeNone = false } = {}) {
+    return Object.values(abilitiesOf(state, holder) || {})
+        .filter(ability => includeNone || ability.level > 0)
+        .sort((a, b) => b.level - a.level)
+        .map(ability => ({ ...ability, tier: abilityTier(ability.level) }));
+}
+
+/** The player can speak mind to mind. */
+export function canMindSpeak(state) {
+    return abilityLevel(state, 'player', ABILITY_KEYS.telepathy) >= USABLE_ABILITY_LEVEL;
+}
+
+/** A person with a gift of their own can feel a mental touch and shut it out. */
+export function canRejectMind(state, name) {
+    return abilityLevel(state, { name }, ABILITY_KEYS.mindWard) >= USABLE_ABILITY_LEVEL
+        || abilityLevel(state, { name }, ABILITY_KEYS.telepathy) >= USABLE_ABILITY_LEVEL;
+}
+
+/** The player's device for messages from afar, as recorded: { known, present, name, channel, note }. */
+export function deviceOf(state) {
+    const device = state?.device;
+    return device && typeof device === 'object' ? device : { known: false, present: false, name: '', channel: '', note: '', at: -1 };
+}
+
+export function contactOf(state, name) {
+    return state?.contacts?.[nameKey(name)] || null;
+}
+
+export function contactList(state) {
+    return Object.values(state?.contacts || {}).sort((a, b) => (b.since ?? 0) - (a.since ?? 0));
+}
+
 function signed(value) {
     const number = Math.round(Number(value) || 0);
     return number > 0 ? `+${number}` : String(number);
@@ -168,7 +246,7 @@ function impressionReason(impression) {
 
 // --- state -----------------------------------------------------------------
 
-const DERIVED_FIELDS = Object.freeze(['currency', 'purse', 'items', 'prices', 'standings', 'reputation', 'stages', 'purses', 'dead']);
+const DERIVED_FIELDS = Object.freeze(['currency', 'purse', 'items', 'prices', 'standings', 'reputation', 'stages', 'purses', 'dead', 'abilities', 'device', 'contacts']);
 
 function emptyDerived() {
     return {
@@ -184,6 +262,12 @@ function emptyDerived() {
         purses: {},
         // Who has died: where, how, and the key of their body.
         dead: {},
+        // Notable gifts and skills by holder ("player" or a person's key): telepathy, a mind ward, magic.
+        abilities: {},
+        // The player's means of sending messages from afar (a phone, a sending stone), once the world has settled it.
+        device: { known: false, present: false, name: '', channel: '', note: '', at: -1 },
+        // People the player can reach on that device, by person key.
+        contacts: {},
     };
 }
 
@@ -847,6 +931,20 @@ function reduceEntry(derived, entry) {
             if (item.holder?.kind === 'character' && nameKey(item.holder.name) === from) { item.holder = { ...item.holder, name: op.name || op.to }; folded += 1; }
             if (item.holder?.kind === 'place' && nameKey(item.holder.name) === from) { item.holder = { kind: 'character', name: op.name || op.to }; folded += 1; }
         }
+        // Gifts and contacts recorded under the old name belong to the one person too.
+        if (derived.abilities[from]) {
+            folded += 1;
+            const keep = derived.abilities[to] ??= { ...derived.abilities[from], key: to, name: op.name || op.to, abilities: {} };
+            for (const [key, ability] of Object.entries(derived.abilities[from].abilities || {})) {
+                if (!keep.abilities[key] || keep.abilities[key].level < ability.level) keep.abilities[key] = { ...ability };
+            }
+            delete derived.abilities[from];
+        }
+        if (derived.contacts[from]) {
+            folded += 1;
+            if (!derived.contacts[to]) derived.contacts[to] = { ...derived.contacts[from], key: to, name: op.name || op.to };
+            delete derived.contacts[from];
+        }
         return folded ? { ok: true } : { ok: false, reason: `nothing recorded under ${op.from}` };
     }
     case 'standing.change':
@@ -955,6 +1053,64 @@ function reduceEntry(derived, entry) {
         derived.dead[key] = { key, name: op.name, at, place: op.place, cause: op.cause || '', body: bodyKey };
         return { ok: true };
     }
+    case 'ability.set': {
+        const holderKey = abilityHolderKey(op.holder);
+        const key = abilityKey(op.key);
+        if (!holderKey || !key) return { ok: false, reason: 'an ability needs a holder and a key' };
+        const holder = derived.abilities[holderKey] ??= {
+            key: holderKey,
+            kind: holderKey === 'player' ? 'player' : 'character',
+            name: holderKey === 'player' ? 'player' : (op.holder?.name || op.holder),
+            abilities: {},
+            since: at,
+        };
+        if (op.holder?.name && holder.kind === 'character') holder.name = op.holder.name;
+        const ability = holder.abilities[key] ??= { key, name: op.name || key.replaceAll('_', ' '), level: 0, note: '', since: at, updated: at };
+        const before = ability.level;
+        if (Number.isFinite(op.level)) ability.level = clamp(Math.round(op.level), 0, ABILITY_LIMIT);
+        else if (Number.isFinite(op.delta)) ability.level = clamp(ability.level + Math.round(op.delta), 0, ABILITY_LIMIT);
+        else if (!op.note) return { ok: false, reason: 'an ability needs a level or a change' };
+        if (op.name) ability.name = op.name;
+        if (op.note) ability.note = op.note;
+        ability.updated = at;
+        holder.updated = at;
+        return { ok: true, before, after: ability.level };
+    }
+    case 'contact.add': {
+        const key = nameKey(op.name);
+        if (!key) return { ok: false, reason: 'a contact needs a name' };
+        const existing = derived.contacts[key];
+        if (existing && (!op.number || existing.number === op.number)) {
+            if (op.note) existing.note = op.note;
+            return { ok: true, unchanged: true };
+        }
+        derived.contacts[key] = {
+            key,
+            name: op.name,
+            number: op.number || existing?.number || '',
+            note: op.note || existing?.note || '',
+            since: existing?.since ?? at,
+            updated: at,
+        };
+        return { ok: true };
+    }
+    case 'contact.remove': {
+        const key = nameKey(op.name);
+        if (!derived.contacts[key]) return { ok: false, reason: `no contact for ${op.name}` };
+        delete derived.contacts[key];
+        return { ok: true };
+    }
+    case 'device.set': {
+        derived.device = {
+            known: true,
+            present: op.present === true,
+            name: op.present === true ? (op.name || 'phone') : (op.name || ''),
+            channel: op.present === true ? (op.channel || 'text') : '',
+            note: op.note || '',
+            at,
+        };
+        return { ok: true };
+    }
     default:
         return { ok: false, reason: `unknown operation ${op.type}` };
     }
@@ -1055,7 +1211,9 @@ export function normalizeGameRecords(payload, gameContextValue, options = {}) {
         record: textField(record?.key || record?.name || record?.character || record?.group || record?.place || '', 80),
         reason,
     });
-    const source = options.source === 'planner' ? 'planner' : 'ledger';
+    // The ledger reads the story, the planner prepares places, and the ability
+    // judge weighs gifts, devices and contacts when the player first reaches for them.
+    const source = options.source === 'planner' ? 'planner' : options.source === 'judge' ? 'judge' : 'ledger';
     // The planner may hand the player a purse and belongings once, when the
     // story has given them none; afterwards only the story changes them.
     const startingKit = source === 'planner' && options.allowStartingKit === true;
@@ -1362,6 +1520,81 @@ export function normalizeGameRecords(payload, gameContextValue, options = {}) {
         });
     }
 
+    for (const raw of Array.isArray(payload?.abilities) ? payload.abilities : []) {
+        if (!raw || typeof raw !== 'object') continue;
+        if (source === 'planner') {
+            reject(raw, 'abilities come from the story or the judge, not the planner');
+            continue;
+        }
+        const key = abilityKey(raw.key || raw.name);
+        if (!key) {
+            reject(raw, 'an ability needs a key or a name');
+            continue;
+        }
+        const holderRaw = normalizeName(raw.holder ?? raw.character ?? 'player');
+        const holder = !holderRaw || /^(?:player|the player|pc)$/iu.test(holderRaw) || context.playerKeys.has(nameKey(holderRaw))
+            ? { kind: 'player' }
+            : { kind: 'character', name: canonicalPerson(holderRaw, context).slice(0, 120) };
+        const level = raw.level !== undefined && raw.level !== null && raw.level !== '' && Number.isFinite(Number(raw.level))
+            ? clamp(Math.round(Number(raw.level)), 0, ABILITY_LIMIT)
+            : null;
+        const delta = raw.delta !== undefined && raw.delta !== null && raw.delta !== '' && Number.isFinite(Number(raw.delta))
+            ? clamp(Math.round(Number(raw.delta)), -ABILITY_LIMIT, ABILITY_LIMIT)
+            : null;
+        if (level === null && delta === null) {
+            reject(raw, 'an ability needs a level or a delta');
+            continue;
+        }
+        if (source === 'ledger' && delta === 0) {
+            reject(raw, 'ability change is zero');
+            continue;
+        }
+        ops.push({
+            type: 'ability.set',
+            holder,
+            key,
+            ...(normalizeName(raw.name) ? { name: textField(raw.name, 80) } : {}),
+            ...(level !== null ? { level } : { delta }),
+            note: noteOf(raw),
+        });
+    }
+
+    for (const raw of Array.isArray(payload?.contacts) ? payload.contacts : []) {
+        if (!raw || typeof raw !== 'object') continue;
+        if (source === 'planner') {
+            reject(raw, 'contacts come from the story or the judge, not the planner');
+            continue;
+        }
+        const rawName = normalizeName(raw.character ?? raw.name);
+        if (!rawName || context.playerKeys.has(nameKey(rawName))) {
+            reject(raw, 'a contact needs a person other than the player');
+            continue;
+        }
+        const name = canonicalPerson(rawName, context).slice(0, 120);
+        const action = cleanString(String(raw.op || raw.action || 'add'), 20).toLocaleLowerCase();
+        if (action === 'remove' || action === 'lost') {
+            ops.push({ type: 'contact.remove', name, note: noteOf(raw) });
+            continue;
+        }
+        ops.push({ type: 'contact.add', name, number: textField(raw.number ?? raw.address ?? raw.handle, 80), note: noteOf(raw) });
+    }
+
+    const device = payload?.device;
+    if (device && typeof device === 'object' && Object.keys(device).length) {
+        if (source === 'planner') reject(device, 'the device comes from the story or the judge, not the planner');
+        else if (device.present === undefined || device.present === null || device.present === '') reject(device, 'a device record needs present true or false');
+        else {
+            const present = device.present === true || /^(?:true|yes)$/iu.test(String(device.present));
+            ops.push({
+                type: 'device.set',
+                present,
+                name: textField(device.name, 60).toLocaleLowerCase() || (present ? 'phone' : ''),
+                channel: textField(device.channel, 30).toLocaleLowerCase() || (present ? 'text' : ''),
+                note: noteOf(device),
+            });
+        }
+    }
+
     // "Harbour Master Oswin Pell" is the "Harbour Master Pell" lore already has.
     const knownPerson = name => Boolean(findPerson(context.entities, name)) || Object.values(context.entities || {}).some(record => (
         ['character', 'creature'].includes(normalizeEntityType(record?.type))
@@ -1652,6 +1885,18 @@ export function entryText(entry, state, playerName) {
         return `${op.name} ${op.set !== null && op.set !== undefined ? `now ${signed(op.set)}` : signed(op.delta)}${op.reason ? `: ${op.reason}` : ''}`;
     case 'reputation.change':
         return `standing with ${op.name} ${op.set !== null && op.set !== undefined ? `now ${signed(op.set)}` : signed(op.delta)}${op.reason ? `: ${op.reason}` : ''}`;
+    case 'ability.set': {
+        const whose = op.holder?.kind === 'player' ? '' : `${op.holder?.name || 'someone'}: `;
+        const change = Number.isFinite(op.level) ? `${abilityTier(op.level)} (${op.level})` : signed(op.delta);
+        const recorded = abilitiesOf(state, op.holder)?.[abilityKey(op.key)]?.name;
+        return `${whose}${recorded || op.name || op.key} ${change}${op.note ? `: ${op.note}` : ''}`;
+    }
+    case 'contact.add':
+        return `${op.name}${op.number ? ` (${op.number})` : ''} added to contacts`;
+    case 'contact.remove':
+        return `${op.name} removed from contacts`;
+    case 'device.set':
+        return op.present ? `has a ${op.name}${op.channel && op.channel !== 'text' ? ` (${op.channel})` : ''}` : `has no ${op.name || 'device'} for messages from afar`;
     default:
         return '';
     }
@@ -1666,6 +1911,10 @@ function involvesPlayer(entry, items) {
     if (op.type === 'item.move') return op.to?.kind === 'player' || entry.fromPlayer === true;
     if (op.type === 'item.add') return op.holder?.kind === 'player' && entry.source !== 'planner';
     if (op.type === 'item.remove') return entry.fromPlayer === true;
+    // A judge's verdict is a reading of the world, not something that happened; a gift found absent is no change.
+    if (op.type === 'ability.set') return entry.source !== 'judge' && op.holder?.kind === 'player' && (Number.isFinite(op.delta) ? op.delta !== 0 : op.level > 0);
+    if (op.type === 'contact.add' || op.type === 'contact.remove') return entry.source !== 'judge';
+    if (op.type === 'device.set') return entry.source !== 'judge' && op.present === true;
     return false;
 }
 
@@ -1836,6 +2085,19 @@ export function renderGamePacket(value, options = {}) {
     if (groups.length) {
         lines.push(`${pov}'s reputation: ${groups.map(group => `${group.name}: ${reputationTier(group.score)} (${signed(group.score)})`).join('; ')}.`);
     }
+    const gifts = abilityList(state, 'player');
+    if (gifts.length) {
+        lines.push(`${pov}'s gifts: ${gifts.slice(0, 6).map(gift => `${gift.name} (${gift.tier})`).join('; ')}. A latent gift cannot yet be used on purpose.`);
+    }
+    const giftedHere = present.map(name => ({ name, gifts: abilityList(state, { name }) })).filter(entry => entry.gifts.length);
+    if (giftedHere.length) {
+        lines.push(`Gifts of people here: ${giftedHere.slice(0, 6).map(entry => `${entry.name}: ${entry.gifts.slice(0, 3).map(gift => `${gift.name} (${gift.tier})`).join(', ')}`).join('; ')}.`);
+    }
+    const device = deviceOf(state);
+    const contacts = contactList(state);
+    if (device.known && device.present) {
+        lines.push(`${pov}'s ${device.name}: ${contacts.length ? `can reach ${contacts.slice(0, 10).map(contact => contact.name).join(', ')}` : 'holds no contacts yet'}${device.channel && device.channel !== 'text' ? ` (messages are ${device.channel}s)` : ''}.`);
+    }
     const recent = recentGameChanges(state, pov, 5);
     if (recent.length) lines.push(`Recent changes: ${recent.map(change => change.text).join('; ')}.`);
     if (stage) {
@@ -1944,7 +2206,14 @@ export function gameOverview(value, options = {}) {
         ] : [],
         people: Object.values(state.standings || {})
             .sort((a, b) => (Number(b.updated) || 0) - (Number(a.updated) || 0))
-            .map(record => ({ name: record.name, score: record.score, tier: standingTier(record.score), notes: record.notes || [] })),
+            .map(record => ({
+                name: record.name, score: record.score, tier: standingTier(record.score), notes: record.notes || [],
+                gifts: abilityList(state, { name: record.name }).map(gift => ({ key: gift.key, name: gift.name, level: gift.level, tier: gift.tier })),
+            })),
+        abilities: abilityList(state, 'player').map(gift => ({ key: gift.key, name: gift.name, level: gift.level, tier: gift.tier, note: gift.note || '' })),
+        abilitiesJudged: abilitiesKnown(state, 'player'),
+        device: { ...deviceOf(state) },
+        contacts: contactList(state).map(contact => ({ name: contact.name, number: contact.number || '', note: contact.note || '' })),
         reputation: Object.values(state.reputation || {})
             .sort((a, b) => Math.abs(b.score) - Math.abs(a.score))
             .map(record => ({ name: record.name, kind: record.kind, score: record.score, tier: reputationTier(record.score), notes: record.notes || [] })),
@@ -2021,6 +2290,8 @@ export function getGameStats(value) {
         stages: Object.keys(state.stages || {}).length,
         journal: state.journal.length,
         purse: state.purse?.amount ?? null,
+        abilities: Object.values(state.abilities || {}).reduce((sum, holder) => sum + Object.keys(holder.abilities || {}).length, 0),
+        contacts: Object.keys(state.contacts || {}).length,
     };
 }
 

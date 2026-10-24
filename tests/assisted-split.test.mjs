@@ -2,10 +2,10 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { createEmptyStore, mergeEntityOperations } from '../core.js?v=48';
-import { amountMentions, groundedRecords, normalizeCurrency, objectsNamedIn, createGameState, applyGameOperations } from '../game.js?v=3';
-import { buildLedgerMessages } from '../game-prompts.js?v=3';
-import { parseInnerLoreOutput } from '../output-codec.js?v=3';
-import { modelSizeBillions } from '../llm-client.js?v=16';
+import { amountMentions, groundedRecords, normalizeCurrency, objectsNamedIn, createGameState, applyGameOperations } from '../game.js?v=4';
+import { buildLedgerMessages } from '../game-prompts.js?v=4';
+import { parseInnerLoreOutput } from '../output-codec.js?v=4';
+import { modelSizeBillions } from '../llm-client.js?v=18';
 import { installMockInnerLoreStorage } from './mock-storage-server.mjs';
 
 const storage = installMockInnerLoreStorage();

@@ -3,7 +3,7 @@ import test from 'node:test';
 
 import { createEmptyStore, mergeEntityOperations } from '../core.js';
 import { compileContext } from '../context-compiler.js';
-import { deriveSceneState } from '../scene.js?v=7';
+import { deriveSceneState } from '../scene.js?v=8';
 
 function harbourTown(playerAt) {
     const store = createEmptyStore('scene-location');

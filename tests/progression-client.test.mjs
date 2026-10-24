@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { validateProgressionPayload } from '../progression-client.js';
-import { outputParseDiagnostics } from '../output-codec.js?v=3';
+import { outputParseDiagnostics } from '../output-codec.js?v=4';
 import { buildProgressionRepairMessages } from '../progression-prompts.js';
 
 function payload(eventEvaluations = []) {

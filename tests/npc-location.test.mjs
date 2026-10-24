@@ -7,7 +7,7 @@ import {
     renderLoreContent,
     resolveLocationReference,
 } from '../core.js?v=48';
-import { deriveSceneState } from '../scene.js?v=7';
+import { deriveSceneState } from '../scene.js?v=8';
 import { buildMapModel, buildSceneModel, placeCharacters } from '../map-view.js?v=5';
 
 function worldStore() {

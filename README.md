@@ -220,6 +220,22 @@ Prepared material is narrator-only: it is listed under "Prepared for …" in the
 
 Settings are under **Game System**: the ledger and planner switches, their profiles (by default the ledger follows the curator profile and the planner the progression profile), how many places to prepare per reply, when a preparation goes stale, the longest wait for a destination, the game block budget, and extra instructions for each pass.
 
+## Private conversations: a quiet word, a text, or mind to mind
+
+A person's page (tap them in the HUD or a cast card) offers three ways to talk apart from the narration, and the **Phone** item in the menu bar lists every conversation, who can be reached and how, and the contacts you hold.
+
+- **Private chat** is a quiet word with someone who is here with you (the camera frame's "with you" list decides). Their spoken lines come back as plain dialogue with at most a short beat.
+- **Text** sends a message on the world's device to someone whose number or contact you have. Numbers are given in the story (the ledger records them) or in a conversation itself (a number someone texts you is added to your contacts at once).
+- **Mind** reaches someone mind to mind when you have the gift. A person with a gift of their own can feel the touch and shut you out; the thread closes until the story moves on.
+
+The first time you reach for a mind or a phone, the **ability judge** (the ledger's model) reads the character card, your persona, the person's lore and the recent story and settles it: your level of mind-speech, whether the person has a gift or a warded mind, whether a message device exists in this world, and which contacts the story has already handed you. The verdict is written into the game journal like any change (`ability.set`, `device.set`, `contact.add`), so a swipe or rebuild rewinds it, and the ledger updates it when the story grants or takes a gift, a number or a device (new ledger records ABILITY, CONTACT and DEVICE). Levels run 0-100: a gift is usable from 20 (novice), adept from 40, expert from 70, master from 90; below 20 it is latent. Gifts show on the person's page, under Gifts and skills in the inventory, and in the narrator packet (`Jet's gifts: …`, `Gifts of people here: …`, `Jet's phone: can reach …`).
+
+The person answers through the story's own connection: a short, in-character reply (one to three bubbles) from a prompt that carries their lore, their private mind, how they regard you, where they are and the last few story turns. On the fork's shell the request streams through the active connection (NovelAI's chat endpoint needs streaming); a text-completion story (Erato, Kayra) gets a transcript prompt instead. Only you type as your character; the person's words are theirs.
+
+When you close the conversation (Done, or back to the story), the story is told: one message per conversation, from that person, holding the transcript as plain `Name: line` text under a bracketed header, shown in the story log as a card of bubbles. The narrator, the curator and the ledger read it like any reply; the scene derivation leaves it alone, so texting someone does not put them in the room. Threads live in the chat's metadata (`innerlore_threads`) and travel with branches.
+
+Settings: Private Chat, Phone and Mind (on/off, reply temperature and length, extra instructions for private replies). Test hooks for the fork's UI harness live on `window.InnerLore.test` (stubbed replier and judge, threads, clean-up).
+
 ## Private minds
 
 Each NPC brain separates durable identity from the present reaction:

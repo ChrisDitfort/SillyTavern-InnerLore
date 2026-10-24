@@ -1,5 +1,5 @@
 import { cleanString } from './core.js?v=48';
-import { buildRepairMessages } from './prompts.js?v=9';
+import { buildRepairMessages } from './prompts.js?v=10';
 import { CURATOR_JSON_SCHEMA } from './structured-output.js';
 import {
     OUTPUT_FORMAT_DSL,
@@ -9,7 +9,7 @@ import {
     parseInnerLoreOutput,
     prepareOutputMessages,
     structuredRequestOptions,
-} from './output-codec.js?v=3';
+} from './output-codec.js?v=4';
 
 function context() {
     return SillyTavern.getContext();
