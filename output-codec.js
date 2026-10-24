@@ -1,4 +1,4 @@
-import { extractJsonObject } from './core.js?v=48';
+import { extractJsonObject } from './core.js?v=49';
 
 export const OUTPUT_FORMAT_JSON = 'json';
 export const OUTPUT_FORMAT_DSL = 'dsl';
@@ -359,18 +359,28 @@ function initialPayload(task) {
     return { proposal: null, reason: '', __proposalSeen: false, __reasonSeen: false };
 }
 
-function isTopLevelDeclaration(task, line) {
+const TOP_LEVEL_DECLARATIONS = new Map();
+
+/** The record-word pattern of a task, built once: the parser asks for it on every line and again in every salvage pass. */
+function topLevelDeclaration(task) {
+    let pattern = TOP_LEVEL_DECLARATIONS.get(task);
+    if (pattern) return pattern;
     if (task === 'curator') {
-        return /^(?:LOCATION|ITEM|CHARACTER|FACTION|ORGANIZATION|CREATURE|EVENT|CONCEPT|ENTITY|MIND)(?:\s+.+)?$/iu.test(line);
-    }
-    if (task === 'progression') {
-        return /^(?:TIME|GOAL|PROCESS|EVENT|EVALUATION)(?:\s+.+)?$/iu.test(line);
-    }
-    if (GAME_LIKE_TASKS.has(task)) {
+        pattern = /^(?:LOCATION|ITEM|CHARACTER|FACTION|ORGANIZATION|CREATURE|EVENT|CONCEPT|ENTITY|MIND)(?:\s+.+)?$/iu;
+    } else if (task === 'progression') {
+        pattern = /^(?:TIME|GOAL|PROCESS|EVENT|EVALUATION)(?:\s+.+)?$/iu;
+    } else if (GAME_LIKE_TASKS.has(task)) {
         const singletons = task === 'planner' ? 'CURRENCY|PURSE' : 'CURRENCY|PURSE|DEVICE';
-        return new RegExp(`^(?:${singletons}|${Object.keys(GAME_RECORDS[task]).join('|')})(?:\\s+(?!\\+?=).+)?$`, 'iu').test(line);
+        pattern = new RegExp(`^(?:${singletons}|${Object.keys(GAME_RECORDS[task]).join('|')})(?:\\s+(?!\\+?=).+)?$`, 'iu');
+    } else {
+        pattern = /^(?:PROPOSAL(?:\s+.+)?|NO_PROPOSAL|REASON\s*=\s*.+)$/iu;
     }
-    return /^(?:PROPOSAL(?:\s+.+)?|NO_PROPOSAL|REASON\s*=\s*.+)$/iu.test(line);
+    TOP_LEVEL_DECLARATIONS.set(task, pattern);
+    return pattern;
+}
+
+function isTopLevelDeclaration(task, line) {
+    return topLevelDeclaration(task).test(line);
 }
 
 /**

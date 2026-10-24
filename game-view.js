@@ -6,7 +6,7 @@
  * The planner's prepared material is narrator-only and never shown here.
  */
 
-import { canonicalNameKey, cleanString, escapeHtml, resolveLocationReference } from './core.js?v=48';
+import { canonicalNameKey, cleanString, escapeHtml, resolveLocationReference } from './core.js?v=49';
 import { gameOverview, normalizeGameState, placeRefOf, tradeOverview } from './game.js?v=4';
 
 const STYLE_ID = 'il_game_inline_styles_v3';

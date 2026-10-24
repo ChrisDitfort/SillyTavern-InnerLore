@@ -6,7 +6,7 @@ import {
     mergeEntityOperations,
     renderLoreContent,
     resolveLocationReference,
-} from '../core.js?v=48';
+} from '../core.js?v=49';
 import { deriveSceneState } from '../scene.js?v=8';
 import { buildMapModel, buildSceneModel, placeCharacters } from '../map-view.js?v=5';
 

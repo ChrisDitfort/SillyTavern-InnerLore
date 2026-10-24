@@ -6,7 +6,7 @@
  * becoming a compulsory repeated gesture, prop, phrase, or sentence pattern.
  */
 
-import { cleanString } from './core.js?v=48';
+import { cleanString } from './core.js?v=49';
 
 function edgeClip(value, maximumLength) {
     const text = cleanString(value, 30_000);

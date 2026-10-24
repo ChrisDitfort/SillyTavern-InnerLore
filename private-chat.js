@@ -6,7 +6,7 @@
  * of those replies, and the transcript the story receives when a conversation
  * closes. Nothing here touches the DOM or SillyTavern.
  */
-import { canonicalNameKey, cleanString, clipAtBoundary, curatedLocationOf, escapeHtml, normalizeEntityType, renderCompactEntity } from './core.js?v=48';
+import { canonicalNameKey, cleanString, clipAtBoundary, curatedLocationOf, escapeHtml, normalizeEntityType, renderCompactEntity } from './core.js?v=49';
 import {
     ABILITY_KEYS,
     USABLE_ABILITY_LEVEL,

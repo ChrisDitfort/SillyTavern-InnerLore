@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import { requestEventDirectorProposal } from '../event-director-client.js';
 import { requestJsonPatch } from '../llm-client.js';
+import { outputParseDiagnostics } from '../output-codec.js?v=5';
 import { requestProgressionPatch } from '../progression-client.js';
 
 const baseSettings = {
@@ -207,4 +208,67 @@ DONE`,
     assert.equal(result.proposal.activationVisibility, 'observable');
     assert.ok(result.parseDiagnostics.some(item => item.code === 'visibility_public_normalized'));
     assert.equal(calls.length, 1);
+});
+
+test('progression settles a missing acknowledgement locally instead of a repair call, on every profile', async () => {
+    const calls = installProfileMock([
+        `INNERLORE PROGRESSION 1
+TIME
+elapsed.minimum_seconds = 0
+elapsed.estimated_seconds = 0
+elapsed.maximum_seconds = 0
+confidence = 1
+basis = EMPTY_LIST
+completed_actions = EMPTY_LIST
+END
+EVALUATION alarm
+evaluated = TRUE
+reason = Nobody touched the bell.
+END
+DONE`,
+    ]);
+    const result = await requestProgressionPatch({ ...baseSettings, maintenanceOutputFormat: 'dsl' }, [
+        { role: 'system', content: 'Return one strict JSON object.' },
+        { role: 'user', content: 'Return the strict JSON patch now.' },
+    ], undefined, { expectedEventKeys: ['alarm', 'vault'] });
+
+    assert.equal(calls.length, 1, 'no repair request for an echo record');
+    assert.equal(result.repaired, false);
+    assert.deepEqual(result.payload.event_evaluations.map(item => item.key).sort(), ['alarm', 'vault']);
+    const filled = result.payload.event_evaluations.find(item => item.key === 'vault');
+    assert.equal(filled.evaluated, true);
+    assert.ok(outputParseDiagnostics(result.payload).some(item => item.code === 'acknowledgement_filled'), 'the fill is recorded as a diagnostic');
+});
+
+test('progression repairs a recognizable draft from the draft alone, without re-sending the source prompt', async () => {
+    const calls = installProfileMock([
+        // A document without its TIME record fails validation but is clearly a progression draft.
+        `INNERLORE PROGRESSION 1
+GOAL find_the_ledger
+owner = Mara
+status = active
+END
+DONE`,
+        `INNERLORE PROGRESSION 1
+TIME
+elapsed.minimum_seconds = 0
+elapsed.estimated_seconds = 0
+elapsed.maximum_seconds = 0
+confidence = 1
+basis = EMPTY_LIST
+completed_actions = EMPTY_LIST
+END
+DONE`,
+    ]);
+    const source = [
+        { role: 'system', content: 'Return one strict JSON object. (the long rules)' },
+        { role: 'user', content: 'PASSAGE: a very long transcript the repair must not carry again.' },
+    ];
+    const result = await requestProgressionPatch({ ...baseSettings, maintenanceOutputFormat: 'dsl' }, source, undefined, { expectedEventKeys: [] });
+
+    assert.equal(result.repaired, true);
+    assert.equal(calls.length, 2);
+    const repairMessages = calls[1][1];
+    assert.ok(!repairMessages.some(message => /a very long transcript/u.test(message.content)), 'the passage is not sent again');
+    assert.ok(repairMessages.some(message => /GOAL find_the_ledger/u.test(message.content)), 'the draft is what gets repaired');
 });

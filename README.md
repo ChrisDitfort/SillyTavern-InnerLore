@@ -393,6 +393,8 @@ The private per-chat state contains:
 - latent, scheduled, possibly-due, due, off-screen, revealed, and cancelled beats;
 - a bounded audit log and an independent processing watermark.
 
+Every supplied triggerable event must come back acknowledged (`EVALUATION <key>` with `evaluated = TRUE`). A missing, duplicate or unknown acknowledgement is settled locally as "not matched" and recorded as a diagnostic (`acknowledgement_filled`, `evaluation_dropped`), on every profile, not only assisted ones: an echo record is never worth a repair call. When a progression response does fail locally, the repair request carries the model's own draft and the validator's message, not the whole source prompt again, as long as the draft is recognizably a progression document (DSL header or JSON with a `time` object); only an unusable answer (prose, a refusal, a cut-off header) is repaired with the full prompt attached.
+
 The deterministic scheduler marks something definitely due only when the clock's minimum has passed the deadline's maximum. Overlapping uncertainty becomes possibly due. Player-required events can never be marked occurred off-screen or revealed by the engine. Off-screen simulation is narrator-only proposal state, not public canon; the ordinary curator adds it to lore only after story prose establishes it.
 
 ### Triggerable Event Editor

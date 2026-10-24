@@ -4,7 +4,7 @@
  * are shown to the player as buttons that fill the message box.
  */
 
-import { cleanString } from './core.js?v=48';
+import { cleanString } from './core.js?v=49';
 
 export const CHOICE_KINDS = Object.freeze(['go', 'talk', 'do', 'look']);
 export const CHOICES_EXTRA_KEY = 'inner_lore_choices';

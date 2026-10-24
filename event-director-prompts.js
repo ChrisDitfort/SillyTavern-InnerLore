@@ -1,13 +1,17 @@
-import { cleanString } from './core.js?v=48';
+import { cleanString } from './core.js?v=49';
 
 function boundedJson(value, maximum = 45_000) {
     const copy = JSON.parse(JSON.stringify(value ?? {}));
     let text = JSON.stringify(copy);
     if (text.length <= maximum) return text;
     copy.diagnostics = { ...(copy.diagnostics || {}), promptTruncated: true };
+    // Records are dropped by their own serialized size; the whole state was
+    // re-serialized after every single pop before (quadratic on a 45k prompt).
+    let length = text.length;
     for (const key of ['relations', 'recentProposals', 'existingDefinitions', 'sources']) {
         const records = Array.isArray(copy[key]) ? copy[key] : [];
-        while (records.length && (text = JSON.stringify(copy)).length > maximum) records.pop();
+        while (records.length && length > maximum) length -= JSON.stringify(records.pop()).length + 1;
+        if (length <= maximum) break;
     }
     text = JSON.stringify(copy);
     return text.length <= maximum

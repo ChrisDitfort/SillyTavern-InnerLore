@@ -1,5 +1,5 @@
-import { cleanString } from './core.js?v=48';
-import { buildRepairMessages } from './prompts.js?v=10';
+import { cleanString } from './core.js?v=49';
+import { buildRepairMessages } from './prompts.js?v=11';
 import { CURATOR_JSON_SCHEMA } from './structured-output.js';
 import {
     OUTPUT_FORMAT_DSL,
@@ -9,7 +9,7 @@ import {
     parseInnerLoreOutput,
     prepareOutputMessages,
     structuredRequestOptions,
-} from './output-codec.js?v=4';
+} from './output-codec.js?v=5';
 
 function context() {
     return SillyTavern.getContext();
@@ -24,8 +24,27 @@ export function shell() {
  * The shell's OpenAI-compatible connections in the connection-manager profile
  * shape the pickers and provider budgets already understand.
  */
+/**
+ * The fork's connection records. The shell publishes its API after the
+ * extensions have initialised, so before that moment (the first picker fill,
+ * which also saves) the records are read from the settings themselves;
+ * otherwise the saved pick is compared against the wrong list, found missing,
+ * and replaced by a legacy default on every page load.
+ */
+export function shellConnections() {
+    const live = shell()?.getConnections?.();
+    if (Array.isArray(live)) return live;
+    const stored = context().extensionSettings?.innerlore_shell?.connections;
+    return Array.isArray(stored) ? stored : [];
+}
+
+/** True under the fork, whether or not its API has been published yet. */
+export function underShell() {
+    return Boolean(shell()) || Boolean(context().extensionSettings?.innerlore_shell);
+}
+
 export function shellConnectionProfiles() {
-    const connections = shell()?.getConnections?.() || [];
+    const connections = shellConnections();
     return connections
         .filter(connection => connection?.id && connection.mode === 'cc' && connection.background !== false)
         .map(connection => ({
@@ -58,7 +77,7 @@ function shellRequestService(ctx) {
     if (!shell()) return null;
     return {
         async sendRequest(profileId, prompt, maxTokens, custom = {}, overridePayload = {}) {
-            const connection = shell().getConnection?.(profileId);
+            const connection = shell().getConnection?.(profileId) || shellConnections().find(entry => entry?.id === profileId);
             if (!connection) throw new Error('The selected InnerLore connection no longer exists. Pick one under InnerLore → Background Model.');
             if (connection.mode !== 'cc') throw new Error(`${connection.name} is a NovelAI connection; background passes need an OpenAI-compatible one.`);
             if (!ctx.ChatCompletionService?.processRequest) throw new Error('SillyTavern chat completion service is unavailable.');
@@ -81,7 +100,7 @@ function shellRequestService(ctx) {
 
 export function listConnectionProfiles() {
     const ctx = context();
-    if (shell()) return shellConnectionProfiles();
+    if (underShell()) return shellConnectionProfiles();
     const profiles = ctx.extensionSettings?.connectionManager?.profiles;
     if (!Array.isArray(profiles)) return [];
     try {
@@ -220,7 +239,13 @@ export function resetTelemetry() {
 
 function estimateMessageChars(messages) {
     try {
-        return JSON.stringify(messages || []).length;
+        // The content lengths plus a little per message for role and quoting:
+        // close enough for telemetry, without serializing a 100k prompt twice.
+        return (Array.isArray(messages) ? messages : []).reduce((total, message) => {
+            const content = message?.content;
+            const text = typeof content === 'string' ? content : JSON.stringify(content ?? '');
+            return total + text.length + 40;
+        }, 2);
     } catch {
         return 0;
     }

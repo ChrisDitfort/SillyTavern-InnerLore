@@ -3274,18 +3274,37 @@ export function textMentions(text, names) {
     return cleanTextMentions(cleanString(text, 200_000), names);
 }
 
+const MENTION_PATTERNS = new Map();
+
+/**
+ * One whole-word pattern for a set of names, kept between calls: the mention
+ * scans run once per entity per pass over passages of up to 200k characters,
+ * and used to compile one regex per name per scan.
+ */
+function mentionPattern(names) {
+    const key = names.join('\u0000');
+    if (MENTION_PATTERNS.has(key)) return MENTION_PATTERNS.get(key);
+    let pattern = null;
+    try {
+        const alternation = names.map(escapeRegExp).filter(Boolean).sort((a, b) => b.length - a.length).join('|');
+        pattern = alternation ? new RegExp(`(^|[^\\p{L}\\p{N}])(?:${alternation})(?=$|[^\\p{L}\\p{N}])`, 'iu') : null;
+    } catch {
+        pattern = null;
+    }
+    if (MENTION_PATTERNS.size >= 4_000) MENTION_PATTERNS.clear();
+    MENTION_PATTERNS.set(key, pattern);
+    return pattern;
+}
+
 /** textMentions for text that has already been through cleanString. */
 export function cleanTextMentions(source, names) {
     if (!source) return false;
-    return uniqueStrings(names, 40).some(name => {
-        const escaped = escapeRegExp(name);
-        if (!escaped) return false;
-        try {
-            return new RegExp(`(^|[^\\p{L}\\p{N}])${escaped}(?=$|[^\\p{L}\\p{N}])`, 'iu').test(source);
-        } catch {
-            return source.toLocaleLowerCase().includes(name.toLocaleLowerCase());
-        }
-    });
+    const unique = uniqueStrings(names, 40).filter(name => escapeRegExp(name));
+    if (!unique.length) return false;
+    const pattern = mentionPattern(unique);
+    if (pattern) return pattern.test(source);
+    const lower = source.toLocaleLowerCase();
+    return unique.some(name => lower.includes(name.toLocaleLowerCase()));
 }
 
 const GENERIC_IDENTITY_PREFIXES = new Set([
@@ -3373,10 +3392,12 @@ export function findUnresolvedIdentityPlaceholders(entities, recentText, maximum
 export function refreshMentionRecency(store, passage, messageIndex, options = {}) {
     const index = Number.isInteger(messageIndex) ? messageIndex : -1;
     const result = { entities: 0, brains: 0 };
+    // The passage is normalized once, not once per record.
+    const source = cleanString(passage, 200_000);
 
     if (options.entities !== false) {
         for (const record of Object.values(store?.entities || {})) {
-            if (!textMentions(passage, [record.name, ...(record.aliases || []), ...(record.keys || [])])) continue;
+            if (!cleanTextMentions(source, [record.name, ...(record.aliases || []), ...(record.keys || [])])) continue;
             const parsed = Number(record.lastSeenMessage);
             const previous = Number.isFinite(parsed) ? parsed : -1;
             record.lastSeenMessage = Math.max(previous, index);
@@ -3386,7 +3407,7 @@ export function refreshMentionRecency(store, passage, messageIndex, options = {}
 
     if (options.brains !== false) {
         for (const brain of Object.values(store?.brains || {})) {
-            if (!textMentions(passage, [brain.name, ...(brain.aliases || [])])) continue;
+            if (!cleanTextMentions(source, [brain.name, ...(brain.aliases || [])])) continue;
             const parsed = Number(brain.lastSeenMessage);
             const previous = Number.isFinite(parsed) ? parsed : -1;
             brain.lastSeenMessage = Math.max(previous, index);
@@ -3445,14 +3466,17 @@ export function rankRelevantEntities(entities, recentText, options = {}) {
         ...(scene?.objects || []).map(item => item.id),
     ].filter(Boolean));
     const hasStrongScene = Boolean(scene?.location || scene?.participants?.length || latestText);
+    // Each text is normalized once for all records (latestText and focusText already were).
+    const recentSource = cleanString(recentText, 200_000);
+    const recalledSource = cleanString(options.recalledText, 200_000);
     return Object.values(entities || {})
         .filter(record => record?.enabled !== false)
         .map(record => {
             const references = [record.name, ...(record.aliases || []), ...(record.keys || [])];
-            const latestMentioned = textMentions(latestText, references);
-            const focusMentioned = textMentions(focusText, references);
-            const mentioned = textMentions(recentText, references);
-            const recalled = textMentions(options.recalledText, references);
+            const latestMentioned = cleanTextMentions(latestText, references);
+            const focusMentioned = cleanTextMentions(focusText, references);
+            const mentioned = cleanTextMentions(recentSource, references);
+            const recalled = cleanTextMentions(recalledSource, references);
             const age = currentIndex - (Number(record.lastSeenMessage) || 0);
             const recent = age >= 0 && age <= recencyMessages;
             const unresolved = Boolean(record.unresolved?.length);
@@ -4428,11 +4452,19 @@ export function hashString(value) {
     return (hash >>> 0).toString(16).padStart(8, '0');
 }
 
+const FINGERPRINTS = new WeakMap();
+
+/** A message's fingerprint, remembered on the message object: a pass snapshots the same range several times. */
 export function messageFingerprint(message) {
     const role = message?.is_system && !isSummaryceptionGhosted(message)
         ? 'system'
         : (message?.is_user ? 'user' : 'assistant');
-    return hashString(`${role}\n${cleanString(message?.mes, 100_000)}`);
+    const cacheable = Boolean(message) && typeof message === 'object';
+    const cached = cacheable ? FINGERPRINTS.get(message) : null;
+    if (cached && cached.role === role && cached.mes === message.mes) return cached.fingerprint;
+    const fingerprint = hashString(`${role}\n${cleanString(message?.mes, 100_000)}`);
+    if (cacheable) FINGERPRINTS.set(message, { role, mes: message.mes, fingerprint });
+    return fingerprint;
 }
 
 /** Text used only as a lower-priority retrieval hint for structured lore. */

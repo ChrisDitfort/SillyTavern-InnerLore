@@ -158,7 +158,7 @@ test('a proposal keyed by the record word or naming ids with type prefixes is no
 });
 
 test('a proposal whose consequences were written as several += lines (Gemma, 2026-10-24) is accepted', async () => {
-    const { parseInnerLoreOutput } = await import('../output-codec.js?v=4');
+    const { parseInnerLoreOutput } = await import('../output-codec.js?v=5');
     const raw = `INNERLORE EVENT_DIRECTOR 1
 PROPOSAL hunger_escalation
 title = Amy's Hunger Manifests

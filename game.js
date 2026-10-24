@@ -22,7 +22,7 @@ import {
     resolveLocationReference,
     shortCharacterReferences,
     uniqueStrings,
-} from './core.js?v=48';
+} from './core.js?v=49';
 
 export const GAME_VERSION = 1;
 

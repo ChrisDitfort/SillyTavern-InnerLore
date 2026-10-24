@@ -5,7 +5,7 @@
  * punctuation. Pure module: no DOM, no audio.
  */
 
-import { canonicalNameKey, cleanString, normalizeName } from './core.js?v=48';
+import { canonicalNameKey, cleanString, normalizeName } from './core.js?v=49';
 
 const QUOTE_PAIRS = [['"', '"'], ['“', '”'], ['«', '»'], ['「', '」']];
 const SPEECH_VERBS = 'thought|thinks|think|wondered|wonders|mused|muses|realised|realized|decided|decides|reflected|reminded (?:himself|herself|themself)|told (?:himself|herself|themself)|said|says|say|asked|asks|ask|replied|replies|reply|answered|answers|whispered|whispers|murmured|murmurs|muttered|mutters|hissed|hisses|snapped|snaps|called|calls|cried|cries|shouted|shouts|yelled|yells|roared|roars|growled|growls|laughed|laughs|chuckled|chuckles|sighed|sighs|breathed|breathes|added|adds|went on|continued|continues|offered|offers|admitted|admits|agreed|agrees|insisted|insists|warned|warns|told|tells|began|begins|managed|manages|grunted|grunts|barked|barks|purred|purrs|sang|sings|spat|spits|drawled|drawls|wondered|wonders|repeated|repeats|pressed|presses|demanded|demands|observed|observes|noted|notes|remarked|remarks|announced|announces|declared|declares|promised|promises|pleaded|pleads|protested|protests|conceded|concedes|explained|explains|greeted|greets|ventured|ventures|exclaimed|exclaims|intoned|intones|rasped|rasps|crooned|croons|mumbled|mumbles|stammered|stammers|blurted|blurts|scoffed|scoffs|sneered|sneers|teased|teases|urged|urges|prompted|prompts|corrected|corrects|finished|finishes|interrupted|interrupts|cut in|put in|chimed in';

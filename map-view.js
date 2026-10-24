@@ -13,7 +13,7 @@ import {
     cleanString,
     curatedLocationOf,
     resolveLocationReference,
-} from './core.js?v=48';
+} from './core.js?v=49';
 import { deriveSceneState } from './scene.js?v=8';
 
 const MAP_VIEWBOX = { width: 1000, height: 700 };

@@ -5,10 +5,10 @@
  * LDBridge, by default the server SillyTavern's own image generation uses),
  * and the picture is kept per chat in the chat's metadata, keyed by name.
  */
-import { canonicalNameKey, cleanString, hashString } from './core.js?v=48';
+import { canonicalNameKey, cleanString, hashString } from './core.js?v=49';
 import { normalizeGameState } from './game.js?v=4';
 import { gameRequestSettings } from './game-client.js?v=2';
-import { sendInnerLoreRequest } from './llm-client.js?v=18';
+import { sendInnerLoreRequest } from './llm-client.js?v=19';
 
 export const PORTRAIT_METADATA_KEY = 'innerlore_portraits';
 export const PORTRAIT_DEFAULTS = Object.freeze({

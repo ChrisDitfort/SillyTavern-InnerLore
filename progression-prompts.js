@@ -1,5 +1,5 @@
 import { requiredSweep } from './curator-hints.js?v=1';
-import { canonicalNameKey, cleanString } from './core.js?v=48';
+import { canonicalNameKey, cleanString } from './core.js?v=49';
 import { extractDeterministicElapsedAnchors, progressionAgentSnapshot } from './progression.js';
 
 function clip(value, maximum) {

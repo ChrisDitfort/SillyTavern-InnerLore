@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { createEmptyStore, mergeEntityOperations, passageProperNames } from '../core.js?v=48';
+import { createEmptyStore, mergeEntityOperations, passageProperNames } from '../core.js?v=49';
 import { buildCuratorHints, identityHints } from '../curator-hints.js?v=1';
 
 function harbourStore() {

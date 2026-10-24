@@ -5,7 +5,7 @@
  * conversation as bubbles with a composer. The screen knows nothing about
  * models or the story: index.js hands it a model and takes its callbacks.
  */
-import { escapeHtml } from './core.js?v=48';
+import { escapeHtml } from './core.js?v=49';
 import { CHANNELS } from './private-chat.js?v=1';
 
 const STYLE_ID = 'il_phone_inline_styles_v1';

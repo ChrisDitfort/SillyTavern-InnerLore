@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+    chooseDefaultProfileId,
+    listConnectionProfiles,
     backgroundInFlightCount,
     connectionFallbackProfileIds,
     extractResponseText,
@@ -394,4 +396,32 @@ test('story requests on limited providers get thinking off and the preset sample
     assert.deepEqual(storyProviderBodyLines('nano-gpt.com', 'reasoning_effort: medium', { custom_model: 'z-ai/glm-5.3-flash-uncensored' }), [], 'a connection\'s own effort line wins');
     assert.deepEqual(storyProviderBodyLines('nano-gpt.com', '', { custom_model: 'nousresearch/hermes-4-405b', top_k: 40 }), ['top_k: 40'], 'other NanoGPT models get only the sampling lines');
     assert.deepEqual(storyProviderBodyLines('novelai.net', 'top_k: 40', {}, 'top_k: 250\nrepetition_penalty: 1.1\nextra:\n  a: 1'), ['repetition_penalty: 1.1', 'extra:', '  a: 1'], "the user's YAML replaces the defaults, minus keys already sent");
+});
+
+test('under the fork the connection pickers read the shell records from settings before the shell API is published', () => {
+    const previousWindow = globalThis.window;
+    const previousTavern = globalThis.SillyTavern;
+    try {
+        globalThis.window = {};
+        globalThis.SillyTavern = {
+            getContext: () => ({
+                extensionSettings: {
+                    innerlore_shell: {
+                        connections: [
+                            { id: 'legacy-featherless', name: 'Featherless (InnerLore)', mode: 'cc', url: 'https://api.featherless.ai/v1', model: 'gemma', background: true },
+                            { id: 'nano-glm', name: 'NanoGPT GLM', mode: 'cc', url: 'https://nano-gpt.com/api/subscription/v1', model: 'glm', background: true },
+                            { id: 'erato', name: 'Erato', mode: 'novel', background: false },
+                        ],
+                    },
+                    connectionManager: { profiles: [{ id: 'legacy-featherless', name: 'Featherless (InnerLore)' }], selectedProfile: 'legacy-featherless' },
+                },
+            }),
+        };
+        assert.deepEqual(listConnectionProfiles().map(profile => profile.id), ['legacy-featherless', 'nano-glm']);
+        assert.equal(chooseDefaultProfileId('nano-glm'), 'nano-glm', 'the saved pick survives the first fill');
+        assert.equal(chooseDefaultProfileId('gone'), 'legacy-featherless');
+    } finally {
+        globalThis.window = previousWindow;
+        globalThis.SillyTavern = previousTavern;
+    }
 });

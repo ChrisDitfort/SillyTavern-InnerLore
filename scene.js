@@ -18,7 +18,7 @@ import {
     shortCharacterReferences,
     textMentions,
     uniqueStrings,
-} from './core.js?v=48';
+} from './core.js?v=49';
 
 const ABSENT_STATE = /\b(?:absent|away|departed|elsewhere|left\s+(?:the|this|that|the\s+scene)|gone\s+home|went\s+home|headed\s+home|returned\s+home|on\s+(?:his|her|their|its)\s+way\s+home|no\s+longer\s+(?:here|present)|not\s+present|off[ -]?screen|outside\s+the\s+scene)\b/iu;
 const PLACE_HEAD_NOUNS = new Set([

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { createEmptyStore, mergeEntityOperations } from '../core.js?v=48';
+import { createEmptyStore, mergeEntityOperations } from '../core.js?v=49';
 import {
     ABILITY_KEYS,
     abilityLevel,
@@ -24,7 +24,7 @@ import {
 } from '../game.js?v=4';
 import { buildAbilityJudgeMessages, buildLedgerMessages, ledgerStateView } from '../game-prompts.js?v=4';
 import { gameRequestSettings, validateGamePayload } from '../game-client.js?v=2';
-import { dslOutputContract, parseInnerLoreDsl, parseInnerLoreOutput, prepareOutputMessages, stringifyInnerLoreDsl } from '../output-codec.js?v=4';
+import { dslOutputContract, parseInnerLoreDsl, parseInnerLoreOutput, prepareOutputMessages, stringifyInnerLoreDsl } from '../output-codec.js?v=5';
 
 function world() {
     const store = createEmptyStore('abilities');

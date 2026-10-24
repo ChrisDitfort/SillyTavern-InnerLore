@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { validateProgressionPayload } from '../progression-client.js';
-import { outputParseDiagnostics } from '../output-codec.js?v=4';
+import { outputLooksLikeDraft, validateProgressionPayload } from '../progression-client.js';
+import { outputParseDiagnostics } from '../output-codec.js?v=5';
 import { buildProgressionRepairMessages } from '../progression-prompts.js';
 
 function payload(eventEvaluations = []) {
@@ -275,4 +275,12 @@ test('repair prompts retain the original passage and definitions', () => {
     assert.match(repaired[3].content, /Re-evaluate against the original completed passage and definitions/u);
     assert.match(repaired[3].content, /Expected keys: \["alarm"\]/u);
     assert.match(repaired[3].content, /Allowed match fields by event/u);
+});
+
+test('a progression output counts as a repairable draft only when it carries progression records', () => {
+    assert.equal(outputLooksLikeDraft('INNERLORE PROGRESSION 1\nTIME\nelapsed.minimum_seconds = 10\nelapsed.estimated_seconds = 20\nelapsed.maximum_seconds = 30\nEND\nDONE'), true);
+    assert.equal(outputLooksLikeDraft('```json\n{"time":{"elapsed":{"minimum_seconds":0}},"goals":[],"processes":[],"events":[],"event_evaluations":[]}\n```'), true);
+    assert.equal(outputLooksLikeDraft('I am sorry, I cannot continue this story.'), false);
+    assert.equal(outputLooksLikeDraft('INNERLORE PROGRESSION 1'), false);
+    assert.equal(outputLooksLikeDraft(''), false);
 });

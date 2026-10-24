@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { createEmptyStore, mergeEntityOperations } from '../core.js?v=48';
+import { createEmptyStore, mergeEntityOperations } from '../core.js?v=49';
 import { applyGameOperations, createGameState, gameContext, normalizeGameRecords } from '../game.js?v=4';
 import {
     buildPortraitMessages,
@@ -124,7 +124,7 @@ test('portraits are drawn one at a time; a failure waits, a dead server pauses t
 });
 
 test('portrait files are named for their chat and told apart exactly', async () => {
-    const { hashString } = await import('../core.js?v=48');
+    const { hashString } = await import('../core.js?v=49');
     const { chatPortraitFiles, isLegacyPortraitFileOf, ownsPortraitFile, portraitFileStem } = await import('../portrait.js');
     // Renamed chats carry whatever name the player gave them: one may begin like another.
     const chat = 'Tavern';

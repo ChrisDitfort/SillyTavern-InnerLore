@@ -9,7 +9,7 @@
  * Pure module: no SillyTavern or DOM dependencies.
  */
 
-import { cleanString, normalizeName } from './core.js?v=48';
+import { cleanString, normalizeName } from './core.js?v=49';
 import {
     activeItems,
     applyGameOperations,

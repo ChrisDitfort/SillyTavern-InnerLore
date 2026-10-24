@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { createEmptyStore, mergeEntityOperations } from '../core.js?v=48';
+import { createEmptyStore, mergeEntityOperations } from '../core.js?v=49';
 import { applyGameOperations, createGameState, gameContext, normalizeGameRecords, renderGamePacket } from '../game.js?v=4';
 import {
     ACTION_SOURCE,

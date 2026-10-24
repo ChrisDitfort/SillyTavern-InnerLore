@@ -1,4 +1,4 @@
-import { sendInnerLoreRequest } from './llm-client.js?v=18';
+import { sendInnerLoreRequest } from './llm-client.js?v=19';
 import { buildGameRepairMessages } from './game-prompts.js?v=4';
 import {
     escalateRepairSettings,
@@ -6,7 +6,7 @@ import {
     outputParseDiagnostics,
     parseInnerLoreOutput,
     prepareOutputMessages,
-} from './output-codec.js?v=4';
+} from './output-codec.js?v=5';
 
 const LIST_FIELDS = Object.freeze({
     game: ['objects', 'money', 'prices', 'standings', 'reputation', 'deaths', 'abilities', 'contacts'],

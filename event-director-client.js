@@ -1,4 +1,4 @@
-import { sendInnerLoreRequest } from './llm-client.js?v=18';
+import { sendInnerLoreRequest } from './llm-client.js?v=19';
 import { validateEventDirectorPayload } from './event-director.js?v=3';
 import { buildEventDirectorRepairMessages } from './event-director-prompts.js';
 import { EVENT_DIRECTOR_JSON_SCHEMA } from './structured-output.js';
@@ -9,7 +9,7 @@ import {
     parseInnerLoreOutput,
     prepareOutputMessages,
     structuredRequestOptions,
-} from './output-codec.js?v=4';
+} from './output-codec.js?v=5';
 
 function requestSettings(settings) {
     return {

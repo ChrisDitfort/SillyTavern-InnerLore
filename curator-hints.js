@@ -2,7 +2,7 @@
 // progression engine: who is still tracked by a descriptor, which proper names
 // in the passage match no record, and the amounts, times and commitments the
 // passage states. Pure functions over the store and the passage text.
-import { passageProperNames, unnamedDescriptorPeople } from './core.js?v=48';
+import { passageProperNames, unnamedDescriptorPeople } from './core.js?v=49';
 import { amountMentions, normalizeGameState } from './game.js?v=4';
 
 const TIME_PATTERN = /\b(?:at|by|before|after|until|till|come|around|near)\s+(?:dawn|first light|sunrise|sunup|noon|midday|dusk|sundown|sunset|nightfall|midnight|the (?:\w+ )?bell|the (?:morning|evening|afternoon|night)|the hour|\d+ o'?clock|the tide|high tide|low tide|the turn of the tide)\b|\b(?:tonight|tomorrow|at first light|by morning|next (?:morning|day|week|tide)|in (?:an|one|two|three|\d+) (?:hour|hours|day|days|week|weeks)|within the hour|in a quarter hour|a quarter hour)\b/giu;

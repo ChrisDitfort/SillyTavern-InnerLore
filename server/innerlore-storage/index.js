@@ -16,6 +16,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { spawn } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
 
 const DEFAULT_RELATIVE_DB = ['data', 'worlds', 'innerlore-storage.db'];
@@ -106,6 +107,30 @@ export function init(router, args) {
     // and a page served over HTTPS both hear it. INNERLORE_TTS_URL overrides
     // the default http://127.0.0.1:8778.
     const ttsBase = () => String(process.env.INNERLORE_TTS_URL || 'http://127.0.0.1:8778').replace(/\/+$/u, '');
+    // The voice server dies with the terminal that started it or under memory
+    // pressure, and the narration then stalls until someone notices. When
+    // INNERLORE_TTS_RESTART names the command that starts it (the launcher
+    // script sets it), a refused connection starts it again, at most once
+    // every 90 s; the page's next probe finds it up.
+    let ttsRestartAt = 0;
+    const ttsUnreachable = error => /ECONNREFUSED|ECONNRESET|ENOTFOUND|fetch failed/u.test(String(error?.cause?.code || error?.cause?.message || error?.message || ''));
+    const restartTts = () => {
+        const command = String(process.env.INNERLORE_TTS_RESTART || '').trim();
+        if (!command || Date.now() - ttsRestartAt < 90_000) return false;
+        ttsRestartAt = Date.now();
+        console.warn(`[innerlore-storage] voice server not reachable at ${ttsBase()}; starting it again`);
+        try {
+            const termuxShell = '/data/data/com.termux/files/usr/bin/sh';
+            const shell = process.env.SHELL || (fs.existsSync(termuxShell) ? termuxShell : '/bin/sh');
+            const child = spawn(shell, ['-c', command], { detached: true, stdio: 'ignore' });
+            child.on('error', error => console.warn('[innerlore-storage] voice server restart failed:', error?.message || error));
+            child.unref();
+            return true;
+        } catch (error) {
+            console.warn('[innerlore-storage] voice server restart failed:', error?.message || error);
+            return false;
+        }
+    };
     // External providers (the fork's services): the key is read from the
     // user's secret store on the server, so it never travels to the page.
     const readSecretValue = (request, key, id) => {
@@ -146,6 +171,7 @@ export function init(router, args) {
             const payload = await upstream.json();
             return sendData(response, { ...payload, url: ttsBase() });
         } catch (error) {
+            if (ttsUnreachable(error)) restartTts();
             return sendError(response, 503, `Voice server not reachable at ${ttsBase()}: ${error?.message || error}`, 'tts_unavailable');
         }
     });
@@ -198,6 +224,7 @@ export function init(router, args) {
             response.setHeader('Cache-Control', 'no-store');
             return response.status(200).send(audio);
         } catch (error) {
+            if (ttsUnreachable(error)) restartTts();
             return sendError(response, 503, `Voice server not reachable at ${ttsBase()}: ${error?.message || error}`, 'tts_unavailable');
         }
     });

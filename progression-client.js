@@ -1,5 +1,5 @@
-import { canonicalNameKey } from './core.js?v=48';
-import { sendInnerLoreRequest } from './llm-client.js?v=18';
+import { canonicalNameKey } from './core.js?v=49';
+import { sendInnerLoreRequest } from './llm-client.js?v=19';
 import { buildProgressionRepairMessages } from './progression-prompts.js';
 import { PROGRESSION_JSON_SCHEMA } from './structured-output.js';
 import {
@@ -11,7 +11,7 @@ import {
     parseInnerLoreOutput,
     prepareOutputMessages,
     structuredRequestOptions,
-} from './output-codec.js?v=4';
+} from './output-codec.js?v=5';
 
 function progressionRequestSettings(settings) {
     const dedicatedProfile = settings.progressionConnectionProfileId || settings.connectionProfileId;
@@ -218,13 +218,23 @@ function reconcileAcknowledgements(payload, expectedEventKeys, diagnostics) {
     payload.event_evaluations = kept;
 }
 
+/** A reply that already carries progression records, in DSL or JSON, is a draft the model can correct without the prompt. */
+export function outputLooksLikeDraft(output) {
+    const text = String(output || '');
+    if (text.trim().length < 80) return false;
+    return /INNERLORE\s+PROGRESSION\b/iu.test(text) || /^\s*(?:```[a-z]*\s*)?\{[\s\S]*"time"/u.test(text);
+}
+
 export async function requestProgressionPatch(settings, messages, signal, options = {}) {
     const requestSettings = progressionRequestSettings(settings);
     requestSettings.telemetryKind = 'progression';
+    // A missing or malformed acknowledgement is settled locally as "not
+    // matched" for every profile, not only assisted ones: a repair call for
+    // an echo record is the most expensive way to learn nothing happened.
     const validationOptions = {
         discardImpossibleMatches: true,
         lenientMatches: true,
-        lenientAcknowledgements: Boolean(options.assisted),
+        lenientAcknowledgements: true,
         ...options,
     };
     const format = normalizeOutputFormat(settings.maintenanceOutputFormat);
@@ -249,9 +259,13 @@ export async function requestProgressionPatch(settings, messages, signal, option
     } catch (firstError) {
         if (settings.repairMalformedJson === false) throw firstError;
         const repairSettings = escalateRepairSettings(requestSettings, firstError, firstOutput);
+        // An output that is recognizably a progression document is repaired
+        // from itself, the way the curator's is; the full source prompt (the
+        // passage, every record and definition, often 25k+ tokens) goes along
+        // only when the output is not usable as a draft at all.
         const repairMessages = buildProgressionRepairMessages(firstOutput, {
             ...validationOptions,
-            sourceMessages: requestMessages,
+            sourceMessages: outputLooksLikeDraft(firstOutput) ? [] : requestMessages,
         });
         repairMessages.at(-1).content += ` The local parser or validator error was: ${String(firstError?.message || firstError).slice(0, 1_000)}`;
         const preparedRepairMessages = prepareOutputMessages(repairMessages, { format, task: 'progression' });

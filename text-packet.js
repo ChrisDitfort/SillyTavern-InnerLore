@@ -7,7 +7,7 @@
  * this carries only what is true now and what the people present want, none
  * of the tagged sections and instructions a chat model gets.
  */
-import { canonicalNameKey, cleanString, clipAtBoundary } from './core.js?v=48';
+import { canonicalNameKey, cleanString, clipAtBoundary } from './core.js?v=49';
 
 const TEXT_COMPLETION_APIS = new Set(['novel', 'textgenerationwebui', 'kobold', 'koboldhorde']);
 

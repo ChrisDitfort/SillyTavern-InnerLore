@@ -35,7 +35,7 @@ import {
     uniqueStrings,
     normalizeEntityType,
     curatedLocationOf,
-} from './core.js?v=48';
+} from './core.js?v=49';
 import { compileContext } from './context-compiler.js?v=7';
 import { deriveCameraFrame, deriveSceneState } from './scene.js?v=8';
 import {
@@ -87,7 +87,7 @@ import {
     providerHasRoom,
     storyCost,
     storyProvider,
-} from './llm-client.js?v=18';
+} from './llm-client.js?v=19';
 import {
     deleteInnerLorebooksForChat,
     openInnerLorebook,
@@ -101,7 +101,7 @@ import {
     formatTranscript,
     insufficientResponseCap,
     planNarratorPromptDelivery,
-} from './prompts.js?v=10';
+} from './prompts.js?v=11';
 import { compileTriggerEventDeliveryPreview } from './event-delivery.js?v=2';
 import { requestEventDirectorProposal } from './event-director-client.js?v=3';
 import { buildEventDirectorMessages } from './event-director-prompts.js';
@@ -371,6 +371,10 @@ async function findActivePromptOrder() {
     return Array.isArray(order?.order) ? order.order : null;
 }
 
+const MAIN_PROFILE_KEY = 'connectionProfileId';
+const FALLBACK_PROFILE_KEYS = ['fallbackConnectionProfileId', 'progressionFallbackConnectionProfileId'];
+const PASS_PROFILE_KEYS = ['progressionConnectionProfileId', 'gameConnectionProfileId', 'plannerConnectionProfileId', 'mindsConnectionProfileId'];
+
 /**
  * Under the fork's shell the narrator prompt is edited per API connection
  * (Settings → API), so the extension's own template editor steps aside.
@@ -385,22 +389,29 @@ function applyShellIntegration() {
     // fallback, which every pass then shares.
     const profileMap = ctx.extensionSettings?.innerlore_shell?.profileMap || {};
     let changed = false;
-    for (const key of ['connectionProfileId', 'fallbackConnectionProfileId']) {
+    for (const key of [MAIN_PROFILE_KEY, ...FALLBACK_PROFILE_KEYS, ...PASS_PROFILE_KEYS]) {
         const mapped = profileMap[settings[key]];
         if (mapped && settings[key] !== mapped) {
             settings[key] = mapped;
             changed = true;
         }
     }
-    for (const key of ['progressionConnectionProfileId', 'progressionFallbackConnectionProfileId', 'gameConnectionProfileId', 'plannerConnectionProfileId', 'mindsConnectionProfileId']) {
-        if (settings[key]) {
-            settings[key] = '';
-            changed = true;
+    // Earlier shell builds collapsed every pass onto the one background
+    // connection and hid the per-pass pickers, and a hidden picker could keep
+    // a stale pick (the progression pass stayed on a connection the user had
+    // long moved away from). Once: every pass follows the background
+    // connection again, and the pickers are back for real choices.
+    if (settings.shellPassPickers !== 1) {
+        for (const key of [...FALLBACK_PROFILE_KEYS.slice(1), ...PASS_PROFILE_KEYS]) {
+            if (settings[key]) settings[key] = '';
         }
+        settings.shellPassPickers = 1;
+        changed = true;
     }
     const known = listConnectionProfiles();
-    if (settings.connectionProfileId && !known.some(profile => profile.id === settings.connectionProfileId)) {
-        settings.connectionProfileId = known[0]?.id || '';
+    for (const key of [MAIN_PROFILE_KEY, ...FALLBACK_PROFILE_KEYS, ...PASS_PROFILE_KEYS]) {
+        if (!settings[key] || known.some(profile => profile.id === settings[key])) continue;
+        settings[key] = key === MAIN_PROFILE_KEY ? (known[0]?.id || '') : '';
         changed = true;
     }
     if (changed) saveSettings();
@@ -417,19 +428,48 @@ function applyShellIntegration() {
     };
     relabel('il_connection_profile', 'Background connection');
     relabel('il_fallback_connection_profile', 'Fallback connection after transient failures');
+    relabel('il_minds_profile', 'NPC minds connection');
+    relabel('il_progression_profile', 'World progression connection');
+    relabel('il_progression_fallback_profile', 'Progression fallback connection after transient failures');
+    relabel('il_game_profile', 'Game ledger connection');
+    relabel('il_planner_profile', 'Scene planner connection');
     const sourceOption = document.querySelector('#il_connection_source option[value="profile"]');
     if (sourceOption) sourceOption.textContent = 'Background connection (Settings → API)';
-    for (const id of ['il_minds_profile', 'il_progression_profile', 'il_progression_fallback_profile', 'il_game_profile', 'il_planner_profile']) {
-        const select = document.getElementById(id);
-        const label = document.querySelector(`label[for="${id}"]`);
-        if (select) select.style.display = 'none';
-        if (label) label.style.display = 'none';
-        if (id === 'il_minds_profile' && select?.nextElementSibling?.matches?.('small')) select.nextElementSibling.style.display = 'none';
-    }
     populateProfiles();
+    applyWorldConnections();
     window.InnerLoreShell.onChange?.(change => {
         if (change?.type === 'connections') populateProfiles();
+        if (change?.type === 'world') applyWorldConnections();
     });
+}
+
+/**
+ * A world that names its own background connection (Settings → World) has the
+ * passes run on it whenever it is open; a world without one leaves the
+ * extension's picker alone.
+ */
+function applyWorldConnections() {
+    if (typeof window === 'undefined' || typeof window.InnerLoreShell?.activeWorld !== 'function') return false;
+    const world = window.InnerLoreShell.activeWorld();
+    const wanted = cleanString(world?.backgroundConnectionId, 80);
+    if (!wanted) return false;
+    const settings = getSettings();
+    if (settings.connectionProfileId === wanted) return false;
+    const profile = listConnectionProfiles().find(entry => entry.id === wanted);
+    if (!profile) return false;
+    settings.connectionProfileId = wanted;
+    saveSettings();
+    if (typeof document !== 'undefined') populateProfiles();
+    log(`Background connection follows the open world: ${profile.name}.`);
+    return true;
+}
+
+/** The picker in the extension's settings pins the choice to the open world when that world has its own. */
+function rememberWorldBackgroundConnection(profileId) {
+    if (typeof window === 'undefined' || typeof window.InnerLoreShell?.activeWorld !== 'function') return;
+    const world = window.InnerLoreShell.activeWorld();
+    if (!world?.backgroundConnectionId || world.backgroundConnectionId === profileId) return;
+    void window.InnerLoreShell.updateActiveWorld?.({ backgroundConnectionId: profileId });
 }
 
 async function applyNarratorPromptSwap(shouldApply) {
@@ -677,6 +717,7 @@ const defaultSettings = Object.freeze({
     connectionSource: 'profile',
     connectionProfileId: '',
     fallbackConnectionProfileId: '',
+    shellPassPickers: 0,
     providerConcurrency: 1,
     maximumResponseTokens: 12_000,
     requestTimeoutSeconds: 90,
@@ -1046,9 +1087,9 @@ function getSettings() {
         4,
         Math.round(Number(settings.automaticEventDirectorExpirationTurns) || 40),
     ));
-    if (!settings.progressionConnectionProfileId) {
-        settings.progressionConnectionProfileId = settings.connectionProfileId || chooseDefaultProfileId('');
-    }
+    // An empty progression connection means "the background connection";
+    // every reader falls back to it.
+    settings.progressionConnectionProfileId = cleanString(settings.progressionConnectionProfileId, 120);
     return settings;
 }
 
@@ -3902,6 +3943,12 @@ function publishExtensionApi() {
 const VOICE_METADATA_KEY = 'innerlore_voices';
 const VOICE_SAMPLE = 'The tide is turning, and the lamps along the harbour wall are lit one by one.';
 
+// A clip's fetch is given a flat allowance plus a little per character: a
+// 220-character narration is about 13 s of audio, synthesized in 5-25 s
+// depending on how busy the phone is, and may wait behind two clips ahead.
+const VOICE_CLIP_TIMEOUT_MS = 45_000;
+const VOICE_CLIP_TIMEOUT_PER_CHAR_MS = 150;
+
 function voiceState() {
     if (!runtime.voice) {
         runtime.voice = { status: 'unknown', detail: '', engine: '', voices: [], token: 0, speaking: -1, lastProbe: 0, audio: null, controller: null };
@@ -4145,9 +4192,24 @@ function voiceJobsForMessage(messageIndex) {
     return voiceJobsForText(message.mes, getChatStore());
 }
 
+/** True for a failure that means the voice server is gone or wedged, not that one clip went wrong. */
+function voiceServerLost(error) {
+    return error?.code === 'voice_down' || error?.name === 'TimeoutError' || error instanceof TypeError;
+}
+
 async function fetchVoiceClip(job, signal) {
     const settings = getSettings();
-    const response = await voiceRequest('/speak', { method: 'POST', body: JSON.stringify({ text: job.text, voice: job.voice, speed: job.speed, tone: job.tone || undefined, kind: job.kind || undefined, quick: job.quick || undefined, takes: settings.voiceTakes || undefined, steps: settings.voiceSteps || undefined, silence: settings.voiceSilence || undefined }), signal });
+    // A clip that has not arrived by now is not coming (the server died or
+    // wedged on its lock); without a limit the reader waited on it for ever.
+    const limit = VOICE_CLIP_TIMEOUT_MS + VOICE_CLIP_TIMEOUT_PER_CHAR_MS * String(job.text || '').length;
+    const signals = [signal, AbortSignal.timeout(limit)].filter(Boolean);
+    const combined = typeof AbortSignal.any === 'function' ? AbortSignal.any(signals) : signal;
+    const response = await voiceRequest('/speak', { method: 'POST', body: JSON.stringify({ text: job.text, voice: job.voice, speed: job.speed, tone: job.tone || undefined, kind: job.kind || undefined, quick: job.quick || undefined, takes: settings.voiceTakes || undefined, steps: settings.voiceSteps || undefined, silence: settings.voiceSilence || undefined }), signal: combined });
+    if (response.status === 503) {
+        const error = new Error('voice server not reachable');
+        error.code = 'voice_down';
+        throw error;
+    }
     if (!response.ok) throw new Error(`voice server answered ${response.status}`);
     return response.arrayBuffer();
 }
@@ -4310,6 +4372,19 @@ function startVoiceSession(messageIndex) {
                 if (!alive()) return;
                 pump();
                 if (clip?.error) {
+                    if (voiceServerLost(clip.error)) {
+                        // No point queueing more clips into a server that is
+                        // not answering: stop here, and probe again before the
+                        // next reading (the probe is what brings it back).
+                        voice.status = 'down';
+                        voice.lastProbe = 0;
+                        voice.detail = cleanString(clip.error?.message || String(clip.error), 300);
+                        console.warn(`${LOG_PREFIX} voice narration stopped: ${voice.detail}`);
+                        toastr.warning('The voice server is not answering; narration resumes once it does.', DISPLAY_NAME);
+                        stopSpeaking();
+                        liveAfterReply();
+                        return;
+                    }
                     if (clip.error?.name !== 'AbortError') console.warn(`${LOG_PREFIX} voice segment skipped:`, clip.error);
                     continue;
                 }
@@ -5656,12 +5731,11 @@ function populateProfiles() {
     if (!select && !fallbackSelect && !progressionSelect && !progressionFallbackSelect) return;
     const profiles = listConnectionProfiles();
     settings.connectionProfileId = chooseDefaultProfileId(settings.connectionProfileId);
-    settings.progressionConnectionProfileId = chooseDefaultProfileId(
-        settings.progressionConnectionProfileId || settings.connectionProfileId,
-    );
+    if (settings.progressionConnectionProfileId && !profiles.some(profile => profile.id === settings.progressionConnectionProfileId)) {
+        settings.progressionConnectionProfileId = '';
+    }
     for (const [element, selectedId] of [
         [select, settings.connectionProfileId],
-        [progressionSelect, settings.progressionConnectionProfileId],
     ]) {
         if (!element) continue;
         element.replaceChildren();
@@ -5680,6 +5754,7 @@ function populateProfiles() {
         element.value = selectedId;
     }
     for (const [element, selectedId, sameLabel] of [
+        [progressionSelect, settings.progressionConnectionProfileId, 'Same as the background connection'],
         [document.getElementById('il_game_profile'), settings.gameConnectionProfileId, 'Same as the curator profile'],
         [document.getElementById('il_planner_profile'), settings.plannerConnectionProfileId, 'Same as the progression profile'],
         [document.getElementById('il_minds_profile'), settings.mindsConnectionProfileId, 'Same request as the curator'],
@@ -9104,6 +9179,7 @@ function bindUIEvents() {
     document.getElementById('il_connection_profile')?.addEventListener('change', event => {
         getSettings().connectionProfileId = event.target.value;
         saveSettings();
+        rememberWorldBackgroundConnection(event.target.value);
     });
     document.getElementById('il_fallback_connection_profile')?.addEventListener('change', event => {
         getSettings().fallbackConnectionProfileId = event.target.value;
@@ -10033,6 +10109,7 @@ function registerEvents() {
         });
     }
     eventSource.on(events.CHAT_CHANGED, async () => {
+        applyWorldConnections();
         updateCastCards();
         restoreNarratorPromptSwap();
         syncNarrativeLog();

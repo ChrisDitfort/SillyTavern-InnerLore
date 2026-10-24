@@ -5,10 +5,9 @@ import {
     ENTITY_TYPES,
     extractDeclaredLocationNames,
     isSummaryceptionGhosted,
-    renderCompactEntity,
     selectRelevantBrains,
     selectRelevantEntities,
-} from './core.js?v=48';
+} from './core.js?v=49';
 import { buildCuratorHints } from './curator-hints.js?v=1';
 
 const DETAIL_TARGETS = Object.freeze({
@@ -168,7 +167,6 @@ function buildEntitySnapshot(store, transcript, currentIndex, maximumEntities) {
         } : undefined,
         unresolved: record.unresolved || [],
         status: record.status,
-        compact_reference: renderCompactEntity(record, 2_000, { layoutLimit: 0 }),
     }));
 }
 

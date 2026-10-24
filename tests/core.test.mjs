@@ -938,3 +938,12 @@ test('a departed passer-by with no record gets no mind; a known person keeps the
     assert.equal(result.departedSkipped, 1);
     assert.deepEqual(Object.keys(store.brains), ['marit']);
 });
+
+test('mention scans match whole words for any of the names, longest first, with regex characters escaped', () => {
+    assert.equal(textMentions('Ben Tavern is quiet tonight.', ['Ben', 'Ben Tavern']), true);
+    assert.equal(textMentions('Benjamin waits outside.', ['Ben', 'Ben Tavern']), false);
+    assert.equal(textMentions('She reads the sign: Rook & Co. (est. 1702).', ['Rook & Co. (est. 1702)']), true);
+    assert.equal(textMentions('The glass archive is sealed.', ['The Glass Archive']), true);
+    assert.equal(textMentions('Nothing here.', []), false);
+    assert.equal(textMentions('', ['Ben']), false);
+});

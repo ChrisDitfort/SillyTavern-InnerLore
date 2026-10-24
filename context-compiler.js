@@ -5,7 +5,7 @@
  * World Progression into one bounded prompt without adding an LLM call.
  */
 
-import { cleanString, compilePromptInjection } from './core.js?v=48';
+import { cleanString, compilePromptInjection } from './core.js?v=49';
 import { contextProfileOverrides } from './context-config.js';
 import { collectRecentStoryExpressions } from './expression-cooldown.js';
 import { renderGamePacket } from './game.js?v=4';

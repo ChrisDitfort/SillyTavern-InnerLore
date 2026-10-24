@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { createEmptyStore, mergeEntityOperations, normalizeBrainRecord } from '../core.js?v=48';
+import { createEmptyStore, mergeEntityOperations, normalizeBrainRecord } from '../core.js?v=49';
 import { applyGameOperations, createGameState } from '../game.js?v=4';
 import { deriveSceneState } from '../scene.js?v=8';
-import { formatTranscript } from '../prompts.js?v=10';
+import { formatTranscript } from '../prompts.js?v=11';
 import {
     CHANNELS,
     PRIVATE_EXTRA_KEY,

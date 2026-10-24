@@ -1,5 +1,5 @@
-import { canonicalNameKey, clamp, cleanString, contextSimilarity, hashString, uniqueStrings } from './core.js?v=48';
-import { appendOutputDiagnostics } from './output-codec.js?v=4';
+import { canonicalNameKey, clamp, cleanString, contextSimilarity, hashString, uniqueStrings } from './core.js?v=49';
+import { appendOutputDiagnostics } from './output-codec.js?v=5';
 
 export const EVENT_DIRECTOR_VERSION = 1;
 export const AUTOMATIC_EVENT_ORIGIN = 'automatic_director';

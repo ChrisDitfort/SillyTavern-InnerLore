@@ -1,4 +1,4 @@
-import { cleanString } from './core.js?v=48';
+import { cleanString } from './core.js?v=49';
 const DEFAULT_API_ROOT = '/api/plugins/innerlore-storage/v1';
 
 function apiRoot() {

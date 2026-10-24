@@ -18,6 +18,10 @@ tar xjf sherpa-onnx-supertonic-3-tts-int8-2026-05-11.tar.bz2 && rm *.tar.bz2
 ```
 
 Run: `venv/bin/python <extension>/server/tts/innerlore_tts.py` (port 8778).
+Threads: 2 is the right number on the Fold 6 (measured idle, 176-character narration, 8 steps: 1 thread 22-25 s, 2 threads 4.8-5.0 s, 4 threads 6.8-7.8 s; the small cores drag a wider pool down).
+
+If the server stops answering, SillyTavern's innerlore-storage plugin starts it again on the next voice request or health probe (at most once every 90 s) when `INNERLORE_TTS_RESTART` holds the start command; `start-sillytavern-with-ld.sh` exports it. The page's reader also stops a session whose server went away instead of waiting on it (a clip gets 45 s plus 150 ms per character), and probes again before the next reply.
+
 `run.sh` next to this file does that with the environment set, and the
 SillyTavern start script launches it inside the proot.
 

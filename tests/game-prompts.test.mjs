@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { createEmptyStore, mergeEntityOperations } from '../core.js?v=48';
+import { createEmptyStore, mergeEntityOperations } from '../core.js?v=49';
 import {
     applyGameOperations,
     carriedItems,
@@ -12,7 +12,7 @@ import {
 } from '../game.js?v=4';
 import { buildLedgerMessages, buildPlannerMessages } from '../game-prompts.js?v=4';
 import { validateGamePayload } from '../game-client.js?v=2';
-import { parseInnerLoreDsl, parseInnerLoreOutput, prepareOutputMessages } from '../output-codec.js?v=4';
+import { parseInnerLoreDsl, parseInnerLoreOutput, prepareOutputMessages } from '../output-codec.js?v=5';
 
 function world() {
     const store = createEmptyStore('game-prompts');
@@ -198,7 +198,7 @@ DONE`, { format: 'dsl', task: 'planner' });
 
 test('an assisted planner is asked for a smaller cast with one carried thing each', async () => {
     const { buildPlannerMessages } = await import('../game-prompts.js?v=4');
-    const { createEmptyStore } = await import('../core.js?v=48');
+    const { createEmptyStore } = await import('../core.js?v=49');
     const { createGameState } = await import('../game.js?v=4');
     const base = { game: createGameState(), store: createEmptyStore('cast'), targets: [{ name: 'Salt Lantern', reason: 'the player is here' }], startingKit: true, playerName: 'Jet', settings: {} };
     const plain = buildPlannerMessages(base).map(m => m.content).join('\n');

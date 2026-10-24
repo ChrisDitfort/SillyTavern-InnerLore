@@ -1,4 +1,4 @@
-import { canonicalNameKey, cleanString, cleanTextMentions, normalizeEntityType, resolveLocationReference } from './core.js?v=48';
+import { canonicalNameKey, cleanString, cleanTextMentions, normalizeEntityType, resolveLocationReference } from './core.js?v=49';
 import {
     ABILITY_KEYS,
     abilityList,
