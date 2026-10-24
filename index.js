@@ -1670,7 +1670,13 @@ async function persistProgressionReplacement(store, nextProgression) {
     }
 }
 
+/** The fork's test mode (page opened with ?innerlore-test=1): no background work, voice or portraits. */
+function shellTestMode() {
+    return typeof window !== 'undefined' && window.InnerLoreShell?.testMode === true;
+}
+
 async function maybeRunAutomaticEventDirector({ force = false } = {}) {
+    if (shellTestMode() && !force) return { skipped: true, reason: 'test_mode' };
     const settings = getSettings();
     const store = getChatStore();
     if (!store || !runtime.storageReady || !runtime.storageWorldId) return { skipped: true, reason: 'storage_unavailable' };
@@ -2195,6 +2201,7 @@ function portraitQueue() {
  * story has described. Shrinking and showing pictures needs a browser.
  */
 function wantPortraits(names, { force = false } = {}) {
+    if (shellTestMode() && !force) return;
     if (!portraitsOn() || typeof globalThis.Image !== 'function') return;
     const chatId = currentChatId();
     const store = getChatStore();
@@ -3593,6 +3600,7 @@ function startVoiceSession(messageIndex) {
  * counts as the user gesture the browser wants before audio may start.
  */
 async function speakMessage(messageIndex, { manual = false } = {}) {
+    if (shellTestMode() && !manual) return;
     const voice = voiceState();
     const settings = getSettings();
     if (!settings.enabled || !settings.voiceEnabled) return;
@@ -3615,6 +3623,7 @@ async function speakMessage(messageIndex, { manual = false } = {}) {
  * already follows is spoken while the rest is still being written.
  */
 function voiceStreamProgress(text) {
+    if (shellTestMode()) return;
     const settings = getSettings();
     if (typeof window === 'undefined') return;
     if (!settings.enabled || !settings.voiceEnabled || settings.voiceAutoPlay === false || settings.voiceStreaming === false) return;
@@ -6703,6 +6712,7 @@ function deferWhileStoryWrites(key, start) {
 }
 
 async function processPending({ force = false, silent = false } = {}) {
+    if (shellTestMode() && !force) return { skipped: true, reason: 'test_mode' };
     const settings = getSettings();
     if (!settings.enabled || (!settings.innerSelfEnabled && !settings.autoLoreEnabled && !settings.worldProgressionEnabled)) return;
     if (runtime.processing || runtime.rebuilding || runtime.preparingFoundation) {
