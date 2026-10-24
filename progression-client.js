@@ -1,5 +1,5 @@
 import { canonicalNameKey } from './core.js?v=48';
-import { sendInnerLoreRequest } from './llm-client.js?v=16';
+import { sendInnerLoreRequest } from './llm-client.js?v=17';
 import { buildProgressionRepairMessages } from './progression-prompts.js';
 import { PROGRESSION_JSON_SCHEMA } from './structured-output.js';
 import {

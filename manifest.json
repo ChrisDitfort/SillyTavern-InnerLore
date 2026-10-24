@@ -3,7 +3,7 @@
     "loading_order": 60,
     "requires": [],
     "optional": [],
-    "js": "index.js?v=139",
+    "js": "index.js?v=141",
     "css": "style.css",
     "author": "ChrisDitfort",
     "version": "0.28.0",

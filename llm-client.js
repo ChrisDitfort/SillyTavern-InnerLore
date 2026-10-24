@@ -15,8 +15,73 @@ function context() {
     return SillyTavern.getContext();
 }
 
+/** The fork's shell, when the extension runs inside it (worlds, API connections, services). */
+export function shell() {
+    return typeof window !== 'undefined' ? (window.InnerLoreShell || null) : null;
+}
+
+/**
+ * The shell's OpenAI-compatible connections in the connection-manager profile
+ * shape the pickers and provider budgets already understand.
+ */
+export function shellConnectionProfiles() {
+    const connections = shell()?.getConnections?.() || [];
+    return connections
+        .filter(connection => connection?.id && connection.mode === 'cc' && connection.background !== false)
+        .map(connection => ({
+            id: connection.id,
+            name: connection.name || connection.model || connection.id,
+            mode: 'cc',
+            api: 'custom',
+            'api-url': connection.url || '',
+            model: connection.model || '',
+            'secret-id': connection.secretId || '',
+            'prompt-post-processing': connection.promptPostProcessing || '',
+            shell: true,
+        }));
+}
+
+/** A profile by id from whichever source is live: the shell's connections or SillyTavern's profiles. */
+export function findConnectionProfile(profileId) {
+    if (!profileId) return null;
+    return listConnectionProfiles().find(profile => profile.id === profileId)
+        || (context().extensionSettings?.connectionManager?.profiles || []).find(profile => profile?.id === profileId)
+        || null;
+}
+
+/**
+ * Under the shell, background requests go straight to SillyTavern's chat
+ * completion service with the connection's endpoint, model and key; the
+ * connection-manager extension is not involved.
+ */
+function shellRequestService(ctx) {
+    if (!shell()) return null;
+    return {
+        async sendRequest(profileId, prompt, maxTokens, custom = {}, overridePayload = {}) {
+            const connection = shell().getConnection?.(profileId);
+            if (!connection) throw new Error('The selected InnerLore connection no longer exists. Pick one under InnerLore → Background Model.');
+            if (connection.mode !== 'cc') throw new Error(`${connection.name} is a NovelAI connection; background passes need an OpenAI-compatible one.`);
+            if (!ctx.ChatCompletionService?.processRequest) throw new Error('SillyTavern chat completion service is unavailable.');
+            const messages = Array.isArray(prompt) ? prompt : [{ role: 'user', content: prompt }];
+            return ctx.ChatCompletionService.processRequest({
+                stream: custom.stream === true,
+                messages,
+                max_tokens: maxTokens,
+                model: connection.model,
+                chat_completion_source: 'custom',
+                secret_id: connection.secretId || undefined,
+                custom_url: connection.url,
+                custom_prompt_post_processing: connection.promptPostProcessing || undefined,
+                custom_include_body: connection.includeBody || undefined,
+                ...overridePayload,
+            }, {}, custom.extractData !== false, custom.signal ?? null);
+        },
+    };
+}
+
 export function listConnectionProfiles() {
     const ctx = context();
+    if (shell()) return shellConnectionProfiles();
     const profiles = ctx.extensionSettings?.connectionManager?.profiles;
     if (!Array.isArray(profiles)) return [];
     try {
@@ -240,14 +305,14 @@ function providerCost(provider, model) {
 
 /** The limited provider a connection profile uses, if any. */
 export function oneAtATimeProvider(profileId) {
-    const profile = (context().extensionSettings?.connectionManager?.profiles || []).find(item => item?.id === profileId);
+    const profile = findConnectionProfile(profileId);
     if (!profile) return '';
     if (profile.api === 'novel') return 'novelai.net';
     return limitedHost(profile['api-url']);
 }
 
 function profileCost(profileId) {
-    const profile = (context().extensionSettings?.connectionManager?.profiles || []).find(item => item?.id === profileId);
+    const profile = findConnectionProfile(profileId);
     return providerCost(oneAtATimeProvider(profileId), profile?.model);
 }
 
@@ -395,12 +460,12 @@ async function withBackgroundSlot(task, signal, { waitForStory = true } = {}) {
 
 async function sendViaProfile(settings, messages, signal, options = {}) {
     const ctx = context();
-    const service = ctx.ConnectionManagerRequestService;
+    const service = shellRequestService(ctx) || ctx.ConnectionManagerRequestService;
     if (!service?.sendRequest) {
         throw new Error('SillyTavern Connection Manager request service is unavailable.');
     }
     const profileId = settings.connectionProfileId;
-    if (!profileId) throw new Error('Select an InnerLore connection profile first.');
+    if (!profileId) throw new Error(shell() ? 'Pick a background connection under InnerLore → Background Model first.' : 'Select an InnerLore connection profile first.');
     if (!listConnectionProfiles().some(profile => profile.id === profileId)) {
         throw new Error('The selected InnerLore connection profile no longer exists or is unsupported.');
     }
@@ -497,7 +562,7 @@ async function describeEmptyStream(service, profileId, signal, waitForStory = tr
             const name = listConnectionProfiles().find(profile => profile.id === profileId)?.name?.trim() || profileId;
             return new Error(
                 `The provider rejected InnerLore's connection profile "${name}": ${detail}. `
-                + 'Check that profile\'s API key, model, and endpoint under Connection Profiles.',
+                + (shell() ? 'Check its API key, model and endpoint under Settings → API.' : 'Check that profile\'s API key, model, and endpoint under Connection Profiles.'),
                 { cause: error },
             );
         }

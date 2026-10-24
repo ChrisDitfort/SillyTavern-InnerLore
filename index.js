@@ -72,6 +72,7 @@ import {
     waitForBackgroundIdle,
     testInnerLoreConnection,
     setStoryIdleGate,
+    findConnectionProfile,
     fitsBesideStory,
     isLimitedProvider,
     limitedHost,
@@ -81,7 +82,7 @@ import {
     providerHasRoom,
     storyCost,
     storyProvider,
-} from './llm-client.js?v=16';
+} from './llm-client.js?v=17';
 import {
     deleteInnerLorebooksForChat,
     openInnerLorebook,
@@ -338,10 +339,59 @@ async function findActivePromptOrder() {
  */
 function applyShellIntegration() {
     if (typeof window === 'undefined' || !window.InnerLoreShell) return;
+    const settings = getSettings();
+    const ctx = context();
+    // Connection ids: SillyTavern profile ids become the shell's connection ids
+    // (the shell recorded the mapping when it imported the profiles), and the
+    // per-pass overrides collapse into one background connection plus a
+    // fallback, which every pass then shares.
+    const profileMap = ctx.extensionSettings?.innerlore_shell?.profileMap || {};
+    let changed = false;
+    for (const key of ['connectionProfileId', 'fallbackConnectionProfileId']) {
+        const mapped = profileMap[settings[key]];
+        if (mapped && settings[key] !== mapped) {
+            settings[key] = mapped;
+            changed = true;
+        }
+    }
+    for (const key of ['progressionConnectionProfileId', 'progressionFallbackConnectionProfileId', 'gameConnectionProfileId', 'plannerConnectionProfileId', 'mindsConnectionProfileId']) {
+        if (settings[key]) {
+            settings[key] = '';
+            changed = true;
+        }
+    }
+    const known = listConnectionProfiles();
+    if (settings.connectionProfileId && !known.some(profile => profile.id === settings.connectionProfileId)) {
+        settings.connectionProfileId = known[0]?.id || '';
+        changed = true;
+    }
+    if (changed) saveSettings();
+    if (runtime.shellIntegrated || typeof document === 'undefined') return;
+    runtime.shellIntegrated = true;
     const textarea = document.getElementById('il_narrator_prompt');
-    if (!textarea) return;
-    textarea.disabled = true;
-    textarea.insertAdjacentHTML('beforebegin', '<div class="il-shell-note">The story prompt is edited per API connection under Settings → API. This template is used only when no connection is active.</div>');
+    if (textarea) {
+        textarea.disabled = true;
+        textarea.insertAdjacentHTML('beforebegin', '<div class="il-shell-note">The story prompt is edited per API connection under Settings → API. This template is used only when no connection is active.</div>');
+    }
+    const relabel = (id, text) => {
+        const label = document.querySelector(`label[for="${id}"]`);
+        if (label) label.textContent = text;
+    };
+    relabel('il_connection_profile', 'Background connection');
+    relabel('il_fallback_connection_profile', 'Fallback connection after transient failures');
+    const sourceOption = document.querySelector('#il_connection_source option[value="profile"]');
+    if (sourceOption) sourceOption.textContent = 'Background connection (Settings → API)';
+    for (const id of ['il_minds_profile', 'il_progression_profile', 'il_progression_fallback_profile', 'il_game_profile', 'il_planner_profile']) {
+        const select = document.getElementById(id);
+        const label = document.querySelector(`label[for="${id}"]`);
+        if (select) select.style.display = 'none';
+        if (label) label.style.display = 'none';
+        if (id === 'il_minds_profile' && select?.nextElementSibling?.matches?.('small')) select.nextElementSibling.style.display = 'none';
+    }
+    populateProfiles();
+    window.InnerLoreShell.onChange?.(change => {
+        if (change?.type === 'connections') populateProfiles();
+    });
 }
 
 async function applyNarratorPromptSwap(shouldApply) {
@@ -1235,7 +1285,7 @@ function assistedFor(profileId) {
     const mode = getSettings().assistedBackground || 'auto';
     if (mode === 'on') return true;
     if (mode === 'off') return false;
-    const profile = (context().extensionSettings?.connectionManager?.profiles || []).find(item => item?.id === profileId);
+    const profile = findConnectionProfile(profileId);
     const size = modelSizeBillions(profile?.model);
     return size < 70 || (!Number.isFinite(size) && Boolean(oneAtATimeProvider(profileId)));
 }
@@ -2157,7 +2207,20 @@ function wantPortraits(names, { force = false } = {}) {
         .map(name => ({ key: canonicalNameKey(name), name, chatId, force })));
 }
 
+/** The fork's image service, when the extension runs inside the shell. */
+function shellImageService() {
+    const service = typeof window !== 'undefined' ? window.InnerLoreShell?.getService?.('image') : null;
+    return service && typeof service === 'object' ? service : null;
+}
+
 function portraitServer() {
+    const service = shellImageService();
+    if (service) {
+        if (service.provider === 'openai-images') {
+            return { url: cleanString(service.url, 300), auth: '', provider: 'openai-images', secretId: cleanString(service.secretId, 80), model: cleanString(service.model, 120) };
+        }
+        return { url: cleanString(service.url, 300) || PORTRAIT_DEFAULTS.serverUrl, auth: cleanString(service.auth, 200) };
+    }
     const sd = context().extensionSettings?.sd || {};
     return {
         url: cleanString(getSettings().portraitServerUrl, 300)
@@ -2207,14 +2270,28 @@ async function drawPortrait(job) {
     const timer = setTimeout(() => controller.abort(), 300_000);
     let image;
     try {
-        const response = await fetch('/api/sd/generate', {
-            method: 'POST',
-            headers: context().getRequestHeaders(),
-            body: JSON.stringify({ ...payload, ...portraitServer() }),
-            signal: controller.signal,
-        });
-        if (!response.ok) throw new Error(`the image server failed (HTTP ${response.status})`);
-        image = (await response.json())?.images?.[0];
+        const server = portraitServer();
+        if (server.provider === 'openai-images') {
+            // An OpenAI-compatible images API, through the storage plugin (which holds the key).
+            const response = await fetch(`${settings.storageApiRoot || '/api/plugins/innerlore-storage/v1'}/images/generate`, {
+                method: 'POST',
+                headers: { ...context().getRequestHeaders(), 'Content-Type': 'application/json' },
+                body: JSON.stringify({ service: server, prompt: payload.prompt, negative_prompt: payload.negative_prompt, width: payload.width, height: payload.height }),
+                signal: controller.signal,
+            });
+            const body = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(body?.error?.message || `the image service failed (HTTP ${response.status})`);
+            image = body?.data?.images?.[0];
+        } else {
+            const response = await fetch('/api/sd/generate', {
+                method: 'POST',
+                headers: context().getRequestHeaders(),
+                body: JSON.stringify({ ...payload, url: server.url, auth: server.auth }),
+                signal: controller.signal,
+            });
+            if (!response.ok) throw new Error(`the image server failed (HTTP ${response.status})`);
+            image = (await response.json())?.images?.[0];
+        }
     } catch (error) {
         const message = controller.signal.aborted ? 'the image server did not answer within 5 minutes' : error?.message || String(error);
         throw Object.assign(new Error(message), { serverDown: true });
@@ -3064,12 +3141,34 @@ function voiceState() {
 }
 
 /** A request to the voice server: direct when a URL is set, else through the storage plugin. */
+/** The fork's voice service, when the extension runs inside the shell. */
+function shellVoiceService() {
+    const service = typeof window !== 'undefined' ? window.InnerLoreShell?.getService?.('voice') : null;
+    return service && typeof service === 'object' ? service : null;
+}
+
 function voiceRequest(path, options = {}) {
     const settings = getSettings();
-    const direct = cleanString(settings.voiceServerUrl, 300).replace(/\/+$/u, '');
-    const url = direct ? `${direct}${path}` : `${settings.storageApiRoot || '/api/plugins/innerlore-storage/v1'}/tts${path}`;
+    const service = shellVoiceService();
+    const external = service && service.provider !== 'local';
+    const direct = external ? '' : cleanString(settings.voiceServerUrl, 300).replace(/\/+$/u, '');
+    let url = direct ? `${direct}${path}` : `${settings.storageApiRoot || '/api/plugins/innerlore-storage/v1'}/tts${path}`;
     const base = direct ? {} : (context().getRequestHeaders?.() || {});
-    return fetch(url, { ...options, headers: { ...base, 'Content-Type': 'application/json', ...(options.headers || {}) } });
+    const request = { ...options, headers: { ...base, 'Content-Type': 'application/json', ...(options.headers || {}) } };
+    if (external) {
+        // The storage plugin forwards to the external provider; it holds the key.
+        const descriptor = { provider: service.provider, url: service.url, model: service.model, secretId: service.secretId };
+        if (String(options.method || 'GET').toUpperCase() === 'GET') {
+            url += `${url.includes('?') ? '&' : '?'}provider=${encodeURIComponent(service.provider)}&url=${encodeURIComponent(service.url || '')}`;
+        } else if (typeof request.body === 'string') {
+            try {
+                request.body = JSON.stringify({ ...JSON.parse(request.body), service: descriptor });
+            } catch {
+                // not JSON: send as is
+            }
+        }
+    }
+    return fetch(url, request);
 }
 
 async function probeVoiceServer({ force = false } = {}) {
@@ -9322,6 +9421,8 @@ function initializeServerStateAfterAppReady(ctx) {
     };
 
     if (events?.APP_READY) ctx.eventSource.on(events.APP_READY, start);
+    // The fork's shell publishes itself after extensions initialise; wire up then.
+    if (events?.APP_READY) ctx.eventSource.on(events.APP_READY, () => applyShellIntegration());
     else queueMicrotask(start);
     // Story and background work commonly share one provider, and many
     // providers serve a single concurrent request. Background passes wait for

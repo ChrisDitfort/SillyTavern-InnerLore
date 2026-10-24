@@ -1,4 +1,4 @@
-import { sendInnerLoreRequest } from './llm-client.js?v=16';
+import { sendInnerLoreRequest } from './llm-client.js?v=17';
 import { buildGameRepairMessages } from './game-prompts.js?v=3';
 import {
     escalateRepairSettings,

@@ -8,7 +8,7 @@
 import { canonicalNameKey, cleanString, hashString } from './core.js?v=48';
 import { normalizeGameState } from './game.js?v=3';
 import { gameRequestSettings } from './game-client.js?v=1';
-import { sendInnerLoreRequest } from './llm-client.js?v=16';
+import { sendInnerLoreRequest } from './llm-client.js?v=17';
 
 export const PORTRAIT_METADATA_KEY = 'innerlore_portraits';
 export const PORTRAIT_DEFAULTS = Object.freeze({

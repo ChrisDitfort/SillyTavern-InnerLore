@@ -106,7 +106,41 @@ export function init(router, args) {
     // and a page served over HTTPS both hear it. INNERLORE_TTS_URL overrides
     // the default http://127.0.0.1:8778.
     const ttsBase = () => String(process.env.INNERLORE_TTS_URL || 'http://127.0.0.1:8778').replace(/\/+$/u, '');
+    // External providers (the fork's services): the key is read from the
+    // user's secret store on the server, so it never travels to the page.
+    const readSecretValue = (request, key, id) => {
+        const root = request?.user?.directories?.root || path.join(resolveDatabaseDirectory(process.argv), 'data', 'default-user');
+        try {
+            const secrets = JSON.parse(fs.readFileSync(path.join(root, 'secrets.json'), 'utf8'));
+            const entries = secrets?.[key];
+            if (typeof entries === 'string') return entries;
+            if (Array.isArray(entries)) {
+                const entry = entries.find(item => item?.id === id) || entries.find(item => item?.active);
+                return String(entry?.value || '');
+            }
+        } catch (error) {
+            console.warn('[innerlore-storage] could not read the secret store:', error?.message || error);
+        }
+        return '';
+    };
+    const OPENAI_VOICES = [
+        { id: 'alloy', name: 'Alloy', gender: 'female', pitch: 180 }, { id: 'ash', name: 'Ash', gender: 'male', pitch: 110 },
+        { id: 'ballad', name: 'Ballad', gender: 'male', pitch: 120 }, { id: 'coral', name: 'Coral', gender: 'female', pitch: 195 },
+        { id: 'echo', name: 'Echo', gender: 'male', pitch: 105 }, { id: 'fable', name: 'Fable', gender: 'male', pitch: 130 },
+        { id: 'onyx', name: 'Onyx', gender: 'male', pitch: 90 }, { id: 'nova', name: 'Nova', gender: 'female', pitch: 200 },
+        { id: 'sage', name: 'Sage', gender: 'female', pitch: 185 }, { id: 'shimmer', name: 'Shimmer', gender: 'female', pitch: 210 },
+        { id: 'verse', name: 'Verse', gender: 'male', pitch: 115 },
+    ];
+    const externalBase = service => String(service?.url || '').trim().replace(/\/+$/u, '');
+    const bearer = (request, service) => {
+        const key = readSecretValue(request, 'api_key_custom', String(service?.secretId || ''));
+        return key ? { Authorization: `Bearer ${key}` } : {};
+    };
+
     router.get('/v1/tts/health', async (request, response) => {
+        if (String(request.query.provider || '') === 'openai-speech') {
+            return sendData(response, { ok: true, engine: 'openai-speech', voices: OPENAI_VOICES, url: String(request.query.url || '') });
+        }
         try {
             const upstream = await fetch(`${ttsBase()}/health`, { signal: AbortSignal.timeout(4_000) });
             const payload = await upstream.json();
@@ -119,6 +153,35 @@ export function init(router, args) {
         const body = request.body && typeof request.body === 'object' ? request.body : {};
         const text = String(body.text || '').slice(0, 2_000);
         if (!text.trim()) return sendError(response, 400, 'text is empty', 'bad_request');
+        const service = body.service && typeof body.service === 'object' ? body.service : null;
+        if (service?.provider === 'openai-speech') {
+            const base = externalBase(service);
+            if (!/^https?:\/\//u.test(base)) return sendError(response, 400, 'the speech service URL is missing', 'bad_request');
+            try {
+                const upstream = await fetch(`${base}/v1/audio/speech`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', ...bearer(request, service) },
+                    body: JSON.stringify({
+                        model: String(service.model || 'tts-1'),
+                        voice: String(body.voice || 'alloy'),
+                        input: text,
+                        response_format: 'wav',
+                        speed: Math.min(4, Math.max(0.25, Number(body.speed) || 1)),
+                    }),
+                    signal: AbortSignal.timeout(120_000),
+                });
+                if (!upstream.ok) {
+                    const detail = await upstream.text().catch(() => '');
+                    return sendError(response, 502, `Speech service answered ${upstream.status}: ${detail.slice(0, 300)}`, 'tts_failed');
+                }
+                const audio = Buffer.from(await upstream.arrayBuffer());
+                response.setHeader('Content-Type', upstream.headers.get('content-type') || 'audio/wav');
+                response.setHeader('Cache-Control', 'no-store');
+                return response.status(200).send(audio);
+            } catch (error) {
+                return sendError(response, 503, `Speech service not reachable at ${base}: ${error?.message || error}`, 'tts_unavailable');
+            }
+        }
         try {
             const upstream = await fetch(`${ttsBase()}/speak`, {
                 method: 'POST',
@@ -136,6 +199,43 @@ export function init(router, args) {
             return response.status(200).send(audio);
         } catch (error) {
             return sendError(response, 503, `Voice server not reachable at ${ttsBase()}: ${error?.message || error}`, 'tts_unavailable');
+        }
+    });
+
+    // Portraits through an OpenAI-compatible images API (the fork's image service).
+    router.post('/v1/images/generate', async (request, response) => {
+        const body = request.body && typeof request.body === 'object' ? request.body : {};
+        const service = body.service && typeof body.service === 'object' ? body.service : {};
+        const base = externalBase(service);
+        const prompt = String(body.prompt || '').slice(0, 4_000);
+        if (!/^https?:\/\//u.test(base)) return sendError(response, 400, 'the image service URL is missing', 'bad_request');
+        if (!prompt.trim()) return sendError(response, 400, 'prompt is empty', 'bad_request');
+        const negative = String(body.negative_prompt || '').slice(0, 1_000).trim();
+        const width = Math.max(256, Math.min(2048, Number(body.width) || 1024));
+        const height = Math.max(256, Math.min(2048, Number(body.height) || 1024));
+        try {
+            const upstream = await fetch(`${base}/v1/images/generations`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', ...bearer(request, service) },
+                body: JSON.stringify({
+                    ...(service.model ? { model: String(service.model) } : {}),
+                    prompt: negative ? `${prompt}\n\nAvoid: ${negative}` : prompt,
+                    n: 1,
+                    size: `${width}x${height}`,
+                    response_format: 'b64_json',
+                }),
+                signal: AbortSignal.timeout(300_000),
+            });
+            if (!upstream.ok) {
+                const detail = await upstream.text().catch(() => '');
+                return sendError(response, 502, `Image service answered ${upstream.status}: ${detail.slice(0, 300)}`, 'image_failed');
+            }
+            const payload = await upstream.json();
+            const images = (Array.isArray(payload?.data) ? payload.data : []).map(item => item?.b64_json).filter(Boolean);
+            if (!images.length) return sendError(response, 502, 'Image service sent no picture', 'image_failed');
+            return sendData(response, { images });
+        } catch (error) {
+            return sendError(response, 503, `Image service not reachable at ${base}: ${error?.message || error}`, 'image_unavailable');
         }
     });
 
