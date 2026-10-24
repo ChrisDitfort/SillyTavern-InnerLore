@@ -7,6 +7,6 @@
     "css": "style.css",
     "author": "ChrisDitfort",
     "version": "0.28.0",
-    "auto_update": true,
+    "auto_update": false,
     "home_page": "https://github.com/ChrisDitfort/SillyTavern-InnerLore"
 }

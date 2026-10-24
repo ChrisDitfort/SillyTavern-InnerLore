@@ -1,5 +1,5 @@
 import { cleanString } from './core.js?v=48';
-const DEFAULT_API_ROOT = '/api/plugins/airpg-storage/v1';
+const DEFAULT_API_ROOT = '/api/plugins/innerlore-storage/v1';
 
 function apiRoot() {
     try {
