@@ -8,7 +8,7 @@
 import { cleanString, compilePromptInjection } from './core.js?v=48';
 import { contextProfileOverrides } from './context-config.js';
 import { collectRecentStoryExpressions } from './expression-cooldown.js';
-import { renderGamePacket } from './game.js?v=2';
+import { renderGamePacket } from './game.js?v=3';
 import { compileProgressionInjection } from './progression.js';
 import { deriveCameraFrame, deriveSceneState, renderCameraPacket } from './scene.js?v=7';
 
@@ -144,6 +144,8 @@ export function compileContext(options = {}) {
                 store: options.store,
                 playerName: options.playerName,
                 maximumCharacters: attemptSettings.gameInjectionBudget ?? 3_000,
+                resolved: options.turnActions?.resolved || '',
+                toolGuidance: options.turnActions?.guidance || '',
             });
         blocks = {
             scene: sceneText,

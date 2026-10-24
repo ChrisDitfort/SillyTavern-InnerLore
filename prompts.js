@@ -1,3 +1,4 @@
+import { stripVoiceTags } from './speech.js?v=11';
 import {
     canonicalNameKey,
     cleanString,
@@ -38,7 +39,7 @@ export function formatTranscript(messages, options = {}) {
             : isSummaryceptionGhosted(message)
                 ? 'COMPRESSED STORY MEMORY — prior events, avoid double-counting restatements'
                 : `STORY — ${message.name || characterName}`;
-        blocks.push(`[message ${index}; ${role}]\n${cleanString(message.mes, 30_000)}`);
+        blocks.push(`[message ${index}; ${role}]\n${cleanString(stripVoiceTags(message.mes), 30_000)}`);
     }
 
     let transcript = blocks.join('\n\n');

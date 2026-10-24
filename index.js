@@ -34,7 +34,7 @@ import {
     summaryceptionRecallText,
     uniqueStrings,
 } from './core.js?v=48';
-import { compileContext } from './context-compiler.js?v=5';
+import { compileContext } from './context-compiler.js?v=6';
 import { deriveCameraFrame, deriveSceneState } from './scene.js?v=7';
 import {
     createMapPanel,
@@ -97,7 +97,7 @@ import {
     planNarratorPromptDelivery,
 } from './prompts.js?v=9';
 import { compileTriggerEventDeliveryPreview } from './event-delivery.js?v=2';
-import { requestEventDirectorProposal } from './event-director-client.js';
+import { requestEventDirectorProposal } from './event-director-client.js?v=2';
 import { buildEventDirectorMessages } from './event-director-prompts.js';
 import {
     addEventProposal,
@@ -108,7 +108,7 @@ import {
     rejectEventProposal,
     removeEventProposal,
     recordEventDirectorAttempt,
-} from './event-director.js';
+} from './event-director.js?v=2';
 import { decideInnerLoreMaintenance } from './maintenance-scheduler.js?v=4';
 import { CHOICES_EXTRA_KEY, extractReplyChoices, fallbackChoices, storedChoices } from './player-choices.js?v=1';
 import { EmbeddedStorageClient } from './embedded-storage.js?v=1';
@@ -120,7 +120,9 @@ import {
     gameContext,
     gameOverview,
     standingTier,
+    entryText,
     gameStateBefore,
+    gameStateWithout,
     getGameStats,
     groundedRecords,
     introductionOperations,
@@ -131,11 +133,27 @@ import {
     normalizeGameState,
     placeRefOf,
     plannerTargets,
-} from './game.js?v=2';
-import { buildLedgerMessages, buildPlannerMessages } from './game-prompts.js?v=2';
+} from './game.js?v=3';
+import { buildLedgerMessages, buildPlannerMessages } from './game-prompts.js?v=3';
 import { requestGamePatch } from './game-client.js?v=1';
 import { isTextCompletionApi, renderTextPacket, textPacketBudget } from './text-packet.js?v=1';
-import { createGamePanel, createTradePanel } from './game-view.js?v=1';
+import { createGamePanel, createTradePanel } from './game-view.js?v=2';
+import {
+    ACTION_SOURCE,
+    GAME_TOOLS,
+    actionAlreadyApplied,
+    actionEntriesInRange,
+    actionFromToolCall,
+    dropDuplicateLedgerOps,
+    parseGemmaArguments,
+    parseTextToolCalls,
+    renderResolvedActions,
+    renderToolGuidance,
+    resolveGameAction,
+} from './game-actions.js?v=1';
+import { TONE_NAMES, castVoices, cleanForSpeech, inferGender, isChild, prosodyFor, segmentSpeech, settledSegmentCount, stripVoiceTags, toneText, voiceForSegment } from './speech.js?v=11';
+import { applyToneEffects, pitchShift } from './voice-fx.js?v=4';
+import { TARGET_RATE, bytesToBase64, concatChunks, createSilenceTracker, encodeWav, resample, tidyTranscript, trimSilence } from './voice-input.js?v=1';
 import {
     PORTRAIT_DEFAULTS,
     PORTRAIT_FOLDER,
@@ -194,7 +212,7 @@ const TRIGGER_DELIVERY_PROMPT_KEY = 'inner_lore_trigger_delivery';
 // For a text-completion story model: InnerLore's lore entries, after the story string.
 const TEXT_MEMORY_PROMPT_KEY = 'inner_lore_text_memory';
 const DISPLAY_NAME = 'InnerLore';
-const EXTENSION_VERSION = '0.27.1';
+const EXTENSION_VERSION = '0.28.0';
 const LOG_PREFIX = '[InnerLore]';
 
 /**
@@ -288,6 +306,8 @@ const NARRATION_LENGTH_DIRECTIVES = Object.freeze({
     long: 'Narration length: write a long, immersive reply of roughly 500-800 words — several paragraphs, layered detail, room for the scene to breathe.',
 });
 
+const VOICE_TAG_DIRECTIVE = `VOICE TAGS (for the voice narration; invisible to the reader): write a tag of the form [[Name|tone]] immediately before every line of dialogue, before every italic thought, and before a narration sentence whenever the narration's mood changes. Name is the speaker's or thinker's name exactly as the story uses it ({{user}} for {{user}}, narrator for narration); tone is one word from: ${TONE_NAMES.join(', ')}. The tag sits outside the quotation marks and asterisks: [[Mara|wary]] "Who's there?" and [[Pip|afraid]] *They've found us.* Every quoted line and every thought gets its own tag, even when the speaker is obvious. Write nothing else in double square brackets.`;
+
 const GUIDED_PLAY_DIRECTIVE = `GUIDED PLAY (amends the agency rules above only where stated):
 - The camera packet in the game state is {{user}}'s eyes and ears. Build each reply from what {{user}} can see, hear and reach from there, and let the ways on show naturally in the scene: a lit doorway, a road that forks, someone beckoning.
 - {{user}} may play in short commands ("go to the harbour", "talk to the innkeeper", "ask the guard about the curfew", "look at the carved door"). Treat a command as a declared action already under way: narrate {{user}} doing it from the outside, then move straight to the world's response.
@@ -312,12 +332,27 @@ async function findActivePromptOrder() {
     return Array.isArray(order?.order) ? order.order : null;
 }
 
+/**
+ * Under the fork's shell the narrator prompt is edited per API connection
+ * (Settings → API), so the extension's own template editor steps aside.
+ */
+function applyShellIntegration() {
+    if (typeof window === 'undefined' || !window.InnerLoreShell) return;
+    const textarea = document.getElementById('il_narrator_prompt');
+    if (!textarea) return;
+    textarea.disabled = true;
+    textarea.insertAdjacentHTML('beforebegin', '<div class="il-shell-note">The story prompt is edited per API connection under Settings → API. This template is used only when no connection is active.</div>');
+}
+
 async function applyNarratorPromptSwap(shouldApply) {
     const settings = getSettings();
     if (narratorPromptRestore) restoreNarratorPromptSwap();
     if (!shouldApply) return;
     if (!settings.enabled || !settings.narratorPromptEnabled) return;
-    const template = cleanString(settings.narratorPromptTemplate, 20_000);
+    // The fork's shell holds one story prompt per API connection; without it
+    // the extension's own template applies.
+    const shellConnection = typeof window !== 'undefined' ? window.InnerLoreShell?.activeConnection?.() : null;
+    const template = cleanString(shellConnection?.storyPrompt || settings.narratorPromptTemplate, 20_000);
     if (!template.trim()) return;
     const entry = await findMainPromptEntry();
     if (!entry) return;
@@ -326,10 +361,11 @@ async function applyNarratorPromptSwap(shouldApply) {
     narratorPromptRestore = { entry, content: entry.content, orderList, orderRestore: null };
     const lengthDirective = NARRATION_LENGTH_DIRECTIVES[settings.narrationLength];
     const guidedPlay = settings.guidedPlayEnabled !== false ? GUIDED_PLAY_DIRECTIVE : '';
-    const directives = [lengthDirective, NARRATION_FRESHNESS_DIRECTIVE, NPC_STATION_DIRECTIVE, guidedPlay].filter(Boolean).join('\n\n');
+    const voiceTags = settings.voiceEnabled && settings.voiceTags !== false ? VOICE_TAG_DIRECTIVE : '';
+    const directives = [lengthDirective, NARRATION_FRESHNESS_DIRECTIVE, NPC_STATION_DIRECTIVE, guidedPlay, voiceTags].filter(Boolean).join('\n\n');
     entry.content = directives ? `${template}\n\n${directives}` : template;
     const oaiModule = await import('/scripts/openai.js');
-    if (/^xialong/iu.test(String(oaiModule.oai_settings?.custom_model || ''))) {
+    if (!shellConnection && /^xialong/iu.test(String(oaiModule.oai_settings?.custom_model || ''))) {
         entry.content = `${XIALONG_SYSTEM_PROMPT}\n\n${entry.content}`;
     }
     if (deliveryPlan && orderList) {
@@ -599,6 +635,12 @@ const defaultSettings = Object.freeze({
     gameTemperature: 0.1,
     gameCustomInstructions: '',
     gameInjectionBudget: 3_000,
+    // The story model asks the game system to buy, sell, give, take, pay or
+    // use up things through tools (or writes the call as text when its
+    // provider has no tool parser); the game applies it and the model narrates
+    // the result. Trade-screen buttons are applied the same way when sent.
+    gameToolsEnabled: true,
+    gameToolsSetupVersion: 0,
     scenePlannerEnabled: true,
     scenePlannerPrefetch: true,
     // On a provider that serves one request at a time, the story stops the running pass (it re-runs after the reply).
@@ -632,6 +674,50 @@ const defaultSettings = Object.freeze({
     portraitCfg: PORTRAIT_DEFAULTS.cfg,
     // The people here as a row of cards under the top bar.
     castCardsEnabled: true,
+    // Voice narration through InnerLore's local voice server (server/tts):
+    // the narration in one voice, every person's lines in their own.
+    voiceEnabled: true,
+    voiceAutoPlay: true,
+    voiceServerUrl: '',
+    voiceNarrator: 's1',
+    // '' = chosen from the persona's gender.
+    voicePlayer: '',
+    voiceUnknown: 's3',
+    // How strongly a line's tone colours the sound (breath, tremor...): 0 off, 1 normal.
+    voiceEmotion: 1,
+    // Semitones a child's voice is raised by (the voice packs have no child voices); 0 turns it off.
+    voiceChildPitch: 3,
+    // Voice model generation: flow-matching steps (0 = the model's default) and the pause scale at punctuation.
+    voiceSteps: 0,
+    voiceSilence: 0,
+    // Takes the voice server draws for a lively line (excited, angry, afraid...), keeping the one with the wider
+    // intonation; 1 = one take (measured: a second adds almost nothing). Every short clip is redrawn anyway when its
+    // pitch strays from the voice's own, which is what keeps a voice sounding like one person.
+    voiceTakes: 1,
+    voiceSpeed: 1,
+    voiceDialogue: true,
+    voiceNarration: true,
+    // Read along while the reply streams; skip bare "she said" tags; pause between clips (ms).
+    voiceStreaming: true,
+    voiceSkipTags: true,
+    voiceGapMs: 140,
+    // Voice input: a microphone by the send box; speech becomes text through
+    // the voice server's recognizer (or the browser's own), into the message
+    // box or sent at once.
+    voiceInputEnabled: true,
+    voiceInputProvider: 'local',
+    voiceInputMode: 'box',
+    voiceInputLanguage: 'en-US',
+    // Live chat: after speaking, the words are sent, and once the reply (and
+    // its narration) is done the microphone listens again by itself.
+    voiceLive: false,
+    // Italic passages: the player's thoughts in their voice, other asides in
+    // a quieter aside voice; 'narrator' reads them like narration; 'skip' leaves them out.
+    voiceItalics: 'thought',
+    voiceThought: '',
+    // The story model writes a hidden [[Name|tone]] tag before each spoken
+    // line, thought and change of mood; the reader never sees them.
+    voiceTags: true,
     // Send the curator, progression, game ledger and scene planner at once
     // instead of one after another (for the Claude bridge's agent pool, or a
     // provider that serves several requests at a time).
@@ -1951,6 +2037,8 @@ body.il-keyboard #il_menu_bar{display:none}
 }
 
 const HUD_SVG = {
+    live: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21M9 21h6"/></svg>',
+    voice: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 9.5v5h3.5L12 18.5v-13L7.5 9.5z"/><path d="M15.5 9a4 4 0 0 1 0 6"/><path d="M18 6.5a7.5 7.5 0 0 1 0 11"/></svg>',
     pin: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 21s-6.5-5.6-6.5-11a6.5 6.5 0 0 1 13 0C18.5 15.4 12 21 12 21z"/><circle cx="12" cy="10" r="2.4"/></svg>',
     clock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15.5 14"/></svg>',
     map: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M9 4 3 6v14l6-2 6 2 6-2V4l-6 2-6-2z"/><path d="M9 4v14M15 6v14"/></svg>',
@@ -2374,6 +2462,7 @@ function showEntityCard(name, focus = 'details') {
         </div>`;
     document.body.appendChild(popup);
     fillEntityPortrait(popup);
+    fillEntityVoice(popup);
     popup.querySelector('.il-entity-close').addEventListener('click', () => popup.remove());
     popup.addEventListener('click', event => {
         if (event.target === popup) popup.remove();
@@ -2456,7 +2545,7 @@ function captureReplyChoices(messageIndex) {
 
 const CHOICE_ICONS = Object.freeze({ go: 'fa-person-walking', talk: 'fa-comment', do: 'fa-hand', look: 'fa-eye' });
 
-function fillMessageBox(text) {
+function fillMessageBox(text, { focus = true } = {}) {
     const box = document.getElementById('send_textarea');
     if (!box) return;
     const current = box.value.trim();
@@ -2464,8 +2553,21 @@ function fillMessageBox(text) {
     box.value = !current || current === runtime.lastFilledChoice ? text : `${box.value.trimEnd()}\n${text}`;
     runtime.lastFilledChoice = box.value === text ? text : '';
     box.dispatchEvent(new Event('input', { bubbles: true }));
+    // Spoken words never pull the keyboard up: no focus for voice input.
+    if (!focus) return;
     box.focus();
     box.setSelectionRange?.(box.value.length, box.value.length);
+}
+
+/** Keep the on-screen keyboard down after a spoken turn: SillyTavern refocuses the box when it sends. */
+function keepKeyboardDown() {
+    const box = document.getElementById('send_textarea');
+    if (!box) return;
+    const drop = () => { if (document.activeElement === box) box.blur(); };
+    drop();
+    setTimeout(drop, 50);
+    setTimeout(drop, 300);
+    setTimeout(drop, 900);
 }
 
 // The next moves under the latest reply: the narrator's own choices, or moves
@@ -2856,6 +2958,28 @@ const MENU_ITEMS = [
         shown: settings => settings.gameEnabled !== false,
         open: () => openTradePanel(),
     },
+    {
+        id: 'live',
+        label: () => (runtime.voiceInput?.live ? 'Live on' : 'Live chat'),
+        icon: () => HUD_SVG.live,
+        title: () => (runtime.voiceInput?.live ? 'Live chat on: speak, the reply is read, then you are heard again - tap to stop' : 'Live chat: talk instead of typing; each reply is read before you are heard again'),
+        shown: settings => settings.voiceInputEnabled !== false,
+        open: () => setLiveMode(!voiceInputState().live),
+    },
+    {
+        id: 'voice',
+        label: settings => (settings.voiceAutoPlay === false ? 'Voice off' : 'Voice'),
+        icon: () => HUD_SVG.voice,
+        title: () => {
+            const voice = runtime.voice;
+            if (voice?.status !== 'ok') return `Voice server: ${voice?.detail || 'not checked yet'} - tap a reply's speaker to retry`;
+            return getSettings().voiceAutoPlay === false
+                ? 'Voice narration is off - tap to read replies aloud as they arrive'
+                : `Voice narration on (${voice.detail}) - tap to stop reading replies as they arrive`;
+        },
+        shown: settings => settings.voiceEnabled !== false,
+        open: () => toggleVoiceAutoPlay(),
+    },
 ];
 
 function renderMenuBar() {
@@ -2887,7 +3011,9 @@ function renderMenuBar() {
         button.dataset.menu = item.id;
         button.title = item.title(store);
         button.innerHTML = `${item.icon()}<span></span>`;
-        button.querySelector('span').textContent = item.label;
+        button.querySelector('span').textContent = typeof item.label === 'function' ? item.label(settings) : item.label;
+        if (item.id === 'voice') button.classList.toggle('is-off', settings.voiceAutoPlay === false || runtime.voice?.status !== 'ok');
+        if (item.id === 'live') button.classList.toggle('is-live', Boolean(runtime.voiceInput?.live));
         return button;
     }));
 }
@@ -2925,10 +3051,1311 @@ function openGamePanel(tab = 'bag') {
     runtime.gamePanel.open(tab);
 }
 
-// A trade button writes the player's move into the message box; the story
-// narrates it and the ledger records whatever actually changes hands.
+// --- Voice narration -------------------------------------------------------------
+
+const VOICE_METADATA_KEY = 'innerlore_voices';
+const VOICE_SAMPLE = 'The tide is turning, and the lamps along the harbour wall are lit one by one.';
+
+function voiceState() {
+    if (!runtime.voice) {
+        runtime.voice = { status: 'unknown', detail: '', engine: '', voices: [], token: 0, speaking: -1, lastProbe: 0, audio: null, controller: null };
+    }
+    return runtime.voice;
+}
+
+/** A request to the voice server: direct when a URL is set, else through the storage plugin. */
+function voiceRequest(path, options = {}) {
+    const settings = getSettings();
+    const direct = cleanString(settings.voiceServerUrl, 300).replace(/\/+$/u, '');
+    const url = direct ? `${direct}${path}` : `${settings.storageApiRoot || '/api/plugins/innerlore-storage/v1'}/tts${path}`;
+    const base = direct ? {} : (context().getRequestHeaders?.() || {});
+    return fetch(url, { ...options, headers: { ...base, 'Content-Type': 'application/json', ...(options.headers || {}) } });
+}
+
+async function probeVoiceServer({ force = false } = {}) {
+    const voice = voiceState();
+    const settings = getSettings();
+    if (typeof window === 'undefined' || typeof fetch !== 'function') {
+        voice.status = 'down';
+        voice.detail = 'no browser';
+        return voice;
+    }
+    if (!settings.voiceEnabled) {
+        voice.status = 'off';
+        voice.detail = 'voice narration is off';
+        populateVoiceSelects();
+        return voice;
+    }
+    if (!force && Date.now() - voice.lastProbe < 60_000) return voice;
+    voice.lastProbe = Date.now();
+    try {
+        const response = await voiceRequest('/health', { method: 'GET', signal: AbortSignal.timeout(8_000) });
+        const payload = await response.json();
+        const data = payload?.data ?? payload;
+        if (!response.ok || !data?.ok) throw new Error(payload?.error?.message || payload?.error || `HTTP ${response.status}`);
+        voice.status = 'ok';
+        voice.engine = cleanString(data.engine, 40);
+        voice.voices = (Array.isArray(data.voices) ? data.voices : []).filter(entry => entry?.id).slice(0, 200);
+        voice.stt = cleanString(data.stt, 40);
+        voice.detail = `${voice.engine || 'local'}, ${voice.voices.length} voices${voice.stt ? `, voice input ${voice.stt}` : ', no speech model'}`;
+    } catch (error) {
+        voice.status = 'down';
+        voice.detail = cleanString(error?.message || String(error), 300);
+    }
+    populateVoiceSelects();
+    renderMenuBar();
+    return voice;
+}
+
+function populateVoiceSelects() {
+    if (typeof document === 'undefined') return;
+    const voice = voiceState();
+    const settings = getSettings();
+    for (const [id, key] of [['il_voice_narrator', 'voiceNarrator'], ['il_voice_player', 'voicePlayer'], ['il_voice_unknown', 'voiceUnknown'], ['il_voice_thought', 'voiceThought']]) {
+        const select = document.getElementById(id);
+        if (!select) continue;
+        const wanted = settings[key];
+        const blank = [];
+        if (key === 'voiceThought' || key === 'voicePlayer') {
+            const option = document.createElement('option');
+            option.value = '';
+            option.textContent = key === 'voicePlayer' ? `Auto from your persona (${personaGender()})` : 'Same as the narrator, quieter';
+            option.selected = !wanted;
+            blank.push(option);
+        }
+        select.replaceChildren(...blank, ...voice.voices.map(entry => {
+            const option = document.createElement('option');
+            option.value = entry.id;
+            option.textContent = entry.name || entry.id;
+            option.selected = entry.id === wanted;
+            return option;
+        }));
+        if (!voice.voices.length && key !== 'voiceThought' && key !== 'voicePlayer') {
+            const option = document.createElement('option');
+            option.value = wanted || '';
+            option.textContent = wanted ? `${wanted} (server not reached)` : '(no voices yet)';
+            option.selected = true;
+            select.append(option);
+        }
+    }
+    const status = document.getElementById('il_voice_status');
+    if (status) status.textContent = voice.status === 'ok' ? `Voice server ready: ${voice.detail}.` : voice.status === 'off' ? '' : `Voice server: ${voice.detail || 'not checked yet'}.`;
+}
+
+function chosenVoices() {
+    const records = context().chatMetadata?.[VOICE_METADATA_KEY];
+    return records && typeof records === 'object' ? records : {};
+}
+
+function setChosenVoice(name, voiceId) {
+    const ctx = context();
+    if (!ctx.chatMetadata) return;
+    const records = { ...chosenVoices() };
+    const key = canonicalNameKey(name);
+    if (!key) return;
+    if (voiceId) records[key] = cleanString(voiceId, 40);
+    else delete records[key];
+    ctx.chatMetadata[VOICE_METADATA_KEY] = records;
+    ctx.saveMetadataDebounced?.();
+}
+
+/** The people a reply may quote, with what the story says about them, for the voice cast. */
+function voiceCast(store) {
+    const people = [];
+    const byKey = new Map();
+    const playerKey = canonicalNameKey(context().name1 || '');
+    for (const entity of Object.values(store?.entities || {})) {
+        if (!entity || (entity.type !== 'character' && entity.type !== 'creature') || entity.enabled === false) continue;
+        const key = canonicalNameKey(entity.name);
+        // The player has their own voice setting and takes no cast voice.
+        if (!key || byKey.has(key) || key === playerKey) continue;
+        const person = {
+            name: entity.name,
+            aliases: (entity.aliases || []).slice(0, 6),
+            description: [entity.summary, entity.description, ...(Array.isArray(entity.facts) ? entity.facts.slice(0, 6) : [])].filter(Boolean).join(' '),
+        };
+        byKey.set(key, person);
+        people.push(person);
+    }
+    const game = getSettings().gameEnabled !== false && store ? normalizeGameState(store.game) : null;
+    for (const stage of Object.values(game?.stages || {})) {
+        for (const person of stage.people || []) {
+            const key = canonicalNameKey(person?.name);
+            if (!key) continue;
+            const about = [person.role, person.appearance, person.manner].filter(Boolean).join(' ');
+            const existing = byKey.get(key);
+            if (existing) existing.description = `${existing.description} ${about}`.trim();
+            else if (person.introduced) {
+                const record = { name: person.name, description: about };
+                byKey.set(key, record);
+                people.push(record);
+            }
+        }
+    }
+    return people;
+}
+
+function pickVoice(wanted, gender) {
+    const voices = voiceState().voices;
+    if (voices.some(entry => entry.id === wanted)) return wanted;
+    return voices.find(entry => entry.gender === gender)?.id || voices[0]?.id || '';
+}
+
+/** The player's gender from their persona and name, for the default voice. */
+function personaGender() {
+    const ctx = context();
+    return inferGender(`${ctx.personaDescription || ''} ${ctx.name1 || ''}`) || 'male';
+}
+
+function voicePlan(store) {
+    const settings = getSettings();
+    const narrator = pickVoice(settings.voiceNarrator, 'female');
+    const player = pickVoice(settings.voicePlayer || '', personaGender());
+    const people = voiceCast(store);
+    const chosen = chosenVoices();
+    const unknown = pickVoice(settings.voiceUnknown, 'female');
+    const thought = settings.voiceThought ? pickVoice(settings.voiceThought, 'female') : narrator;
+    const assignment = castVoices({ people, voices: voiceState().voices, narratorVoice: narrator, playerVoice: player, reserved: [unknown, thought], chosen });
+    rememberCast(assignment, chosen, [narrator, player, unknown, thought]);
+    return {
+        narrator,
+        player,
+        unknown,
+        thought,
+        assignment,
+        children: new Set(people.filter(isChild).map(person => canonicalNameKey(person.name))),
+    };
+}
+
+/**
+ * A voice, once given to someone, stays theirs: the cast is written into the
+ * chat the first time it is drawn, so a newcomer never reshuffles the voices
+ * the listener already knows. The person page's Voice select overrides it.
+ */
+function rememberCast(assignment, chosen, reserved = []) {
+    const ctx = context();
+    if (!ctx.chatMetadata || !(assignment instanceof Map)) return;
+    const records = { ...chosen };
+    let changed = false;
+    for (const [key, voiceId] of assignment) {
+        // A remembered voice that is now the narrator's, the player's or the unknown-speaker voice is replaced.
+        if (!key || !voiceId || (records[key] && !reserved.includes(records[key]))) continue;
+        records[key] = voiceId;
+        changed = true;
+    }
+    if (!changed) return;
+    ctx.chatMetadata[VOICE_METADATA_KEY] = records;
+    ctx.saveMetadataDebounced?.();
+}
+
+/** The clips a text becomes: text, voice and speed per segment, with where each ends in the text. */
+function voiceJobsForText(text, store) {
+    const ctx = context();
+    const settings = getSettings();
+    const plan = voicePlan(store);
+    const italics = settings.voiceItalics || 'thought';
+    return segmentSpeech(text, { cast: voiceCast(store), playerName: ctx.name1, keepTags: settings.voiceSkipTags === false })
+        .map(segment => (segment.kind === 'thought' && italics === 'narrator' ? { ...segment, kind: 'narration', tone: 'plain' } : segment))
+        .filter(segment => (segment.kind === 'speech' ? settings.voiceDialogue !== false
+            : segment.kind === 'thought' ? italics !== 'skip'
+                : settings.voiceNarration !== false))
+        .map(segment => ({
+            text: toneText(segment.text, segment.tone),
+            end: segment.end,
+            voice: voiceForSegment(segment, { narratorVoice: plan.narrator, playerVoice: plan.player, unknownVoice: plan.unknown, thoughtVoice: plan.thought, assignment: plan.assignment }),
+            ...prosodyFor(segment, settings.voiceSpeed),
+            tone: segment.tone,
+            kind: segment.kind,
+            speaker: segment.speaker || (segment.kind === 'narration' ? 'narrator' : 'someone'),
+            child: segment.kind !== 'narration' && !segment.player && Boolean(segment.speaker) && plan.children.has(canonicalNameKey(segment.speaker)),
+        }));
+}
+
+function voiceJobsForMessage(messageIndex) {
+    const message = context().chat?.[messageIndex];
+    if (!message || message.is_user || message.is_system) return [];
+    return voiceJobsForText(message.mes, getChatStore());
+}
+
+async function fetchVoiceClip(job, signal) {
+    const settings = getSettings();
+    const response = await voiceRequest('/speak', { method: 'POST', body: JSON.stringify({ text: job.text, voice: job.voice, speed: job.speed, tone: job.tone || undefined, kind: job.kind || undefined, quick: job.quick || undefined, takes: settings.voiceTakes || undefined, steps: settings.voiceSteps || undefined, silence: settings.voiceSilence || undefined }), signal });
+    if (!response.ok) throw new Error(`voice server answered ${response.status}`);
+    return response.arrayBuffer();
+}
+
+/** One shared output: clips are scheduled back to back on it, so joins are seamless. */
+function voiceOutput() {
+    const voice = voiceState();
+    const AudioContextClass = globalThis.AudioContext || globalThis.webkitAudioContext;
+    if (!AudioContextClass) return null;
+    if (!voice.output || voice.output.state === 'closed') {
+        voice.output = new AudioContextClass();
+        voice.nextStart = 0;
+    }
+    return voice.output;
+}
+
+/** The decoded clip coloured by its tone (pitch, breath, tremor, dullness, edge). */
+function colourBuffer(output, buffer, tone, kind = 'speech', child = false) {
+    const settings = getSettings();
+    const strength = Number(settings.voiceEmotion ?? 1);
+    const lift = child ? Number(settings.voiceChildPitch ?? 3) : 0;
+    let data = buffer.getChannelData(0);
+    // A child's voice is the brightest voice raised a few semitones (formants with it): identity, not mood.
+    if (lift > 0) data = pitchShift(data, buffer.sampleRate, lift);
+    // Thoughts are read quietly and slowly; no mood processing on them at all.
+    const coloured = (!tone || !strength || kind === 'thought') ? data : applyToneEffects(data, buffer.sampleRate, tone, strength);
+    if (coloured === buffer.getChannelData(0)) return buffer;
+    const result = output.createBuffer(1, coloured.length, buffer.sampleRate);
+    result.getChannelData(0).set(coloured);
+    return result;
+}
+
+/** The clip without the quiet the synthesizer leaves at both ends (a little is kept). */
+function trimBuffer(output, buffer, { floor = 0.004, keepMs = 40 } = {}) {
+    const data = buffer.getChannelData(0);
+    const window = Math.max(1, Math.floor(buffer.sampleRate / 100));
+    let start = 0;
+    let end = data.length;
+    for (let i = 0; i + window <= data.length; i += window) {
+        let sum = 0;
+        for (let j = i; j < i + window; j += 1) sum += data[j] * data[j];
+        if (Math.sqrt(sum / window) > floor) { start = i; break; }
+    }
+    for (let i = data.length; i - window >= 0; i -= window) {
+        let sum = 0;
+        for (let j = i - window; j < i; j += 1) sum += data[j] * data[j];
+        if (Math.sqrt(sum / window) > floor) { end = i; break; }
+    }
+    const keep = Math.floor((keepMs / 1_000) * buffer.sampleRate);
+    start = Math.max(0, start - keep);
+    end = Math.min(data.length, end + keep);
+    if (end - start >= data.length - window) return buffer;
+    const trimmed = output.createBuffer(1, Math.max(1, end - start), buffer.sampleRate);
+    trimmed.getChannelData(0).set(data.subarray(start, end));
+    return trimmed;
+}
+
+/** Play a decoded clip right after the one before it; resolves when it has ended. */
+function playBuffer(output, buffer, { gain = 1, pause = 0 } = {}) {
+    const voice = voiceState();
+    return new Promise((resolve, reject) => {
+        try {
+            const source = output.createBufferSource();
+            source.buffer = buffer;
+            const amp = output.createGain();
+            amp.gain.value = Math.min(1.6, Math.max(0.3, Number(gain) || 1));
+            source.connect(amp);
+            amp.connect(output.destination);
+            // The line's own pause (its tone, a trailing ellipsis) replaces the fixed gap when longer.
+            const gap = Math.max(Math.max(0, Number(getSettings().voiceGapMs) || 0) / 1_000, Number(pause) || 0);
+            const now = output.currentTime;
+            const start = voice.nextStart > now + 0.01 ? voice.nextStart : now + 0.02;
+            voice.nextStart = start + buffer.duration + gap;
+            voice.source = source;
+            source.addEventListener('ended', () => resolve(), { once: true });
+            source.start(start);
+        } catch (error) {
+            reject(error);
+        }
+    });
+}
+
+function playClipFallback(arrayBuffer) {
+    return new Promise((resolve, reject) => {
+        const url = URL.createObjectURL(new Blob([arrayBuffer], { type: 'audio/wav' }));
+        const audio = new Audio(url);
+        voiceState().audio = audio;
+        const done = () => { URL.revokeObjectURL(url); resolve(); };
+        audio.addEventListener('ended', done, { once: true });
+        audio.addEventListener('error', () => { URL.revokeObjectURL(url); reject(new Error('playback failed')); }, { once: true });
+        audio.play().catch(reject);
+    });
+}
+
+function markSpeakingMessage(index) {
+    if (typeof document === 'undefined') return;
+    for (const element of document.querySelectorAll('#chat .mes.il-speaking')) element.classList.remove('il-speaking');
+    if (index >= 0) document.querySelector(`#chat .mes[mesid="${index}"]`)?.classList.add('il-speaking');
+}
+
+function stopSpeaking() {
+    const voice = voiceState();
+    voice.token += 1;
+    voice.speaking = -1;
+    voice.session = null;
+    voice.controller?.abort();
+    voice.controller = null;
+    try {
+        voice.source?.stop();
+    } catch {
+        // already finished
+    }
+    voice.source = null;
+    voice.nextStart = 0;
+    try {
+        voice.audio?.pause();
+    } catch {
+        // nothing to stop
+    }
+    voice.audio = null;
+    markSpeakingMessage(-1);
+}
+
+/**
+ * A reading session: jobs are appended as text arrives, synthesized a few
+ * ahead, decoded, trimmed and scheduled back to back. `done()` closes it once
+ * the last job is queued.
+ */
+function startVoiceSession(messageIndex) {
+    const voice = voiceState();
+    stopSpeaking();
+    const token = voice.token;
+    const controller = new AbortController();
+    voice.controller = controller;
+    const session = { token, messageIndex, jobs: [], queued: 0, finished: false, pending: [], ahead: 3, playing: null };
+    voice.session = session;
+    voice.speaking = messageIndex;
+    markSpeakingMessage(messageIndex);
+    const output = voiceOutput();
+    const alive = () => voice.token === token;
+    const pump = () => {
+        if (!alive()) return;
+        while (session.pending.length < session.ahead && session.queued < session.jobs.length) {
+            // The first clip is marked quick: the server skips its pitch redraws so the reading starts at once.
+            const job = { ...session.jobs[session.queued], quick: session.queued === 0 };
+            session.queued += 1;
+            const clip = fetchVoiceClip(job, controller.signal)
+                .then(bytes => (output ? output.decodeAudioData(bytes.slice(0)).then(buffer => ({ buffer: trimBuffer(output, colourBuffer(output, buffer, job.tone, job.kind, job.child)) })) : { bytes }))
+                .catch(error => ({ error }));
+            session.pending.push({ job, clip });
+        }
+        if (!session.playing) void play();
+    };
+    const play = async () => {
+        session.playing = (async () => {
+            while (alive()) {
+                const entry = session.pending.shift();
+                if (!entry) break;
+                const clip = await entry.clip;
+                if (!alive()) return;
+                pump();
+                if (clip?.error) {
+                    if (clip.error?.name !== 'AbortError') console.warn(`${LOG_PREFIX} voice segment skipped:`, clip.error);
+                    continue;
+                }
+                try {
+                    if (clip.buffer && output) await playBuffer(output, clip.buffer, { gain: entry.job.gain, pause: entry.job.pause });
+                    else if (clip.bytes) await playClipFallback(clip.bytes);
+                } catch (error) {
+                    if (error?.name === 'NotAllowedError') {
+                        toastr.info('Tap the speaker on a reply once to allow voice narration.', DISPLAY_NAME);
+                        stopSpeaking();
+                        return;
+                    }
+                    console.warn(`${LOG_PREFIX} voice playback:`, error);
+                }
+            }
+            session.playing = null;
+            if (alive() && session.finished && session.queued >= session.jobs.length && !session.pending.length) {
+                voice.speaking = -1;
+                voice.session = null;
+                markSpeakingMessage(-1);
+                liveAfterReply();
+            }
+        })();
+        await session.playing;
+    };
+    return {
+        add(jobs) {
+            if (!alive() || !jobs.length) return;
+            session.jobs.push(...jobs);
+            pump();
+        },
+        done() {
+            session.finished = true;
+            if (alive() && !session.playing && session.queued >= session.jobs.length && !session.pending.length) {
+                voice.speaking = -1;
+                voice.session = null;
+                markSpeakingMessage(-1);
+                liveAfterReply();
+            }
+        },
+        get count() { return session.jobs.length; },
+        get messageIndex() { return messageIndex; },
+        alive,
+    };
+}
+
+/**
+ * Read one reply aloud: the narration in the narrator's voice and each
+ * person's lines in theirs. `manual` is a tap on the speaker, which also
+ * counts as the user gesture the browser wants before audio may start.
+ */
+async function speakMessage(messageIndex, { manual = false } = {}) {
+    const voice = voiceState();
+    const settings = getSettings();
+    if (!settings.enabled || !settings.voiceEnabled) return;
+    if (voice.status !== 'ok') await probeVoiceServer({ force: manual });
+    if (voice.status !== 'ok') {
+        if (manual) toastr.warning(`Voice server: ${voice.detail || 'not reachable'}`, DISPLAY_NAME);
+        return;
+    }
+    if (manual) void voiceOutput()?.resume?.();
+    const jobs = voiceJobsForMessage(messageIndex);
+    if (!jobs.length) return;
+    log(`Voice: reading message ${messageIndex} in ${jobs.length} segment(s) (${[...new Set(jobs.map(job => job.speaker))].join(', ')}).`);
+    const session = startVoiceSession(messageIndex);
+    session.add(jobs);
+    session.done();
+}
+
+/**
+ * Read along while the reply streams: every sentence that enough text
+ * already follows is spoken while the rest is still being written.
+ */
+function voiceStreamProgress(text) {
+    const settings = getSettings();
+    if (typeof window === 'undefined') return;
+    if (!settings.enabled || !settings.voiceEnabled || settings.voiceAutoPlay === false || settings.voiceStreaming === false) return;
+    if (!runtime.activeStoryGenerationId || runtime.storyGenerationType === 'quiet' || runtime.storyGenerationType === 'impersonate') return;
+    const voice = voiceState();
+    if (voice.status !== 'ok') return;
+    const content = String(text || '');
+    // A tool call written as text is not read.
+    if (/^\s*(?:call:|\{|```)/u.test(content)) return;
+    const ctx = context();
+    const messageIndex = ctx.chat.length - 1;
+    const now = Date.now();
+    if (voice.streamAt && now - voice.streamAt < 350 && !voice.streamTimer) {
+        voice.streamTimer = setTimeout(() => {
+            voice.streamTimer = null;
+            voiceStreamProgress(voice.streamText);
+        }, 350);
+        voice.streamText = content;
+        return;
+    }
+    voice.streamText = content;
+    voice.streamAt = now;
+    const generationId = runtime.activeStoryGenerationId;
+    let session = voice.session;
+    if (!session || session.generationId !== generationId) {
+        if (content.trim().length < 40) return;
+        session = startVoiceSession(messageIndex);
+        session.generationId = generationId;
+        voice.session = session;
+        session.streamJobs = 0;
+    }
+    const jobs = voiceJobsForText(content, getChatStore());
+    const settled = settledSegmentCount(jobs, cleanForSpeech(content).length, 60);
+    if (settled > session.streamJobs) {
+        session.add(jobs.slice(session.streamJobs, settled));
+        session.streamJobs = settled;
+    }
+}
+
+/** The reply is complete: what the stream did not reach is read now, or the whole reply when nothing streamed. */
+function voiceStreamFinish(messageIndex) {
+    const voice = voiceState();
+    if (voice.streamTimer) {
+        clearTimeout(voice.streamTimer);
+        voice.streamTimer = null;
+    }
+    const session = voice.session;
+    if (!session || session.messageIndex !== messageIndex || !session.alive()) return false;
+    const jobs = voiceJobsForMessage(messageIndex);
+    if (jobs.length > session.streamJobs) session.add(jobs.slice(session.streamJobs));
+    session.streamJobs = jobs.length;
+    session.done();
+    return true;
+}
+
+async function speakSample(voiceId, name = '') {
+    stopSpeaking();
+    const voice = voiceState();
+    const token = voice.token;
+    const controller = new AbortController();
+    voice.controller = controller;
+    const output = voiceOutput();
+    void output?.resume?.();
+    try {
+        const bytes = await fetchVoiceClip({ text: `${name ? `${name}. ` : ''}${VOICE_SAMPLE}`, voice: voiceId, speed: getSettings().voiceSpeed || 1 }, controller.signal);
+        if (voice.token !== token) return;
+        if (output) await playBuffer(output, trimBuffer(output, await output.decodeAudioData(bytes.slice(0))));
+        else await playClipFallback(bytes);
+    } catch (error) {
+        if (error?.name !== 'AbortError') toastr.warning(`Voice: ${error?.message || error}`, DISPLAY_NAME);
+    }
+}
+
+function scheduleAutoVoice(messageIndex) {
+    const settings = getSettings();
+    if (typeof window === 'undefined' || typeof Audio === 'undefined') return;
+    if (!settings.enabled || !settings.voiceEnabled || settings.voiceAutoPlay === false) return;
+    if (voiceStreamFinish(messageIndex)) return;
+    setTimeout(() => {
+        if (context().chat.length - 1 !== messageIndex || runtime.pendingTextToolCalls) return;
+        if (voiceState().session?.messageIndex === messageIndex) return;
+        void speakMessage(messageIndex);
+    }, 400);
+}
+
+function toggleVoiceAutoPlay() {
+    const settings = getSettings();
+    settings.voiceAutoPlay = settings.voiceAutoPlay === false;
+    saveSettings();
+    if (!settings.voiceAutoPlay) stopSpeaking();
+    else if (voiceState().status !== 'ok') void probeVoiceServer({ force: true });
+    const checkbox = typeof document !== 'undefined' ? document.getElementById?.('il_voice_autoplay') : null;
+    if (checkbox) checkbox.checked = settings.voiceAutoPlay;
+    renderMenuBar();
+}
+
+/** A speaker on every reply: tap to read it, tap again to stop. */
+function ensureVoiceButtons() {
+    if (typeof document === 'undefined' || typeof document.querySelectorAll !== 'function') return;
+    const settings = getSettings();
+    for (const mes of document.querySelectorAll('#chat .mes')) {
+        const existing = mes.querySelector('.il-voice-btn');
+        const eligible = settings.enabled && settings.voiceEnabled && mes.getAttribute('is_user') !== 'true' && mes.getAttribute('is_system') !== 'true';
+        if (!eligible) {
+            existing?.remove();
+            continue;
+        }
+        if (existing) continue;
+        const host = mes.querySelector('.extraMesButtons');
+        if (!host) continue;
+        const button = document.createElement('div');
+        button.className = 'mes_button il-voice-btn fa-solid fa-volume-high interactable';
+        button.title = 'Read aloud (InnerLore voice)';
+        button.tabIndex = 0;
+        host.prepend(button);
+    }
+    markSpeakingMessage(voiceState().speaking);
+}
+
+function bindVoiceButtons() {
+    const chat = typeof document !== 'undefined' ? document.getElementById('chat') : null;
+    if (!chat || runtime.voiceButtonsBound) return;
+    runtime.voiceButtonsBound = true;
+    chat.addEventListener('click', event => {
+        const button = event.target.closest?.('.il-voice-btn');
+        if (!button) return;
+        const index = Number(button.closest('.mes')?.getAttribute('mesid'));
+        if (!Number.isInteger(index)) return;
+        if (voiceState().speaking === index) stopSpeaking();
+        else void speakMessage(index, { manual: true });
+    });
+}
+
+/** The voice picker on someone's page, with a line to hear it. */
+function fillEntityVoice(popup) {
+    const settings = getSettings();
+    const voice = voiceState();
+    if (!settings.voiceEnabled || voice.status !== 'ok' || !voice.voices.length) return;
+    const name = popup.dataset.name || '';
+    const key = canonicalNameKey(name);
+    if (!key) return;
+    const plan = voicePlan(getChatStore());
+    const current = chosenVoices()[key] || plan.assignment.get(key) || plan.unknown;
+    const row = document.createElement('div');
+    row.className = 'il-entity-voice';
+    row.innerHTML = '<label><span>Voice</span><select class="text_pole"></select></label><button type="button" class="il-entity-hear">Hear</button>';
+    const select = row.querySelector('select');
+    for (const entry of voice.voices) {
+        const option = document.createElement('option');
+        option.value = entry.id;
+        option.textContent = entry.name || entry.id;
+        option.selected = entry.id === current;
+        select.append(option);
+    }
+    select.addEventListener('change', () => setChosenVoice(name, select.value));
+    row.querySelector('.il-entity-hear').addEventListener('click', () => void speakSample(select.value, name));
+    const slot = popup.querySelector('.il-entity-portrait-slot');
+    if (slot) slot.after(row);
+    else popup.querySelector('.il-entity-body')?.prepend(row);
+}
+
+// --- Voice input: speak instead of typing ---------------------------------------
+
+function voiceInputState() {
+    if (!runtime.voiceInput) runtime.voiceInput = { recording: false, busy: false, stream: null, context: null, node: null, chunks: [], tracker: null, recognition: null, live: false, livePhase: 'off', liveTimer: null };
+    return runtime.voiceInput;
+}
+
+/**
+ * Live chat: speak, the words are sent, the reply is read, and the
+ * microphone listens again. Phases: listening -> sending -> waiting (for the
+ * reply and its narration) -> listening. Off on a tap, a failure, or when
+ * the page goes to the background.
+ */
+function setLiveMode(on, { fromSettings = false } = {}) {
+    const input = voiceInputState();
+    const settings = getSettings();
+    if (on && !voiceInputAvailable()) {
+        toastr.warning('Voice input is not available here.', DISPLAY_NAME);
+        on = false;
+    }
+    input.live = Boolean(on);
+    if (!fromSettings && settings.voiceLive !== input.live) {
+        settings.voiceLive = input.live;
+        saveSettings();
+        const checkbox = typeof document !== 'undefined' ? document.getElementById?.('il_voice_live') : null;
+        if (checkbox) checkbox.checked = input.live;
+    }
+    clearTimeout(input.liveTimer);
+    input.liveTimer = null;
+    if (input.live) {
+        input.livePhase = 'listening';
+        void voiceOutput()?.resume?.();
+        if (!input.recording && !input.busy) void startVoiceInput();
+    } else {
+        input.livePhase = 'off';
+        if (input.recording) {
+            if (input.recognition) input.recognition.abort?.();
+            else releaseVoiceInput();
+            input.chunks = [];
+        }
+    }
+    setMicState(input.recording ? 'recording' : input.busy ? 'busy' : 'idle');
+    renderMenuBar();
+}
+
+/** Listen again after the reply has been read (or arrived, when nothing is read). */
+function liveListenSoon(delay = 600) {
+    const input = voiceInputState();
+    if (!input.live || input.recording || input.busy) return;
+    clearTimeout(input.liveTimer);
+    input.livePhase = 'listening';
+    input.liveTimer = setTimeout(() => {
+        input.liveTimer = null;
+        if (!input.live || input.recording || input.busy) return;
+        if (runtime.activeStoryGenerationId || voiceState().session) return;
+        void startVoiceInput();
+    }, delay);
+}
+
+/** The reply's narration ended (or there was none): a live chat listens again. */
+function liveAfterReply() {
+    const input = voiceInputState();
+    if (!input.live || input.livePhase !== 'waiting') return;
+    if (runtime.activeStoryGenerationId) return;
+    if (voiceState().session) return;
+    liveListenSoon(500);
+}
+
+function voiceInputAvailable() {
+    const settings = getSettings();
+    if (!settings.enabled || settings.voiceInputEnabled === false || typeof navigator === 'undefined') return false;
+    if (settings.voiceInputProvider === 'browser') return Boolean(globalThis.SpeechRecognition || globalThis.webkitSpeechRecognition);
+    return Boolean(navigator.mediaDevices?.getUserMedia);
+}
+
+const VOICE_TAG_SCRIPT = 'InnerLore voice tags (hidden)';
+
+/**
+ * The reader never sees [[Name|tone]]: a global regex script alters the chat
+ * display only (the stored text and the prompt keep the tags, so the story
+ * model keeps writing them and the voice reader can use them).
+ */
+function ensureVoiceTagRegex() {
+    const ctx = context();
+    const settings = getSettings();
+    const scripts = ctx.extensionSettings?.regex;
+    if (!Array.isArray(scripts)) return;
+    const wanted = Boolean(settings.enabled && settings.voiceEnabled && settings.voiceTags !== false);
+    const index = scripts.findIndex(script => script?.scriptName === VOICE_TAG_SCRIPT);
+    if (!wanted) {
+        if (index >= 0) {
+            scripts.splice(index, 1);
+            ctx.saveSettingsDebounced?.();
+        }
+        return;
+    }
+    if (index >= 0) return;
+    scripts.push({
+        id: `innerlore-voice-tags-${Date.now().toString(36)}`,
+        scriptName: VOICE_TAG_SCRIPT,
+        findRegex: '/\\[\\[\\s*[^\\]|]{1,60}?\\s*(?:\\|\\s*[^\\]]{0,40}?\\s*)?\\]\\][ \\t]*/g',
+        replaceString: '',
+        trimStrings: [],
+        placement: [2],
+        disabled: false,
+        markdownOnly: true,
+        promptOnly: false,
+        runOnEdit: true,
+        substituteRegex: 0,
+        minDepth: null,
+        maxDepth: null,
+    });
+    ctx.saveSettingsDebounced?.();
+    log('Voice tags are hidden from the chat display (regex script added).');
+}
+
+/** Earlier voice defaults that turned out wrong are moved once; a chosen voice is never touched. */
+function migrateVoiceDefaults() {
+    const settings = getSettings();
+    let changed = false;
+    if (settings.voicePlayer === 's5' && !settings.voicePlayerVersion) {
+        settings.voicePlayer = '';
+        settings.voicePlayerVersion = 1;
+        changed = true;
+    }
+    // The first narrator default (Female 3) hisses above the voice band; the cleanest female voice replaces it.
+    if (settings.voiceNarrator === 's2' && !settings.voiceNarratorVersion) {
+        settings.voiceNarrator = 's1';
+        if (settings.voiceUnknown === 's1') settings.voiceUnknown = 's3';
+        settings.voiceNarratorVersion = 1;
+        changed = true;
+    }
+    if (changed) saveSettings();
+}
+
+/** The microphone button beside Send: tap to talk, tap again to finish early. */
+function ensureMicButton() {
+    if (typeof document === 'undefined' || typeof document.getElementById !== 'function') return;
+    const form = document.getElementById('rightSendForm');
+    const existing = document.getElementById('il_mic_button');
+    if (!form) return;
+    if (!voiceInputAvailable()) {
+        existing?.remove();
+        return;
+    }
+    if (existing) return;
+    const button = document.createElement('div');
+    button.id = 'il_mic_button';
+    button.className = 'fa-solid fa-microphone interactable';
+    button.title = 'Speak your turn (InnerLore voice input)';
+    button.tabIndex = 0;
+    let pressTimer = null;
+    let longPressed = false;
+    const press = () => {
+        longPressed = false;
+        clearTimeout(pressTimer);
+        pressTimer = setTimeout(() => {
+            longPressed = true;
+            setLiveMode(!voiceInputState().live);
+            toastr.info(voiceInputState().live ? 'Live chat on: speak, and the reply is read before you are heard again. Hold the microphone to stop.' : 'Live chat off.', DISPLAY_NAME);
+        }, 650);
+    };
+    const release = () => clearTimeout(pressTimer);
+    button.addEventListener('pointerdown', press);
+    button.addEventListener('pointerup', release);
+    button.addEventListener('pointerleave', release);
+    button.addEventListener('pointercancel', release);
+    button.addEventListener('click', () => {
+        if (longPressed) return;
+        void toggleVoiceInput();
+    });
+    const send = document.getElementById('send_but');
+    if (send) form.insertBefore(button, send);
+    else form.append(button);
+}
+
+function setMicState(state, note = '') {
+    const button = typeof document !== 'undefined' ? document.getElementById('il_mic_button') : null;
+    if (!button) return;
+    button.classList.toggle('is-recording', state === 'recording');
+    button.classList.toggle('is-busy', state === 'busy');
+    const live = voiceInputState().live;
+    button.classList.toggle('is-live', live);
+    button.title = state === 'recording' ? `Listening - tap when you are done${live ? ' (live chat: tap and hold to leave)' : ''}` : state === 'busy' ? 'Transcribing…' : live ? 'Live chat: waiting for the reply' : note || 'Speak your turn (InnerLore voice input)';
+}
+
+async function toggleVoiceInput() {
+    const input = voiceInputState();
+    if (input.busy) return;
+    if (input.recording) {
+        if (input.recognition) input.recognition.stop();
+        else await finishVoiceInput();
+        return;
+    }
+    await startVoiceInput();
+}
+
+async function startVoiceInput() {
+    const settings = getSettings();
+    const input = voiceInputState();
+    stopSpeaking();
+    if (settings.voiceInputProvider === 'browser') return startBrowserRecognition();
+    input.typedBefore = document.getElementById('send_textarea')?.value?.trim() || '';
+    try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1 } });
+        const AudioContextClass = globalThis.AudioContext || globalThis.webkitAudioContext;
+        const audioContext = new AudioContextClass();
+        await audioContext.resume?.();
+        const source = audioContext.createMediaStreamSource(stream);
+        const node = audioContext.createScriptProcessor(4096, 1, 1);
+        input.chunks = [];
+        input.tracker = createSilenceTracker();
+        input.stream = stream;
+        input.context = audioContext;
+        input.node = node;
+        input.recording = true;
+        input.partialBusy = false;
+        input.partialText = '';
+        input.partialAt = 0;
+        node.onaudioprocess = event => {
+            if (!input.recording) return;
+            const samples = new Float32Array(event.inputBuffer.getChannelData(0));
+            input.chunks.push(samples);
+            if (input.tracker.feed(samples, audioContext.sampleRate) === 'done') {
+                void finishVoiceInput();
+                return;
+            }
+            // What has been said so far shows in the message box as it is said.
+            if (input.tracker.heardSpeech && !input.partialBusy && Date.now() - input.partialAt > 1_400) void transcribePartial();
+        };
+        source.connect(node);
+        node.connect(audioContext.destination);
+        setMicState('recording');
+    } catch (error) {
+        console.warn(`${LOG_PREFIX} microphone:`, error);
+        toastr.warning(error?.name === 'NotAllowedError' ? 'Microphone access was refused.' : `Microphone: ${error?.message || error}`, DISPLAY_NAME);
+        releaseVoiceInput();
+    }
+}
+
+/** A rolling transcript of the recording so far, shown while the speaker is still talking. */
+async function transcribePartial() {
+    const input = voiceInputState();
+    if (!input.recording || input.partialBusy || !input.context) return;
+    input.partialBusy = true;
+    input.partialAt = Date.now();
+    try {
+        const samples = resample(concatChunks(input.chunks), input.context.sampleRate, TARGET_RATE);
+        if (samples.length < TARGET_RATE / 2) return;
+        const wav = encodeWav(samples, TARGET_RATE);
+        const response = await voiceRequest('/transcribe', { method: 'POST', body: JSON.stringify({ audio: bytesToBase64(wav) }), signal: AbortSignal.timeout(20_000) });
+        const payload = await response.json().catch(() => ({}));
+        const data = payload?.data ?? payload;
+        const text = String(data?.text || '').trim();
+        if (!input.recording || !text || text === input.partialText) return;
+        input.partialText = text;
+        showPartialTranscript(text);
+    } catch (error) {
+        console.debug(`${LOG_PREFIX} partial transcript:`, error?.message || error);
+    } finally {
+        input.partialBusy = false;
+        input.partialAt = Date.now();
+    }
+}
+
+function showPartialTranscript(text) {
+    const box = document.getElementById('send_textarea');
+    if (!box) return;
+    const input = voiceInputState();
+    // Replace the previous partial, keep anything typed before the recording began.
+    const base = input.typedBefore ?? '';
+    box.value = base ? `${base.trimEnd()}\n${text}` : text;
+    runtime.lastFilledChoice = box.value;
+    box.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+function releaseVoiceInput() {
+    const input = voiceInputState();
+    input.recording = false;
+    try { input.node?.disconnect(); } catch { /* already gone */ }
+    try { input.stream?.getTracks().forEach(track => track.stop()); } catch { /* already gone */ }
+    void input.context?.close?.().catch(() => {});
+    input.node = null;
+    input.stream = null;
+    input.context = null;
+    setMicState('idle');
+}
+
+async function finishVoiceInput() {
+    const input = voiceInputState();
+    if (!input.recording || input.busy) return;
+    input.recording = false;
+    const rate = input.context?.sampleRate || TARGET_RATE;
+    const chunks = input.chunks;
+    input.chunks = [];
+    const heard = input.tracker?.heardSpeech;
+    releaseVoiceInput();
+    if (!chunks.length || !heard) {
+        setMicState('idle', 'Nothing heard - tap and speak');
+        if (input.live) liveListenSoon(300);
+        return;
+    }
+    input.busy = true;
+    setMicState('busy');
+    try {
+        const samples = trimSilence(resample(concatChunks(chunks), rate, TARGET_RATE), TARGET_RATE);
+        if (!samples.length) return;
+        const wav = encodeWav(samples, TARGET_RATE);
+        const response = await voiceRequest('/transcribe', { method: 'POST', body: JSON.stringify({ audio: bytesToBase64(wav) }), signal: AbortSignal.timeout(90_000) });
+        const payload = await response.json().catch(() => ({}));
+        const data = payload?.data ?? payload;
+        if (!response.ok || !data || data.ok === false) throw new Error(payload?.error?.message || data?.error || `HTTP ${response.status}`);
+        input.busy = false;
+        deliverTranscript(tidyTranscript(data.text));
+    } catch (error) {
+        console.warn(`${LOG_PREFIX} transcription:`, error);
+        toastr.warning(`Voice input: ${cleanString(error?.message || String(error), 200)}`, DISPLAY_NAME);
+        if (input.live) liveListenSoon(1_500);
+    } finally {
+        input.busy = false;
+        setMicState('idle');
+    }
+}
+
+/** The browser's own recognizer (Chrome on Android uses the system speech service). */
+function startBrowserRecognition() {
+    const input = voiceInputState();
+    const Recognition = globalThis.SpeechRecognition || globalThis.webkitSpeechRecognition;
+    if (!Recognition) {
+        toastr.warning('This browser has no speech recognition; switch voice input to the local server.', DISPLAY_NAME);
+        return;
+    }
+    const recognition = new Recognition();
+    recognition.lang = getSettings().voiceInputLanguage || 'en-US';
+    recognition.interimResults = true;
+    recognition.continuous = false;
+    input.typedBefore = document.getElementById('send_textarea')?.value?.trim() || '';
+    let text = '';
+    recognition.onresult = event => {
+        text = Array.from(event.results).map(result => result[0]?.transcript || '').join(' ');
+        if (text.trim()) {
+            input.partialText = text;
+            showPartialTranscript(text.trim());
+        }
+    };
+    recognition.onerror = event => {
+        if (event.error !== 'aborted' && event.error !== 'no-speech') toastr.warning(`Voice input: ${event.error}`, DISPLAY_NAME);
+    };
+    recognition.onend = () => {
+        input.recording = false;
+        input.recognition = null;
+        setMicState('idle');
+        if (text.trim()) deliverTranscript(tidyTranscript(text));
+        else if (input.live) liveListenSoon(300);
+    };
+    input.recognition = recognition;
+    input.recording = true;
+    setMicState('recording');
+    recognition.start();
+}
+
+function deliverTranscript(text) {
+    const input = voiceInputState();
+    // The live partial made the box's text ours: the final words replace it.
+    if (input.partialText) {
+        const box = document.getElementById('send_textarea');
+        if (box) {
+            box.value = input.typedBefore || '';
+            runtime.lastFilledChoice = '';
+        }
+        input.partialText = '';
+    }
+    if (!text) {
+        if (input.live) {
+            liveListenSoon(300);
+            return;
+        }
+        toastr.info('Nothing was heard.', DISPLAY_NAME);
+        return;
+    }
+    fillMessageBox(text, { focus: false });
+    if (getSettings().voiceInputMode === 'send' || input.live) {
+        const send = document.getElementById('send_but');
+        if (send && !send.classList.contains('displayNone')) {
+            input.livePhase = 'waiting';
+            send.click();
+            keepKeyboardDown();
+        } else {
+            toastr.info('Not connected: your words are in the message box.', DISPLAY_NAME);
+            if (input.live) liveListenSoon(2_000);
+        }
+    }
+}
+
+// --- Game actions: the game system applies what the player does ----------------
+
+/** The index of the player message this turn answers; -1 when there is none. */
+function turnPlayerIndex() {
+    return lastPlayerMessageIndex(context().chat || []);
+}
+
+/** This turn's record of applied actions, started afresh for a new turn. */
+function ensureTurnActions(reset = false) {
+    const chatId = currentChatId();
+    const playerIndex = turnPlayerIndex();
+    const current = runtime.turnActions;
+    if (!reset && current && current.chatId === chatId && current.playerIndex === playerIndex) return current;
+    runtime.turnActions = { chatId, playerIndex, outcomes: [], rounds: 0, closed: false, reply: -1 };
+    return runtime.turnActions;
+}
+
+/**
+ * A swipe or regenerate replaces a reply: the game actions that reply made
+ * are discarded from the journal, and the new reply may make its own.
+ */
+function beginTurnActions(generationType) {
+    if (getSettings().gameEnabled === false || !['swipe', 'regenerate'].includes(generationType)) return;
+    const ctx = context();
+    const replyIndex = ctx.chat.length - 1;
+    const turn = ensureTurnActions(true);
+    turn.reply = replyIndex;
+    const store = getChatStore();
+    if (!store) return;
+    const before = normalizeGameState(store.game).journal.length;
+    store.game = gameStateWithout(store.game, entry => entry.source === ACTION_SOURCE && entry.reply === replyIndex);
+    if (store.game.journal.length !== before) {
+        log(`A ${generationType} discards ${before - store.game.journal.length} game action(s) of the reply it replaces.`);
+        void saveChatStore().catch(error => console.warn(`${LOG_PREFIX} Could not save after discarding game actions:`, error));
+        updateInjection();
+    }
+}
+
+/** Whether the story model is offered the game tools on this connection. */
+function gameToolsOffered() {
+    const settings = getSettings();
+    if (!settings.enabled || settings.gameEnabled === false || settings.gameToolsEnabled === false) return false;
+    if (storyIsTextCompletion()) return false;
+    const ctx = context();
+    return ctx.mainApi === 'openai' && Boolean(ctx.chatCompletionSettings?.function_calling);
+}
+
+/** What the packet tells the narrator about this turn's actions and the tools. */
+function turnActionsForPrompt() {
+    const settings = getSettings();
+    if (settings.gameEnabled === false) return null;
+    const turn = runtime.turnActions;
+    const current = turn && turn.chatId === currentChatId() && turn.playerIndex === turnPlayerIndex() ? turn : null;
+    const offered = gameToolsOffered();
+    return {
+        resolved: renderResolvedActions(current?.outcomes || [], { toolsOffered: offered && !current?.closed }),
+        guidance: renderToolGuidance({ offered, resolved: Boolean(current?.closed) }),
+    };
+}
+
+function gameActionContext(store) {
+    const ctx = context();
+    const scene = displayScene(store);
+    return {
+        ...gameContext(normalizeGameState(store.game), { playerName: ctx.name1, entities: store.entities, scenePlace: gamePlaceOf(scene, store) }),
+        present: (scene?.participants || []).map(person => person.name),
+    };
+}
+
+/**
+ * Apply game actions now: each is checked against the state, journaled under
+ * this turn, and the packet is rebuilt so the story narrates the result.
+ * Returns one outcome per action.
+ */
+async function applyGameActionsNow(actions, { via = 'tool' } = {}) {
+    const store = getChatStore();
+    if (!store || getSettings().gameEnabled === false) {
+        return actions.map(action => ({ ok: false, kind: action?.kind, action, text: '', reason: 'The game state is not available in this chat.' }));
+    }
+    const ctx = context();
+    const turn = ensureTurnActions();
+    const at = Math.max(0, turn.playerIndex);
+    const replyIndex = turn.reply >= 0 ? turn.reply : ctx.chat.length;
+    const outcomes = [];
+    for (const action of actions) {
+        const result = resolveGameAction(store.game, action, gameActionContext(store));
+        const outcome = result.outcome;
+        if (outcome.ok && result.ops.length) {
+            if (actionAlreadyApplied(store.game, result.ops, at)) {
+                outcome.text = `${outcome.text} (already applied this turn)`;
+                outcome.repeated = true;
+            } else {
+                const applied = applyGameOperations(store.game, result.ops, { messageIndex: at, source: ACTION_SOURCE });
+                store.game = applied.state;
+                const sequences = new Set(applied.applied.map(entry => entry.seq));
+                for (const entry of store.game.journal) if (sequences.has(entry.seq)) entry.reply = replyIndex;
+                if (applied.rejected.length) {
+                    outcome.ok = false;
+                    outcome.reason = `${outcome.text} (rejected: ${applied.rejected.map(item => item.reason).join('; ')})`;
+                }
+            }
+        }
+        outcomes.push(outcome);
+        turn.outcomes.push(outcome);
+        log(`Game action (${via}): ${outcome.ok ? 'done' : 'not done'} - ${outcome.text || outcome.reason}`);
+    }
+    if (via !== 'panel') {
+        turn.rounds += 1;
+        if (turn.rounds >= 2 || turn.outcomes.length >= 8) turn.closed = true;
+    }
+    updateInjection();
+    try {
+        updateCastCards();
+        const playerLabel = cleanString(ctx.name1, 100) || 'You';
+        if (runtime.gamePanel?.isOpen()) runtime.gamePanel.refresh(store, displayScene(store), playerLabel);
+        if (runtime.tradePanel?.isOpen()) runtime.tradePanel.refresh(store, displayScene(store), playerLabel);
+    } catch (error) {
+        console.warn(`${LOG_PREFIX} HUD refresh after game actions:`, error);
+    }
+    await saveChatStore().catch(error => console.warn(`${LOG_PREFIX} Could not save game actions:`, error));
+    return outcomes;
+}
+
+function outcomeReply(outcome) {
+    return outcome.ok ? `DONE: ${outcome.text}` : `NOT DONE: ${outcome.reason}`;
+}
+
+function parseToolArguments(args) {
+    if (args && typeof args === 'object') return args;
+    if (typeof args === 'string') {
+        try {
+            return JSON.parse(args);
+        } catch {
+            return parseGemmaArguments(args.replace(/^\s*\{|\}\s*$/gu, ''));
+        }
+    }
+    return {};
+}
+
+/** The game tools, offered to the story model while a story turn is being written. */
+function registerGameTools() {
+    const ctx = context();
+    if (typeof ctx.registerFunctionTool !== 'function') {
+        console.warn(`${LOG_PREFIX} SillyTavern does not expose function tools; game actions arrive as text calls only.`);
+        return;
+    }
+    for (const tool of GAME_TOOLS) {
+        ctx.registerFunctionTool({
+            name: tool.name,
+            displayName: tool.displayName,
+            description: tool.description,
+            parameters: tool.parameters,
+            shouldRegister: () => gameToolsOffered() && Boolean(runtime.activeStoryGenerationId)
+                && !['quiet', 'impersonate', 'continue'].includes(runtime.storyGenerationType) && !ensureTurnActions().closed,
+            formatMessage: args => {
+                const parsed = parseToolArguments(args);
+                return `InnerLore game: ${parsed.action || tool.name.replace('game_', '')} ${parsed.item || parsed.amount || ''}`.trim();
+            },
+            action: async args => {
+                const action = actionFromToolCall(tool.name, parseToolArguments(args));
+                if (!action) return `NOT DONE: ${tool.name} needs a valid action and item.`;
+                const [outcome] = await applyGameActionsNow([action], { via: 'tool' });
+                return outcomeReply(outcome);
+            },
+            stealth: false,
+        });
+    }
+}
+
+/**
+ * A reply that is a tool call written as text (a provider without a tool
+ * parser): hold it; after the generation ends the calls are applied, the
+ * call text removed, and the narration asked for.
+ */
+function interceptTextToolCalls(messageIndex) {
+    const settings = getSettings();
+    if (!settings.enabled || settings.gameEnabled === false || settings.gameToolsEnabled === false) return false;
+    const message = context().chat?.[messageIndex];
+    if (!message || message.is_user || message.is_system) return false;
+    const parsed = parseTextToolCalls(message.mes);
+    if (!parsed.calls.length) return false;
+    runtime.pendingTextToolCalls = { chatId: currentChatId(), messageIndex, calls: parsed.calls, rest: parsed.rest };
+    log(`The story model wrote ${parsed.calls.length} game tool call(s) as text; InnerLore applies them and asks for the narration.`);
+    showNarratorPill('Applying game actions');
+    return true;
+}
+
+async function finishTextToolCalls() {
+    const pending = runtime.pendingTextToolCalls;
+    runtime.pendingTextToolCalls = null;
+    if (!pending || pending.chatId !== currentChatId()) return;
+    const ctx = context();
+    const message = ctx.chat?.[pending.messageIndex];
+    if (!message) return;
+    try {
+        const actions = pending.calls.map(call => actionFromToolCall(call.name, call.arguments)).filter(Boolean);
+        if (actions.length) await applyGameActionsNow(actions, { via: 'text' });
+        const prose = cleanString(pending.rest, 10_000);
+        if (prose.length >= 40) {
+            // The call rode inside a narrated reply: the prose stays, the call text goes.
+            message.mes = prose;
+            ctx.updateMessageBlock?.(pending.messageIndex, message);
+            await ctx.saveChat?.();
+            return;
+        }
+        if (pending.messageIndex !== ctx.chat.length - 1) return;
+        await ctx.deleteLastMessage?.();
+        updateInjection();
+        await ctx.generate('normal');
+    } catch (error) {
+        console.error(`${LOG_PREFIX} Could not finish the text tool calls:`, error);
+    }
+}
+
+/** A trade button: its sentence goes into the message box, its action waits for the send. */
+function queuePanelAction(text, action) {
+    fillMessageBox(text);
+    if (!action) return;
+    runtime.pendingPanelActions = [
+        ...(runtime.pendingPanelActions || []).filter(item => Date.now() - item.at < 30 * 60_000),
+        { text, action, at: Date.now() },
+    ];
+}
+
+/** The trade-screen actions whose sentences were just sent are applied before the story sees the turn. */
+function resolvePanelActions() {
+    const pending = runtime.pendingPanelActions || [];
+    if (!pending.length) return;
+    const chat = context().chat || [];
+    const message = chat[chat.length - 1];
+    if (!message?.is_user) return;
+    const sent = String(message.mes || '');
+    const matched = pending.filter(item => sent.includes(item.text));
+    runtime.pendingPanelActions = [];
+    if (!matched.length) return;
+    void applyGameActionsNow(matched.map(item => item.action), { via: 'panel' });
+}
+
+/** What the game system applied while the passage was written, for the ledger to skip. */
+function alreadyRecordedLines(store, start, end, playerName) {
+    const game = normalizeGameState(store.game);
+    return actionEntriesInRange(game, start, end).map(entry => entryText(entry, game, playerName)).filter(Boolean);
+}
+
+/**
+ * Tool calls need SillyTavern's function calling on, and prompt
+ * post-processing that keeps tool messages. Done once, when the setting is on.
+ */
+function ensureToolCallingSetup() {
+    const settings = getSettings();
+    if (settings.gameToolsEnabled === false || (settings.gameToolsSetupVersion || 0) >= 1) return;
+    const ctx = context();
+    let changed = false;
+    const upgrades = { semi: 'semi_tools', merge: 'merge_tools', strict: 'strict_tools', claude: 'merge_tools' };
+    const chat = ctx.chatCompletionSettings;
+    if (chat && chat.function_calling !== true) {
+        chat.function_calling = true;
+        const checkbox = typeof document !== 'undefined' ? document.getElementById?.('openai_function_calling') : null;
+        if (checkbox) checkbox.checked = true;
+        changed = true;
+    }
+    if (chat && upgrades[chat.custom_prompt_post_processing]) {
+        chat.custom_prompt_post_processing = upgrades[chat.custom_prompt_post_processing];
+        changed = true;
+    }
+    const profiles = ctx.extensionSettings?.connectionManager?.profiles;
+    for (const profile of Array.isArray(profiles) ? profiles : []) {
+        const mode = profile?.['prompt-post-processing'];
+        if (profile?.mode === 'cc' && upgrades[mode]) {
+            profile['prompt-post-processing'] = upgrades[mode];
+            changed = true;
+        }
+    }
+    settings.gameToolsSetupVersion = 1;
+    saveSettings();
+    if (changed) {
+        ctx.saveSettingsDebounced?.();
+        log('Game tools: function calling turned on and prompt post-processing switched to the tool-keeping variants.');
+    }
+}
+
+// A trade button writes the player's move into the message box; when it is
+// sent the game system applies it, and the story narrates the result.
 function openTradePanel() {
-    if (!runtime.tradePanel) runtime.tradePanel = createTradePanel({ onAction: fillMessageBox });
+    if (!runtime.tradePanel) runtime.tradePanel = createTradePanel({ onAction: queuePanelAction });
     const store = getChatStore();
     runtime.tradePanel.refresh(store, displayScene(store), cleanString(context().name1, 100) || 'You');
     runtime.tradePanel.open();
@@ -3141,6 +4568,7 @@ function updateInjection({ isContinue = false } = {}) {
             recentText,
             playerName: ctx.name1,
             currentIndex: ctx.chat.length - 1,
+            turnActions: turnActionsForPrompt(),
             settings: {
                 ...derivedSettings,
                 currentIndex: ctx.chat.length - 1,
@@ -3189,6 +4617,12 @@ function updateInjection({ isContinue = false } = {}) {
         textMemory = anchored ? textPacket.memory : '';
         const note = anchored ? textPacket.note : [textPacket.memory, textPacket.note].filter(Boolean).join('\n');
         runtime.localContext = { ...runtime.localContext, rendered: note, compact: note };
+    }
+    if (textMode) {
+        // A NovelAI connection's story prompt leads the memory block.
+        const shellConnection = typeof window !== 'undefined' ? window.InnerLoreShell?.activeConnection?.() : null;
+        const lead = shellConnection?.mode === 'novel' ? cleanString(shellConnection.storyPrompt, 20_000).trim() : '';
+        if (lead) textMemory = [lead, textMemory].filter(Boolean).join('\n\n');
     }
     if (textMemory !== (runtime.lastTextMemory || '')) {
         // 0 = in the prompt, right after the story string (NovelAI's memory).
@@ -3609,6 +5043,28 @@ function applySettingsToUI() {
         il_assisted_background: settings.assistedBackground || 'auto',
         il_cast_cards: settings.castCardsEnabled !== false,
         il_portraits_enabled: settings.portraitsEnabled !== false,
+        il_game_tools: settings.gameToolsEnabled !== false,
+        il_voice_enabled: settings.voiceEnabled !== false,
+        il_voice_autoplay: settings.voiceAutoPlay !== false,
+        il_voice_dialogue: settings.voiceDialogue !== false,
+        il_voice_narration: settings.voiceNarration !== false,
+        il_voice_speed: settings.voiceSpeed ?? 1,
+        il_voice_url: settings.voiceServerUrl || '',
+        il_voice_streaming: settings.voiceStreaming !== false,
+        il_voice_skip_tags: settings.voiceSkipTags !== false,
+        il_voice_gap: settings.voiceGapMs ?? 140,
+        il_voice_emotion: settings.voiceEmotion ?? 1,
+        il_voice_child_pitch: settings.voiceChildPitch ?? 3,
+        il_voice_steps: settings.voiceSteps ?? 0,
+        il_voice_silence: settings.voiceSilence ?? 0,
+        il_voice_takes: settings.voiceTakes ?? 1,
+        il_voice_italics: settings.voiceItalics || 'thought',
+        il_voice_tags: settings.voiceTags !== false,
+        il_voice_live: settings.voiceLive === true,
+        il_voice_input_enabled: settings.voiceInputEnabled !== false,
+        il_voice_input_provider: settings.voiceInputProvider || 'local',
+        il_voice_input_mode: settings.voiceInputMode || 'box',
+        il_voice_input_language: settings.voiceInputLanguage || 'en-US',
         il_portrait_url: settings.portraitServerUrl,
         il_portrait_style: settings.portraitStyle,
         il_portrait_negative: settings.portraitNegative,
@@ -4608,6 +6064,7 @@ async function analyzeRange(targetStore, startIndex, endIndex, options = {}) {
             characterCard: getCardContext(),
             settings,
             assisted: ledgerAssisted,
+            alreadyRecorded: alreadyRecordedLines(targetStore, gameStart, gameEnd, ctx.name1),
         }), signal, 'game')]);
     }
     if (plannerPlan) {
@@ -4889,8 +6346,10 @@ function commitGamePasses(targetStore, pass) {
         const grounded = pass.ledgerAssisted
             ? groundedRecords(pass.gameResponse.payload, pass.gameTranscript)
             : { payload: pass.gameResponse.payload, dropped: [] };
-        const { ops, rejected } = normalizeGameRecords(grounded.payload, context, { source: 'ledger' });
-        const applied = applyGameOperations(targetStore.game, ops, { messageIndex: pass.gameEnd, source: 'ledger', rejected });
+        const normalized = normalizeGameRecords(grounded.payload, context, { source: 'ledger' });
+        // What the game system applied while the passage was written is not recorded twice.
+        const deduped = dropDuplicateLedgerOps(normalized.ops, actionEntriesInRange(targetStore.game, pass.gameStart, pass.gameEnd));
+        const applied = applyGameOperations(targetStore.game, deduped.ops, { messageIndex: pass.gameEnd, source: 'ledger', rejected: normalized.rejected });
         targetStore.game = applied.state;
         // The story's stated prices replace what the planner had guessed for the same kind of thing here.
         const retired = supersededPlannerPrices(targetStore.game, applied.applied.map(entry => entry.op));
@@ -4902,6 +6361,7 @@ function commitGamePasses(targetStore, pass) {
             applied: applied.applied.length,
             introduced: introductions.length,
             ungrounded: grounded.dropped.length,
+            duplicates: deduped.dropped.length,
             rejected: applied.rejected.slice(0, 12),
             shortfall: applied.applied.reduce((sum, entry) => sum + (entry.shortfall || 0), 0),
             retiredPrices: retired.length,
@@ -6797,6 +8257,10 @@ function bindUIEvents() {
         updateUI();
     });
     bindCheckbox('il_game_ledger_enabled', 'gameLedgerEnabled');
+    bindCheckbox('il_game_tools', 'gameToolsEnabled', () => {
+        ensureToolCallingSetup();
+        updateInjection();
+    });
     bindCheckbox('il_scene_planner_enabled', 'scenePlannerEnabled');
     bindCheckbox('il_scene_planner_prefetch', 'scenePlannerPrefetch');
     bindCheckbox('il_story_preempts_background', 'storyPreemptsBackground');
@@ -6828,6 +8292,50 @@ function bindUIEvents() {
             saveSettings();
         });
     }
+    bindCheckbox('il_voice_enabled', 'voiceEnabled', () => {
+        if (getSettings().voiceEnabled) void probeVoiceServer({ force: true });
+        else stopSpeaking();
+        ensureVoiceButtons();
+        ensureVoiceTagRegex();
+        renderMenuBar();
+    });
+    bindCheckbox('il_voice_autoplay', 'voiceAutoPlay', () => renderMenuBar());
+    bindCheckbox('il_voice_dialogue', 'voiceDialogue');
+    bindCheckbox('il_voice_streaming', 'voiceStreaming');
+    bindCheckbox('il_voice_skip_tags', 'voiceSkipTags');
+    bindCheckbox('il_voice_tags', 'voiceTags', () => ensureVoiceTagRegex());
+    bindNumber('il_voice_gap', 'voiceGapMs', 0, 1_000);
+    bindNumber('il_voice_emotion', 'voiceEmotion', 0, 1.5);
+    bindNumber('il_voice_child_pitch', 'voiceChildPitch', 0, 8);
+    bindNumber('il_voice_steps', 'voiceSteps', 0, 50);
+    bindNumber('il_voice_silence', 'voiceSilence', 0, 5);
+    bindNumber('il_voice_takes', 'voiceTakes', 1, 3);
+    bindCheckbox('il_voice_narration', 'voiceNarration');
+    bindNumber('il_voice_speed', 'voiceSpeed', 0.6, 1.5);
+    for (const [id, key] of [['il_voice_narrator', 'voiceNarrator'], ['il_voice_player', 'voicePlayer'], ['il_voice_unknown', 'voiceUnknown'], ['il_voice_thought', 'voiceThought']]) {
+        document.getElementById(id)?.addEventListener('change', event => {
+            getSettings()[key] = cleanString(event.target.value, 40);
+            saveSettings();
+        });
+    }
+    bindSelect('il_voice_italics', 'voiceItalics', ['thought', 'narrator', 'skip']);
+    bindCheckbox('il_voice_live', 'voiceLive', () => setLiveMode(getSettings().voiceLive, { fromSettings: true }));
+    document.getElementById('il_voice_url')?.addEventListener('change', event => {
+        getSettings().voiceServerUrl = cleanString(event.target.value, 300);
+        saveSettings();
+        void probeVoiceServer({ force: true });
+    });
+    bindCheckbox('il_voice_input_enabled', 'voiceInputEnabled', () => ensureMicButton());
+    bindSelect('il_voice_input_provider', 'voiceInputProvider', ['local', 'browser'], () => ensureMicButton());
+    bindSelect('il_voice_input_mode', 'voiceInputMode', ['box', 'send']);
+    document.getElementById('il_voice_input_language')?.addEventListener('change', event => {
+        getSettings().voiceInputLanguage = cleanString(event.target.value, 20) || 'en-US';
+        saveSettings();
+    });
+    document.getElementById('il_voice_test')?.addEventListener('click', async () => {
+        const voice = await probeVoiceServer({ force: true });
+        toastr[voice.status === 'ok' ? 'success' : 'warning'](`Voice server: ${voice.detail}`, DISPLAY_NAME);
+    });
     document.getElementById('il_open_game_panel')?.addEventListener('click', () => openGamePanel('bag'));
     document.getElementById('il_reset_game')?.addEventListener('click', resetGameState);
     document.getElementById('il_context_profile')?.addEventListener('change', event => {
@@ -7306,6 +8814,10 @@ function registerEvents() {
         runtime.currentTelemetryTurn = nextTelemetryTurn();
         runtime.turnSentAt = Date.now();
         recordTelemetryEntry({ kind: 'story', phase: 'sent' });
+            // A new turn: what the trade screen asked for is applied now, so
+            // the story narrates a done deal instead of guessing at one.
+            ensureTurnActions(true).reply = context().chat.length;
+            resolvePanelActions();
             // A move to a place with nothing prepared starts the planner now.
             maybeStageDestination();
             // GENERATION_STARTED fires before SillyTavern moves the textarea
@@ -7321,6 +8833,8 @@ function registerEvents() {
         });
     }
     eventSource.on(events.MESSAGE_RECEIVED, (messageIndex, generationType) => {
+        if (interceptTextToolCalls(messageIndex)) return;
+        scheduleAutoVoice(messageIndex);
         captureReplyChoices(messageIndex);
         runtime.choicesHidden = false;
         const store = getChatStore();
@@ -7428,6 +8942,11 @@ function registerEvents() {
         runtime.storyGenerationBlock = null;
         runtime.blockedGenerationCancellation = false;
         const storyGeneration = !['quiet', 'impersonate'].includes(generationType);
+        if (!isDryRun && storyGeneration) {
+            // The reply being replaced or continued is no longer read.
+            stopSpeaking();
+            beginTurnActions(generationType);
+        }
         // Fold the just-sent player turn into the SQLite narrative log before
         // prompt assembly so the history section inside the macro is current.
         if (!isDryRun && storyGeneration) syncNarrativeLog();
@@ -7556,7 +9075,9 @@ function registerEvents() {
             for (let i = 0; i < messages.length; i++) {
                 if (
                     messages[i]?.role === 'system'
-                    || i === lastUser
+                    // The live turn and anything after it: the tool calls and
+                    // their results that a follow-up generation narrates.
+                    || i >= lastUser
                     || (firstAssistant > -1 && i < firstAssistant && messages[i]?.role === 'user')
                 ) keep.add(i);
             }
@@ -7582,6 +9103,11 @@ function registerEvents() {
     }
     if (events.GENERATION_ENDED) {
         eventSource.on(events.GENERATION_ENDED, () => {
+            // The swapped main prompt must never outlive the reply: a settings
+            // save between turns would otherwise persist it into the preset.
+            restoreNarratorPromptSwap();
+            if (runtime.pendingTextToolCalls) void finishTextToolCalls();
+            else setTimeout(liveAfterReply, 1_200);
             if (runtime.storyRequestInFlight) {
                 runtime.storyRequestInFlight = false;
                 runtime.announceStoryState?.(false);
@@ -7688,6 +9214,17 @@ function registerEvents() {
     });
     for (const event of [events.CHARACTER_MESSAGE_RENDERED, events.MESSAGE_SENT, events.MESSAGE_DELETED]) {
         if (event) eventSource.on(event, () => renderPlayerChoices());
+    }
+    for (const event of [events.CHARACTER_MESSAGE_RENDERED, events.CHAT_CHANGED, events.MESSAGE_SWIPED, events.MORE_MESSAGES_LOADED]) {
+        if (event) eventSource.on(event, () => setTimeout(ensureVoiceButtons, 0));
+    }
+    if (events.CHAT_CHANGED) eventSource.on(events.CHAT_CHANGED, () => {
+        stopSpeaking();
+        ensureMicButton();
+    });
+    if (events.STREAM_TOKEN_RECEIVED) eventSource.on(events.STREAM_TOKEN_RECEIVED, text => voiceStreamProgress(text));
+    for (const event of [events.MESSAGE_SWIPED, events.MESSAGE_DELETED, events.MESSAGE_SENT, events.GENERATION_STOPPED]) {
+        if (event) eventSource.on(event, () => stopSpeaking());
     }
     for (const event of [events.GENERATION_ENDED, events.GENERATION_STOPPED]) {
         if (event) eventSource.on(event, () => {
@@ -7851,11 +9388,25 @@ if (RUNNING_IN_BROWSER) (async function init() {
         const ctx = context();
         getSettings();
         registerContextMacros();
+        registerGameTools();
         const html = await ctx.renderExtensionTemplateAsync('third-party/SillyTavern-InnerLore', 'settings', {});
         $('#extensions_settings2').append(html);
+        applyShellIntegration();
         populateProfiles();
         applySettingsToUI();
         bindUIEvents();
+        ensureToolCallingSetup();
+        migrateVoiceDefaults();
+        bindVoiceButtons();
+        ensureMicButton();
+        ensureVoiceTagRegex();
+        if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+            document.addEventListener('visibilitychange', () => {
+                if (document.hidden && voiceInputState().live) setLiveMode(false);
+            });
+        }
+        if (getSettings().voiceLive) getSettings().voiceLive = false;
+        void probeVoiceServer({ force: true }).then(() => ensureVoiceButtons());
         registerSlashCommands();
         initializeServerStateAfterAppReady(ctx);
         console.log(`${LOG_PREFIX} UI loaded; server-side Auto Lore initialization is deferred until SillyTavern is ready.`);

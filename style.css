@@ -854,3 +854,22 @@ button.il-mv-card-toggle {
     opacity: 0.75;
     font-size: 0.9em;
 }
+
+
+/* Voice narration */
+.il-voice-btn{opacity:.75}
+.mes.il-speaking .il-voice-btn{opacity:1;color:var(--SmartThemeQuoteColor,#8ec5ff);animation:il-voice-pulse 1.4s ease-in-out infinite}
+@keyframes il-voice-pulse{0%,100%{transform:scale(1)}50%{transform:scale(1.18)}}
+.il-entity-voice{display:flex;align-items:center;gap:8px;margin:0 0 12px;font-size:.9em}
+.il-entity-voice label{display:flex;align-items:center;gap:6px;flex:1;min-width:0}
+.il-entity-voice select{flex:1;min-width:0}
+.il-entity-voice .il-entity-hear{border:1px solid var(--SmartThemeBorderColor,rgba(255,255,255,.25));background:transparent;color:inherit;border-radius:6px;padding:4px 10px;cursor:pointer}
+#il_menu_bar .il-menu-item.is-off{opacity:.55}
+
+/* Voice input */
+#il_mic_button{opacity:.8;cursor:pointer}
+#il_mic_button.is-recording{color:#ff6b6b;opacity:1;animation:il-voice-pulse 1s ease-in-out infinite}
+#il_mic_button.is-busy{opacity:.5;animation:il-voice-pulse 1.6s ease-in-out infinite}
+#il_mic_button.is-live{color:#7ee787}
+#il_mic_button.is-live.is-recording{color:#ff6b6b}
+#il_menu_bar .il-menu-item.is-live{color:#7ee787}

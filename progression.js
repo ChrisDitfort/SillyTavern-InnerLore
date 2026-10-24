@@ -18,7 +18,7 @@ import {
     getEventDirectorStats,
     normalizeEventDirectorMetadata,
     normalizeEventProposalMap,
-} from './event-director.js';
+} from './event-director.js?v=2';
 
 export const PROGRESSION_VERSION = 3;
 

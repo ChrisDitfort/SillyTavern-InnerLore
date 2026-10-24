@@ -156,3 +156,44 @@ test('a proposal keyed by the record word or naming ids with type prefixes is no
     assert.equal(definition.key, 'bell_rings');
     assert.equal(definition.actorName, 'hob garrow');
 });
+
+test('a proposal whose consequences were written as several += lines (Gemma, 2026-10-24) is accepted', async () => {
+    const { parseInnerLoreOutput } = await import('../output-codec.js?v=3');
+    const raw = `INNERLORE EVENT_DIRECTOR 1
+PROPOSAL hunger_escalation
+title = Amy's Hunger Manifests
+description = Amy's predatory hunger becomes physically apparent or creates a subtle pressure as she remains in close proximity to Chris.
+trigger_mode = any
+trigger_after_seconds = 300
+trigger_time_certainty = estimated
+activation_visibility = observable
+subjects += Amy
+subjects += Chris
+consequences += Amy's physical state reflects her blood-thirst.
+consequences += The atmosphere in the room becomes tense.
+priority = 15
+confidence = 0.88
+rationale = Amy has admitted to constant blood-thirst and is currently sitting beside Chris; the active process of her hunger should eventually manifest as a narrative beat.
+ITEM source_refs
+kind = process
+id = process:amy_blood_thirst
+END
+ITEM source_refs
+kind = npc_motive
+id = npc_motive:amy
+END
+END
+REASON = Amy's active blood-thirst process and her proximity to Chris provide a grounded basis for a tension-building event.
+DONE`;
+    const parsed = parseInnerLoreOutput(raw, { format: 'dsl', task: 'event_director', salvageTruncated: true });
+    assert.deepEqual(parsed.proposal.consequences, ["Amy's physical state reflects her blood-thirst.", 'The atmosphere in the room becomes tense.'], 'the DSL hands the validator a list');
+    const sources = [
+        { id: 'process:amy_blood_thirst', kind: 'process', name: "Amy's Blood-Thirst", revision: 1, messageIndex: 79, generated: false },
+        { id: 'npc_motive:amy', kind: 'npc_motive', name: 'Amy', revision: 1, messageIndex: 79, generated: false },
+    ];
+    const result = validateEventDirectorPayload(parsed, { state: createProgressionState(), sources, playerName: 'Chris', minimumConfidence: 0.82, includePrivateMinds: true });
+    assert.equal(result.proposal.key, 'hunger_escalation');
+    assert.equal(result.proposal.consequences, "Amy's physical state reflects her blood-thirst. The atmosphere in the room becomes tense.");
+    assert.equal(result.proposal.triggerAfterSeconds, 300);
+    assert.deepEqual(result.proposal.subjects, ['Amy', 'Chris']);
+});

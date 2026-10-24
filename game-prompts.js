@@ -11,7 +11,7 @@ import {
     reputationTier,
     stageFor,
     standingTier,
-} from './game.js?v=2';
+} from './game.js?v=3';
 
 function clip(value, maximum) {
     const text = cleanString(value, maximum);
@@ -100,6 +100,9 @@ export function ledgerStateView(state, options = {}) {
         coin_of_people_here: present.map(name => state.purses?.[canonicalNameKey(name)])
             .filter(purse => purse && purse.amount !== null)
             .map(purse => ({ name: purse.name, coin: formatMoney(purse.amount, state.currency) })),
+        ...(Array.isArray(options.alreadyRecorded) && options.alreadyRecorded.length
+            ? { already_recorded_this_passage: options.alreadyRecorded.slice(0, 12) }
+            : {}),
         bodies_here: here.filter(item => item.bodyOf).map(body => ({
             key: body.key,
             of: body.bodyOf,
@@ -177,6 +180,7 @@ OBJECTS
 - holder and to are "player", a person's canonical name, a place's canonical name from KNOWN_PLACES, or the key of a listed container object (to put something inside it).
 - value is an honest estimate of worth in the world's money when the story implies it; price is what a seller asks. Use the established currency units.
 - GAME_STATE.prepared_here lists objects the scene planner set out that the story has not shown yet. When PASSAGE shows one, reuse its key with the op that fits (take, buy, or update when it is merely found or noticed).
+- GAME_STATE.already_recorded_this_passage lists exchanges the game system itself applied while PASSAGE was written (a purchase, a gift, a payment): they are already in GAME_STATE. Never record them again, in any form; record only what PASSAGE adds beyond them.
 - GAME_STATE.prepared_people_here lists people the scene planner prepared who have NOT appeared yet. Never attribute an object, a payment or a regard change to one of them unless PASSAGE uses that exact name; someone PASSAGE describes without a name (an old man by the fire) is not one of them, and gets their own record under the story's description.
 
 MONEY

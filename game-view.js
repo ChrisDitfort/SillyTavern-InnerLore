@@ -7,7 +7,7 @@
  */
 
 import { canonicalNameKey, cleanString, escapeHtml, resolveLocationReference } from './core.js?v=48';
-import { gameOverview, normalizeGameState, placeRefOf, tradeOverview } from './game.js?v=2';
+import { gameOverview, normalizeGameState, placeRefOf, tradeOverview } from './game.js?v=3';
 
 const STYLE_ID = 'il_game_inline_styles_v2';
 const STYLES = `
@@ -287,6 +287,23 @@ export function tradeAction(act, partner, item = null, offered = null) {
     }
 }
 
+/**
+ * The game action a trade button stands for, for the game system to apply
+ * when the sentence is sent. Asking, searching and stripping a body are the
+ * story's to tell, so they carry no action.
+ */
+export function tradePanelAction(act, partner, item = null, offered = null) {
+    if (!partner || !item) return null;
+    switch (act) {
+    case 'buy':
+    case 'service': return { kind: 'buy', item: item.name, person: partner.name, price: item.price || null, quantity: 1 };
+    case 'sell': return { kind: 'sell', item: item.name, person: partner.name, price: item.value || null, quantity: 1 };
+    case 'swap': return offered ? { kind: 'swap', item: item.name, offer: offered.name, person: partner.name } : null;
+    case 'take': return { kind: 'take', item: item.name, person: partner.name, quantity: 1 };
+    default: return null;
+    }
+}
+
 function tradeRow(item, actions, side = item.price || item.value) {
     return `<li class="il-game-row il-trade-row">
         <span class="il-game-main"><b>${escapeHtml(item.name)}</b>${item.quantity > 1 ? `<span class="il-game-qty">×${item.quantity}</span>` : ''}${item.description ? `<small>${escapeHtml(item.description)}</small>` : ''}${side ? `<small class="il-trade-price">${escapeHtml(side)}</small>` : ''}</span>
@@ -374,13 +391,15 @@ export function createTradePanel({ onAction } = {}) {
             }
             const theirs = current?.wares.find(item => item.key === key) || current?.services?.find(item => item.key === key) || null;
             const mine = last.mine.find(item => item.key === key) || null;
+            const wanted = act === 'offer' ? current.wares.find(item => item.key === swapFor) : null;
             const text = act === 'offer'
-                ? tradeAction('swap', current, current.wares.find(item => item.key === swapFor), mine)
+                ? tradeAction('swap', current, wanted, mine)
                 : tradeAction(act, current, act === 'sell' ? mine : theirs);
             if (!text) return;
+            const action = tradePanelAction(act === 'offer' ? 'swap' : act, current, act === 'sell' ? mine : (wanted || theirs), mine);
             swapFor = null;
             close();
-            onAction?.(text);
+            onAction?.(text, action);
         });
         overlay.addEventListener('keydown', event => {
             if (event.key === 'Escape') close();

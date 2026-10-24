@@ -6,7 +6,7 @@
  * and the picture is kept per chat in the chat's metadata, keyed by name.
  */
 import { canonicalNameKey, cleanString, hashString } from './core.js?v=48';
-import { normalizeGameState } from './game.js?v=2';
+import { normalizeGameState } from './game.js?v=3';
 import { gameRequestSettings } from './game-client.js?v=1';
 import { sendInnerLoreRequest } from './llm-client.js?v=16';
 

@@ -101,6 +101,63 @@ export function init(router, args) {
         return sendData(response, { status: 'ok', plugin: info.id, openWorlds: count });
     });
 
+    // Voice narration: InnerLore's local text-to-speech server (server/tts)
+    // reached through SillyTavern, so a phone browsing from another device
+    // and a page served over HTTPS both hear it. INNERLORE_TTS_URL overrides
+    // the default http://127.0.0.1:8778.
+    const ttsBase = () => String(process.env.INNERLORE_TTS_URL || 'http://127.0.0.1:8778').replace(/\/+$/u, '');
+    router.get('/v1/tts/health', async (request, response) => {
+        try {
+            const upstream = await fetch(`${ttsBase()}/health`, { signal: AbortSignal.timeout(4_000) });
+            const payload = await upstream.json();
+            return sendData(response, { ...payload, url: ttsBase() });
+        } catch (error) {
+            return sendError(response, 503, `Voice server not reachable at ${ttsBase()}: ${error?.message || error}`, 'tts_unavailable');
+        }
+    });
+    router.post('/v1/tts/speak', async (request, response) => {
+        const body = request.body && typeof request.body === 'object' ? request.body : {};
+        const text = String(body.text || '').slice(0, 2_000);
+        if (!text.trim()) return sendError(response, 400, 'text is empty', 'bad_request');
+        try {
+            const upstream = await fetch(`${ttsBase()}/speak`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ text, voice: body.voice, speed: body.speed, steps: body.steps, silence: body.silence }),
+                signal: AbortSignal.timeout(120_000),
+            });
+            if (!upstream.ok) {
+                const detail = await upstream.text().catch(() => '');
+                return sendError(response, 502, `Voice server answered ${upstream.status}: ${detail.slice(0, 300)}`, 'tts_failed');
+            }
+            const audio = Buffer.from(await upstream.arrayBuffer());
+            response.setHeader('Content-Type', upstream.headers.get('content-type') || 'audio/wav');
+            response.setHeader('Cache-Control', 'no-store');
+            return response.status(200).send(audio);
+        } catch (error) {
+            return sendError(response, 503, `Voice server not reachable at ${ttsBase()}: ${error?.message || error}`, 'tts_unavailable');
+        }
+    });
+
+    router.post('/v1/tts/transcribe', async (request, response) => {
+        const body = request.body && typeof request.body === 'object' ? request.body : {};
+        const audio = String(body.audio || '');
+        if (!audio) return sendError(response, 400, 'audio is empty', 'bad_request');
+        try {
+            const upstream = await fetch(`${ttsBase()}/transcribe`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ audio }),
+                signal: AbortSignal.timeout(120_000),
+            });
+            const payload = await upstream.json().catch(() => ({}));
+            if (!upstream.ok || !payload?.ok) return sendError(response, 502, `Voice server: ${payload?.error || upstream.status}`, 'stt_failed');
+            return sendData(response, { text: String(payload.text || '') });
+        } catch (error) {
+            return sendError(response, 503, `Voice server not reachable at ${ttsBase()}: ${error?.message || error}`, 'tts_unavailable');
+        }
+    });
+
     router.post('/v1/worlds/', (request, response) => {
         const id = String(request.body?.id || '').trim();
         if (!id) return sendError(response, 400, 'A world id is required', 'INVALID_WORLD_ID');

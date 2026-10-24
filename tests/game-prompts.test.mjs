@@ -9,8 +9,8 @@ import {
     gameContext,
     itemsAtPlace,
     normalizeGameRecords,
-} from '../game.js?v=2';
-import { buildLedgerMessages, buildPlannerMessages } from '../game-prompts.js?v=2';
+} from '../game.js?v=3';
+import { buildLedgerMessages, buildPlannerMessages } from '../game-prompts.js?v=3';
 import { validateGamePayload } from '../game-client.js?v=1';
 import { parseInnerLoreDsl, parseInnerLoreOutput, prepareOutputMessages } from '../output-codec.js?v=3';
 
@@ -195,9 +195,9 @@ DONE`, { format: 'dsl', task: 'planner' });
 
 
 test('an assisted planner is asked for a smaller cast with one carried thing each', async () => {
-    const { buildPlannerMessages } = await import('../game-prompts.js?v=2');
+    const { buildPlannerMessages } = await import('../game-prompts.js?v=3');
     const { createEmptyStore } = await import('../core.js?v=48');
-    const { createGameState } = await import('../game.js?v=2');
+    const { createGameState } = await import('../game.js?v=3');
     const base = { game: createGameState(), store: createEmptyStore('cast'), targets: [{ name: 'Salt Lantern', reason: 'the player is here' }], startingKit: true, playerName: 'Jet', settings: {} };
     const plain = buildPlannerMessages(base).map(m => m.content).join('\n');
     const assisted = buildPlannerMessages({ ...base, assisted: true }).map(m => m.content).join('\n');

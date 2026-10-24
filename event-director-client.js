@@ -1,5 +1,5 @@
 import { sendInnerLoreRequest } from './llm-client.js?v=16';
-import { validateEventDirectorPayload } from './event-director.js';
+import { validateEventDirectorPayload } from './event-director.js?v=2';
 import { buildEventDirectorRepairMessages } from './event-director-prompts.js';
 import { EVENT_DIRECTOR_JSON_SCHEMA } from './structured-output.js';
 import {

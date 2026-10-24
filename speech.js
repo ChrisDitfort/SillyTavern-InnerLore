@@ -1,0 +1,583 @@
+/**
+ * InnerLore voice narration: a reply split into narration and each person's
+ * spoken lines, each line attributed to its speaker, a voice chosen for every
+ * person from what the story says about them, and a little prosody from the
+ * punctuation. Pure module: no DOM, no audio.
+ */
+
+import { canonicalNameKey, cleanString, normalizeName } from './core.js?v=48';
+
+const QUOTE_PAIRS = [['"', '"'], ['“', '”'], ['«', '»'], ['「', '」']];
+const SPEECH_VERBS = 'thought|thinks|think|wondered|wonders|mused|muses|realised|realized|decided|decides|reflected|reminded (?:himself|herself|themself)|told (?:himself|herself|themself)|said|says|say|asked|asks|ask|replied|replies|reply|answered|answers|whispered|whispers|murmured|murmurs|muttered|mutters|hissed|hisses|snapped|snaps|called|calls|cried|cries|shouted|shouts|yelled|yells|roared|roars|growled|growls|laughed|laughs|chuckled|chuckles|sighed|sighs|breathed|breathes|added|adds|went on|continued|continues|offered|offers|admitted|admits|agreed|agrees|insisted|insists|warned|warns|told|tells|began|begins|managed|manages|grunted|grunts|barked|barks|purred|purrs|sang|sings|spat|spits|drawled|drawls|wondered|wonders|repeated|repeats|pressed|presses|demanded|demands|observed|observes|noted|notes|remarked|remarks|announced|announces|declared|declares|promised|promises|pleaded|pleads|protested|protests|conceded|concedes|explained|explains|greeted|greets|ventured|ventures|exclaimed|exclaims|intoned|intones|rasped|rasps|crooned|croons|mumbled|mumbles|stammered|stammers|blurted|blurts|scoffed|scoffs|sneered|sneers|teased|teases|urged|urges|prompted|prompts|corrected|corrects|finished|finishes|interrupted|interrupts|cut in|put in|chimed in';
+const QUIET_VERBS = /\b(?:whisper|murmur|mutter|breathe|hush|under (?:his|her|their) breath|softly|quietly|low voice)/iu;
+const LOUD_VERBS = /\b(?:shout|yell|roar|bellow|bark|cried out|snap|thunder|holler|scream)/iu;
+const NAME_WORD = '[A-Z][\\p{L}\'’-]+(?:\\s+(?:of|the|de|van|von|du|la|le)\\s+[A-Z][\\p{L}\'’-]+|\\s+[A-Z][\\p{L}\'’-]+){0,2}';
+const PRONOUN = '(?:he|she|they|it)';
+const MIN_SEGMENT = 24;
+const MAX_SEGMENT = 420;
+/** Narration sentences are read in runs up to this long: fewer joins, better prosody. */
+const NARRATION_RUN = 220;
+const THOUGHT_MIN_WORDS = 3;
+const THOUGHT_OPEN = '\u2066';
+const THOUGHT_CLOSE = '\u2069';
+
+/**
+ * Tones the story model may name in a voice tag, and what each does to the
+ * delivery: speed, loudness, and the pause left after the line (seconds).
+ */
+export const TONES = Object.freeze({
+    // Pace, loudness and the pause after the line carry most of each mood;
+    // these keep the voice itself untouched.
+    neutral: { speed: 1, gain: 1, pause: 0.12 },
+    plain: { speed: 1, gain: 1, pause: 0.12 },
+    warm: { speed: 0.96, gain: 1, pause: 0.16 },
+    tender: { speed: 0.88, gain: 0.82, pause: 0.26 },
+    sad: { speed: 0.85, gain: 0.8, pause: 0.36 },
+    tired: { speed: 0.86, gain: 0.82, pause: 0.3 },
+    dreamy: { speed: 0.88, gain: 0.85, pause: 0.34 },
+    hesitant: { speed: 0.9, gain: 0.95, pause: 0.34 },
+    quiet: { speed: 0.92, gain: 0.68, pause: 0.22 },
+    whisper: { speed: 0.9, gain: 0.5, pause: 0.26 },
+    afraid: { speed: 1.08, gain: 0.9, pause: 0.14 },
+    tense: { speed: 1.05, gain: 1, pause: 0.08 },
+    urgent: { speed: 1.14, gain: 1.1, pause: 0.04 },
+    angry: { speed: 1.1, gain: 1.25, pause: 0.08 },
+    shout: { speed: 1.08, gain: 1.4, pause: 0.12 },
+    loud: { speed: 1.05, gain: 1.25, pause: 0.12 },
+    excited: { speed: 1.12, gain: 1.12, pause: 0.08 },
+    happy: { speed: 1.05, gain: 1.06, pause: 0.12 },
+    amused: { speed: 1.02, gain: 1.02, pause: 0.16 },
+    mocking: { speed: 0.96, gain: 1.05, pause: 0.2 },
+    sly: { speed: 0.9, gain: 0.88, pause: 0.26 },
+    cold: { speed: 0.94, gain: 0.95, pause: 0.26 },
+    wary: { speed: 0.94, gain: 0.94, pause: 0.22 },
+    curious: { speed: 1, gain: 1, pause: 0.16 },
+    pleading: { speed: 1.04, gain: 1, pause: 0.14 },
+    bored: { speed: 0.88, gain: 0.88, pause: 0.28 },
+    firm: { speed: 0.96, gain: 1.12, pause: 0.2 },
+    surprised: { speed: 1.1, gain: 1.12, pause: 0.16 },
+    pain: { speed: 0.95, gain: 1.1, pause: 0.24 },
+    disgusted: { speed: 0.94, gain: 1, pause: 0.22 },
+    aroused: { speed: 0.88, gain: 0.82, pause: 0.3 },
+    lust: { speed: 0.84, gain: 0.76, pause: 0.38 },
+    drunk: { speed: 0.84, gain: 1, pause: 0.28 },
+    question: { speed: 1, gain: 1, pause: 0.16 },
+});
+export const TONE_NAMES = Object.freeze(Object.keys(TONES).filter(name => !['plain', 'question', 'hesitant', 'loud', 'quiet'].includes(name)));
+const TONE_ALIASES = { seductive: 'lust', sultry: 'lust', horny: 'lust', lustful: 'lust', hungry: 'lust', flirtatious: 'aroused', flirty: 'aroused', breathless: 'aroused', heated: 'aroused', startled: 'surprised', astonished: 'surprised', hurt: 'pain', agony: 'pain', wounded: 'pain', revolted: 'disgusted', disgust: 'disgusted', tipsy: 'drunk', slurred: 'drunk', calm: 'neutral', gentle: 'tender', soft: 'quiet', whispering: 'whisper', whispered: 'whisper', shouting: 'shout', yelling: 'shout', furious: 'angry', irritated: 'angry', annoyed: 'angry', scared: 'afraid', fearful: 'afraid', nervous: 'afraid', anxious: 'tense', worried: 'tense', hurried: 'urgent', joyful: 'happy', cheerful: 'happy', laughing: 'amused', wry: 'amused', teasing: 'mocking', sarcastic: 'mocking', cunning: 'sly', suspicious: 'wary', guarded: 'wary', grim: 'cold', flat: 'cold', stern: 'firm', commanding: 'firm', sorrowful: 'sad', mournful: 'sad', weary: 'tired', exhausted: 'tired', wistful: 'dreamy', thoughtful: 'dreamy', musing: 'dreamy', eager: 'excited', thrilled: 'excited', begging: 'pleading', desperate: 'pleading', uncertain: 'hesitant', unsure: 'hesitant', interested: 'curious', puzzled: 'curious', surprised: 'excited', shocked: 'afraid', embarrassed: 'hesitant', proud: 'firm', loving: 'tender', kind: 'warm', friendly: 'warm', analytical: 'cold', calculating: 'sly', measured: 'firm', matteroffact: 'neutral', neutralcalm: 'neutral', resolute: 'firm', determined: 'firm', confident: 'firm', defiant: 'firm', insistent: 'urgent', brisk: 'urgent', hasty: 'urgent', skeptical: 'wary', sceptical: 'wary', cautious: 'wary', bitter: 'cold', dismissive: 'bored', indifferent: 'bored', dry: 'cold', cruel: 'cold', menacing: 'cold', icy: 'cold', threatening: 'angry', hostile: 'angry', playful: 'amused', hopeful: 'warm', relieved: 'warm', grateful: 'warm', reassuring: 'warm', smug: 'mocking', pensive: 'dreamy', somber: 'sad', sombre: 'sad', melancholy: 'sad', gloomy: 'sad', resigned: 'tired', weak: 'tired', panicked: 'afraid', terrified: 'afraid', horrified: 'afraid', alarmed: 'afraid', shaky: 'afraid', stunned: 'surprised', impressed: 'surprised', awed: 'surprised', intrigued: 'curious', inquisitive: 'curious', breathy: 'aroused', pained: 'pain', strained: 'pain', sarcastically: 'mocking', dryly: 'cold', softly: 'quiet', quietly: 'quiet', loudly: 'loud', firmly: 'firm', coldly: 'cold', warmly: 'warm' };
+
+/** A tone name the story wrote, normalized to one the delivery knows; '' when unknown. */
+export function normalizeTone(raw) {
+    const key = String(raw || '').trim().toLocaleLowerCase().replace(/[^a-z]/gu, '');
+    if (!key) return '';
+    if (TONES[key]) return key;
+    if (TONE_ALIASES[key]) return TONE_ALIASES[key];
+    const prefix = Object.keys(TONES).find(name => key.startsWith(name) || name.startsWith(key.slice(0, 5)));
+    return prefix || '';
+}
+
+/**
+ * Voice tags the story model writes before a line: [[Mara|wary]], [[Pip]],
+ * [[narrator|tense]]. They are hidden from the reader and stripped here.
+ */
+export const VOICE_TAG = /\[\[\s*([^\]|]{1,60}?)\s*(?:\|\s*([^\]]{0,40}?)\s*)?\]\]/gu;
+
+export function stripVoiceTags(text) {
+    return String(text || '').replace(VOICE_TAG, '').replace(/[ \t]{2,}/gu, ' ').replace(/^[ \t]+/gmu, '');
+}
+
+const MALE_WORDS = ['he', 'him', 'his', 'himself', 'man', 'men', 'boy', 'lad', 'gentleman', 'lord', 'sir', 'mister', 'mr', 'father', 'dad', 'husband', 'brother', 'son', 'uncle', 'nephew', 'king', 'prince', 'duke', 'baron', 'monk', 'priest', 'guy', 'fellow', 'bloke', 'grandfather', 'widower', 'squire', 'knight', 'master'];
+const FEMALE_WORDS = ['she', 'her', 'hers', 'herself', 'woman', 'women', 'girl', 'lass', 'lady', 'madam', 'mistress', 'mrs', 'miss', 'ms', 'mother', 'mum', 'mom', 'wife', 'sister', 'daughter', 'aunt', 'niece', 'queen', 'princess', 'duchess', 'baroness', 'nun', 'priestess', 'maid', 'matron', 'grandmother', 'widow', 'dame', 'lassie'];
+const OLD_WORDS = /\b(?:old|elderly|aged|ancient|grey-haired|gray-haired|white-haired|grizzled|wizened|grandmother|grandfather|crone|greybeard|graybeard|veteran|weathered|wrinkled|stooped)\b/iu;
+const YOUNG_WORDS = /\b(?:boy|girl|child|kid|lad|lass|lassie|young|youth|teen|apprentice|urchin|little|small|stable boy|page)\b/iu;
+
+function hash(text) {
+    let value = 2166136261;
+    for (const char of String(text)) {
+        value ^= char.codePointAt(0);
+        value = Math.imul(value, 16777619) >>> 0;
+    }
+    return value >>> 0;
+}
+
+/** Plain text for a voice: no markup, code, links or stage brackets. */
+export function cleanForSpeech(text) {
+    let value = String(text || '');
+    value = value.replace(/```[\s\S]*?```/gu, ' ');
+    value = value.replace(/<(?:br|p|div|li|h\d)\b[^>]{0,200}>/giu, '\n').replace(/<[^>]{1,200}>/gu, '');
+    value = value.replace(/!\[[^\]]*\]\([^)]*\)/gu, ' ');
+    value = value.replace(/\[([^\]]+)\]\([^)]*\)/gu, '$1');
+    value = value.replace(/https?:\/\/\S+/gu, ' ');
+    value = value.replace(/\(\s*OOC[^)]*\)|\[\s*OOC[^\]]*\]/giu, ' ');
+    value = value.replace(/^[ \t]{0,3}#{1,6}[ \t]+/gmu, '');
+    value = value.replace(/^[ \t]{0,3}(?:[-*+]|\d+\.)[ \t]+/gmu, '');
+    value = value.replace(/\*\*([^*]+)\*\*/gu, '$1').replace(/__([^_]+)__/gu, '$1');
+    // Italics of a few words or more are thoughts or asides, read apart from
+    // the narration; a word or two of emphasis stays inline.
+    const thought = (match, inner) => (inner.trim().split(/\s+/u).length >= THOUGHT_MIN_WORDS ? `${THOUGHT_OPEN}${inner.trim()}${THOUGHT_CLOSE}` : inner);
+    value = value.replace(/(?<![\p{L}\p{N}*])\*([^*\n]+)\*(?![\p{L}\p{N}*])/gu, thought).replace(/(?<![\p{L}\p{N}_])_([^_\n]+)_(?![\p{L}\p{N}_])/gu, thought);
+    value = value.replace(/[~`>]+/gu, ' ');
+    value = value.replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}]/gu, ' ');
+    value = value.replace(/\s*\n\s*\n\s*/gu, '\n\n').replace(/[ \t]+/gu, ' ').replace(/ +([.,;:!?])/gu, '$1');
+    return value.trim();
+}
+
+function nameTokens(name) {
+    return normalizeName(name).split(/[\s'’-]+/u).filter(token => token.length >= 3 && !/^(?:the|of|and|de|van|von|du|la|le)$/iu.test(token));
+}
+
+/**
+ * The cast as name matchers: a person is found by full name, or by one of
+ * their name words that no other cast member shares.
+ */
+export function castMatchers(cast = [], playerName = '') {
+    const player = normalizeName(playerName);
+    // The player may also be in the cast (InnerLore keeps a record of them): one matcher, marked as the player.
+    const people = [...cast.map(person => ({ ...person, name: normalizeName(person?.name || '') }))
+        .filter(person => person.name && (!player || canonicalNameKey(person.name) !== canonicalNameKey(player)))];
+    if (player) people.unshift({ name: player, player: true });
+    const counts = new Map();
+    for (const person of people) for (const token of new Set(nameTokens(person.name).map(token => token.toLocaleLowerCase()))) counts.set(token, (counts.get(token) || 0) + 1);
+    return people.map(person => {
+        const tokens = nameTokens(person.name).filter(token => counts.get(token.toLocaleLowerCase()) === 1);
+        const labels = [person.name, ...tokens, ...(person.aliases || [])].map(label => label.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'));
+        return { ...person, key: canonicalNameKey(person.name), pattern: new RegExp(`(?<![\\p{L}'’])(?:${labels.join('|')})(?![\\p{L}])`, 'giu') };
+    });
+}
+
+function findPeople(text, matchers) {
+    const found = [];
+    for (const person of matchers) {
+        person.pattern.lastIndex = 0;
+        let match;
+        while ((match = person.pattern.exec(text)) !== null) {
+            found.push({ person, index: match.index, end: match.index + match[0].length });
+            if (match[0].length === 0) person.pattern.lastIndex += 1;
+        }
+    }
+    return found.sort((a, b) => a.index - b.index);
+}
+
+function quoteSpans(paragraph) {
+    const spans = [];
+    for (const [open, close] of [...QUOTE_PAIRS, [THOUGHT_OPEN, THOUGHT_CLOSE]]) {
+        let from = 0;
+        for (;;) {
+            const start = paragraph.indexOf(open, from);
+            if (start < 0) break;
+            const end = paragraph.indexOf(close, start + 1);
+            if (end < 0) break;
+            const inner = paragraph.slice(start + 1, end).trim();
+            if (inner.length >= 1) spans.push({ start, end: end + 1, text: inner, thought: open === THOUGHT_OPEN });
+            from = end + 1;
+        }
+    }
+    return spans.sort((a, b) => a.start - b.start).filter((span, index, all) => !all.some((other, j) => j < index && other.end > span.start));
+}
+
+const speakerAfter = new RegExp(`^[\\s,.;:!?—–-]*(?:${PRONOUN}\\s+)?(?:(?:${SPEECH_VERBS})\\s+)?(${NAME_WORD})`, 'u');
+const verbAfter = new RegExp(`^[\\s,.;:!?—–-]*(?:(${NAME_WORD})\\s+(?:${SPEECH_VERBS})|(?:${SPEECH_VERBS})\\s+(${NAME_WORD})|(${PRONOUN})\\s+(?:${SPEECH_VERBS}))`, 'iu');
+const verbBefore = new RegExp(`(${NAME_WORD}|${PRONOUN})(?:\\s+[\\p{L}\\s,]{0,40})?\\s+(?:${SPEECH_VERBS})[^.!?"\\u201C\\u201D]{0,40}[,:]?\\s*$`, 'iu');
+const colonBefore = new RegExp(`(${NAME_WORD})\\s*:\\s*$`, 'u');
+
+function resolveName(text, matchers) {
+    if (!text) return null;
+    const found = findPeople(text, matchers);
+    return found[0]?.person || null;
+}
+
+/**
+ * Who says a quote: a speech verb with a name right after or before it, a
+ * "Name:" lead-in, a pronoun resolved to the last person named, or the only
+ * cast member in the paragraph. Returns the person or null.
+ */
+function attribute(paragraph, span, matchers, memory, { strongOnly = false } = {}) {
+    const after = paragraph.slice(span.end, span.end + 90);
+    const before = paragraph.slice(Math.max(0, span.start - 160), span.start);
+    let candidate = null;
+    const tail = verbAfter.exec(after);
+    if (tail) {
+        // The name groups are case-insensitive, so "she said" lands in them too.
+        const name = tail[1] || tail[2] || tail[3] || '';
+        candidate = /^(?:he|she|they|it)$/iu.test(name) ? pronounSpeaker(name, before, matchers, memory) : resolveName(name, matchers);
+    }
+    if (!candidate) {
+        const lead = verbBefore.exec(before) || colonBefore.exec(before);
+        if (lead) candidate = /^(?:he|she|they|it)$/iu.test(lead[1]) ? pronounSpeaker(lead[1], before, matchers, memory) : resolveName(lead[1], matchers);
+    }
+    if (!candidate) {
+        const close = speakerAfter.exec(after);
+        if (close && new RegExp(`\\b(?:${SPEECH_VERBS})\\b`, 'iu').test(after.slice(0, 60))) candidate = resolveName(close[1], matchers);
+    }
+    if (!candidate && strongOnly) return null;
+    if (!candidate) {
+        // Whoever acts in the sentence right before the quote speaks it: "Mara wiped the counter. "Three shillings.""
+        // Only the subject counts; a name later in the sentence is who they act on ("She glances at Amy. "Go."").
+        // A sentence that starts with a pronoun points back to the person it stands for.
+        // A sentence may end in a closing quote: "You have a roof." She looks at Amy.
+        const sentence = before.trimEnd().split(/(?<=[.!?]["\u201D\u00BB]?)\s+/u).at(-1) || '';
+        const earlier = before.slice(0, Math.max(0, before.trimEnd().length - sentence.length));
+        const people = findPeople(sentence, matchers);
+        const subject = people.find(entry => /^[\s"\u201C\u00AB*_]*(?:(?:the|old|young|little)\s+)?$/iu.test(sentence.slice(0, entry.index)));
+        const pronoun = /^[\s"\u201C\u00AB*_]*(he|she|they)\b/iu.exec(sentence);
+        if (subject) candidate = subject.person;
+        else if (pronoun) candidate = pronounSpeaker(pronoun[1], earlier, matchers, memory);
+        else if (people.length === 1 && !pronoun) candidate = people[0].person;
+    }
+    if (!candidate) {
+        const people = findPeople(paragraph.slice(0, span.start) + paragraph.slice(span.end), matchers).filter(entry => !entry.person.player || /\b(?:I|my|me)\b/u.test(span.text) === false);
+        const names = [...new Set(people.map(entry => entry.person.key))];
+        if (names.length === 1) candidate = people[0].person;
+    }
+    return candidate;
+}
+
+function pronounSpeaker(pronoun, before, matchers, memory) {
+    const people = findPeople(before, matchers);
+    const wanted = /^she$/iu.test(pronoun) ? 'female' : /^he$/iu.test(pronoun) ? 'male' : '';
+    const fits = person => !wanted || !person.gender || person.gender === wanted;
+    const last = [...people].reverse().find(entry => fits(entry.person));
+    if (last) return last.person;
+    return memory.lastSpeaker && fits(memory.lastSpeaker) ? memory.lastSpeaker : null;
+}
+
+function splitSentences(text, run = 0) {
+    const parts = String(text).replace(/\s+/gu, ' ').trim().match(/[^.!?…]+(?:[.!?…]+["”»]?|$)/gu) || [];
+    const merged = [];
+    for (const part of parts.map(item => item.trim()).filter(Boolean)) {
+        const last = merged[merged.length - 1];
+        const short = last && (last.length < MIN_SEGMENT || part.length < MIN_SEGMENT) && last.length + part.length < MAX_SEGMENT;
+        const fits = last && run > 0 && last.length + 1 + part.length <= run;
+        if (short || fits) merged[merged.length - 1] = `${last} ${part}`;
+        else merged.push(part);
+    }
+    return merged.flatMap(part => (part.length <= MAX_SEGMENT ? [part] : chunk(part)));
+}
+
+function chunk(text) {
+    const out = [];
+    let rest = text;
+    while (rest.length > MAX_SEGMENT) {
+        const cut = Math.max(rest.lastIndexOf(', ', MAX_SEGMENT), rest.lastIndexOf('; ', MAX_SEGMENT), rest.lastIndexOf(' ', MAX_SEGMENT));
+        out.push(rest.slice(0, cut > 40 ? cut : MAX_SEGMENT).trim());
+        rest = rest.slice(cut > 40 ? cut + 1 : MAX_SEGMENT).trim();
+    }
+    if (rest) out.push(rest);
+    return out;
+}
+
+function toneOf(text, context = '') {
+    const quiet = QUIET_VERBS.test(context);
+    const loud = LOUD_VERBS.test(context) || /!{2,}|[A-Z]{4,}/u.test(text);
+    if (quiet) return 'quiet';
+    if (loud) return 'loud';
+    if (/…|\.\.\./u.test(text) && !/!/u.test(text)) return 'hesitant';
+    if (/!$/u.test(text.trim())) return 'excited';
+    if (/\?$/u.test(text.trim())) return 'question';
+    return 'plain';
+}
+
+/**
+ * The reply as a sequence of segments for the voice server:
+ * { kind: 'narration' | 'speech', speaker: '' | person name, player: bool, text, tone }.
+ * Narration between quotes becomes its own segments (the dialogue tags
+ * "she said" included, so the listener still hears who spoke when the voice
+ * alone would not say).
+ */
+export function segmentSpeech(text, options = {}) {
+    const clean = cleanForSpeech(text);
+    if (!clean) return [];
+    const matchers = castMatchers(options.cast || [], options.playerName || '');
+    const segments = [];
+    const memory = { lastSpeaker: null };
+    const narratorWords = new Set(['narrator', 'narration', 'n', 'gm', 'story']);
+    /** The tag written right before a span, if any: { who, tone, player, narrator }. */
+    const tagBefore = (paragraph, start) => {
+        const head = paragraph.slice(Math.max(0, start - 90), start);
+        const match = [...head.matchAll(VOICE_TAG)].at(-1);
+        if (!match || !/^[\s*_"\u201C\u00AB]*$/u.test(head.slice(match.index + match[0].length))) return null;
+        const who = normalizeName(match[1]);
+        const tone = normalizeTone(match[2]);
+        if (narratorWords.has(who.toLocaleLowerCase())) return { who: '', tone, narrator: true };
+        const person = resolveName(who, matchers);
+        if (person) return { who: person.name, player: Boolean(person.player), tone };
+        return { who, player: false, tone };
+    };
+    const tagOf = tagged => (tagged && !tagged.narrator ? { name: tagged.who, player: tagged.player } : null);
+    // `end`: where the segment's source ends in the cleaned text, so a
+    // streaming reader knows how much text follows it.
+    const push = (kind, body, speaker, tone, end) => {
+        const plain = stripVoiceTags(body.replace(/[\u2066\u2069]/gu, ''));
+        for (const piece of splitSentences(plain, kind === 'narration' ? NARRATION_RUN : 0)) {
+            if (!/[\p{L}\p{N}]/u.test(piece)) continue;
+            segments.push({ kind, text: piece, speaker: speaker?.name || '', player: Boolean(speaker?.player), tone: tone || toneOf(piece), end });
+        }
+    };
+    /** Narration between tags: each tagged stretch keeps its tone. */
+    const pushNarration = (paragraph, from, to, end) => {
+        const body = paragraph.slice(from, to);
+        const marks = [...body.matchAll(VOICE_TAG)];
+        if (!marks.length) {
+            push('narration', body.trim(), null, undefined, end);
+            return;
+        }
+        let cursor = 0;
+        let tone;
+        for (const mark of marks) {
+            const before = body.slice(cursor, mark.index).trim();
+            if (before) push('narration', before, null, tone, end);
+            tone = normalizeTone(mark[2]) || undefined;
+            cursor = mark.index + mark[0].length;
+        }
+        const rest = body.slice(cursor).trim();
+        if (rest) push('narration', rest, null, tone, end);
+    };
+    let searchFrom = 0;
+    for (const paragraph of clean.split(/\n{2,}|\n(?=\s*["“«])/u).map(part => part.trim()).filter(Boolean)) {
+        const paragraphStart = Math.max(searchFrom, clean.indexOf(paragraph, searchFrom));
+        searchFrom = paragraphStart + paragraph.length;
+        const spans = quoteSpans(paragraph);
+        if (!spans.length) {
+            pushNarration(paragraph, 0, paragraph.length, paragraphStart + paragraph.length);
+            continue;
+        }
+        let cursor = 0;
+        // The last tagged line of dialogue in this paragraph: a tag's tone
+        // carries over an interruption ("…," Lyra says, "…") to the same
+        // speaker's untagged continuation.
+        let spoken = null;
+        for (const span of spans) {
+            const tagged = tagBefore(paragraph, span.start);
+            pushNarration(paragraph, cursor, span.start, paragraphStart + span.start);
+            if (span.thought) {
+                // An italic aside: whose thought the tag says, else the person
+                // the paragraph points at, else the player when it speaks as "I".
+                // A thought in the first person belongs to whoever "thought" it,
+                // else to the player; one in the third person to the person the
+                // paragraph points at.
+                const mine = /\b(?:I|I'm|I've|I'd|my|me|myself)\b/u.test(span.text);
+                let thinker = tagOf(tagged) || attribute(paragraph, span, matchers, memory, { strongOnly: mine });
+                // A thought about "he", "she" or "you" is someone else's thought about
+                // that person: never the player's unless they are named as thinking it.
+                if (thinker?.player && !mine) {
+                    const strong = attribute(paragraph, span, matchers, memory, { strongOnly: true });
+                    thinker = strong?.player ? strong : null;
+                }
+                if (!thinker && !mine) {
+                    const before = findPeople(paragraph.slice(0, span.start), matchers).filter(entry => !entry.person.player);
+                    thinker = before.at(-1)?.person || memory.lastSpeaker || null;
+                }
+                if (!thinker && mine) thinker = { name: options.playerName || '', player: true };
+                if (thinker && !thinker.player) memory.lastSpeaker = thinker;
+                push('thought', span.text, thinker, tagged?.tone || 'quiet', paragraphStart + span.end);
+                cursor = span.end;
+                continue;
+            }
+            const speaker = options.narrateDialogue === false ? null
+                : (tagOf(tagged) || attribute(paragraph, span, matchers, memory) || (spoken ? { name: spoken.name, player: spoken.player } : null));
+            if (speaker && !speaker.player) memory.lastSpeaker = speaker;
+            const around = paragraph.slice(Math.max(0, span.start - 80), Math.min(paragraph.length, span.end + 80));
+            const sameSpeaker = spoken && speaker && canonicalNameKey(speaker.name) === canonicalNameKey(spoken.name);
+            const tone = tagged?.tone || (!tagged && sameSpeaker ? spoken.tone : '') || toneOf(span.text, around.replace(span.text, ''));
+            if (tagged?.tone && speaker?.name) spoken = { name: speaker.name, player: Boolean(speaker.player), tone: tagged.tone };
+            push('speech', span.text, speaker || { name: '', player: false }, tone, paragraphStart + span.end);
+            cursor = span.end;
+        }
+        pushNarration(paragraph, cursor, paragraph.length, paragraphStart + paragraph.length);
+    }
+    return options.keepTags === true ? segments : dropDialogueTags(segments);
+}
+
+const TAG_ONLY = new RegExp(`^(?:(?:${NAME_WORD}|${PRONOUN})\\s+(?:${SPEECH_VERBS})|(?:${SPEECH_VERBS})\\s+(?:${NAME_WORD}|${PRONOUN}))[\\s,.;:!?—–-]*$`, 'iu');
+
+/**
+ * "she said." / "Mara asked." beside an attributed line is a dialogue tag:
+ * the change of voice already says who speaks, so the tag is not read. A tag
+ * with more in it ("Pip asked from the doorway") stays narration.
+ */
+export function dropDialogueTags(segments) {
+    return segments.filter((segment, index) => {
+        if (segment.kind !== 'narration') return true;
+        const words = segment.text.trim().split(/\s+/u);
+        if (words.length > 4 || !TAG_ONLY.test(segment.text.trim())) return true;
+        const neighbour = [segments[index - 1], segments[index + 1]].find(other => other?.kind === 'speech' && (other.speaker || other.player));
+        return !neighbour;
+    });
+}
+
+/** How many leading segments are settled while text is still arriving: enough text follows each. */
+export function settledSegmentCount(segments, cleanLength, lookahead = 60) {
+    let count = 0;
+    for (const segment of segments) {
+        if (!Number.isFinite(segment.end) || segment.end + lookahead > cleanLength) break;
+        count += 1;
+    }
+    return count;
+}
+
+/** male, female or '' from what the story says about someone. */
+export function inferGender(text) {
+    const words = String(text || '').toLocaleLowerCase().match(/[\p{L}]+/gu) || [];
+    let male = 0;
+    let female = 0;
+    for (const word of words) {
+        if (MALE_WORDS.includes(word)) male += 1;
+        else if (FEMALE_WORDS.includes(word)) female += 1;
+    }
+    if (male === female) return '';
+    return male > female ? 'male' : 'female';
+}
+
+const AGE_NUMBER = /\b(?:(\d{1,3})|(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety))(?:[\s-]+(?:years?|yrs?|summers|winters)(?:[\s-]+old)?|-year-old)\b|\b(?:aged|age of|of)\s+(\d{1,3}|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|ten|eleven|nine|eight|seven|six)\b(?!\s*(?:gold|silver|copper|coins?|pence|shillings?|years? ago))/iu;
+const NUMBER_WORDS = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17, eighteen: 18, nineteen: 19, twenty: 20, thirty: 30, forty: 40, fifty: 50, sixty: 60, seventy: 70, eighty: 80, ninety: 90 };
+
+/** The age a description states outright ("a girl of twelve", "34 years old"), else NaN. */
+export function statedAge(text) {
+    const match = AGE_NUMBER.exec(String(text || ''));
+    if (!match) return NaN;
+    const raw = (match[1] || match[2] || match[3] || '').toLocaleLowerCase();
+    const value = NUMBER_WORDS[raw] ?? Number(raw);
+    return Number.isFinite(value) && value > 0 && value < 130 ? value : NaN;
+}
+
+/**
+ * young, old or '' from what the story says about someone. A stated age
+ * decides; otherwise the words for youth and age are counted, so "a girl of
+ * twelve with an ancient hunger" is still a child.
+ */
+export function inferAge(text) {
+    const value = String(text || '');
+    const age = statedAge(value);
+    if (Number.isFinite(age)) return age <= 15 ? 'young' : age >= 60 ? 'old' : '';
+    const young = (value.match(new RegExp(YOUNG_WORDS.source, 'giu')) || []).length;
+    const old = (value.match(new RegExp(OLD_WORDS.source, 'giu')) || []).length;
+    if (young > old) return 'young';
+    if (old > young) return 'old';
+    return '';
+}
+
+/** Whether the cast should read someone with a child's voice. */
+export function isChild(person) {
+    if (!person) return false;
+    if (person.age === 'young' || person.age === 'child') return true;
+    const about = [person.description, person.summary, person.role, person.appearance, person.manner].filter(Boolean).join(' ');
+    return inferAge(about) === 'young';
+}
+
+/**
+ * A voice for each person, stable across turns: the chosen one when the
+ * reader picked it, else by inferred gender and age from the voices left,
+ * spread so people here do not share a voice while voices last.
+ * `voices`: [{ id, gender, pitch }]. Returns a Map name key -> voice id.
+ */
+export function castVoices({ people = [], voices = [], narratorVoice = '', playerVoice = '', reserved = [], chosen = {} } = {}) {
+    const assignment = new Map();
+    // The narrator's, the player's and the reserved voices (the unknown-speaker
+    // and thought voices) are nobody's: a line nobody could be matched to must
+    // not sound like a cast member.
+    const taken = new Set([narratorVoice, playerVoice, ...reserved].filter(Boolean));
+    const used = new Set(taken);
+    const pool = voices.filter(voice => voice?.id);
+    const ordered = [...people].filter(person => person?.name).sort((a, b) => canonicalNameKey(a.name).localeCompare(canonicalNameKey(b.name)));
+    for (const person of ordered) {
+        const key = canonicalNameKey(person.name);
+        const picked = chosen[key];
+        if (picked && !taken.has(picked) && pool.some(voice => voice.id === picked)) {
+            assignment.set(key, picked);
+            used.add(picked);
+        }
+    }
+    for (const person of ordered) {
+        const key = canonicalNameKey(person.name);
+        if (assignment.has(key)) continue;
+        const about = [person.description, person.summary, person.role, person.appearance, person.manner].filter(Boolean).join(' ');
+        const gender = person.gender || inferGender(about);
+        const age = person.age || inferAge(about);
+        let candidates = pool.filter(voice => !gender || !voice.gender || voice.gender === gender);
+        if (!candidates.length) candidates = pool;
+        const free = candidates.filter(voice => !used.has(voice.id));
+        // Clean, steady voices first: one the server marks noisy (hiss) or unstable (its pitch
+        // wanders between clips, so it reads as different people) is used only when nothing else is free.
+        const steady = free.filter(voice => !voice.noisy && !voice.unstable);
+        const clean = steady.length ? steady : free.filter(voice => !voice.noisy);
+        const choices = clean.length ? clean : free.length ? free : candidates;
+        const byPitch = [...choices].sort((a, b) => (a.pitch || 0) - (b.pitch || 0));
+        let voice;
+        if (age === 'old' && byPitch.length) voice = byPitch[0];
+        else if (age === 'young' && byPitch.length) voice = byPitch[byPitch.length - 1];
+        else voice = choices[hash(key) % choices.length];
+        if (!voice) continue;
+        assignment.set(key, voice.id);
+        used.add(voice.id);
+    }
+    return assignment;
+}
+
+/**
+ * The line's text shaped for its tone, with the punctuation the voice model
+ * itself renders as delivery: an exclamation for raised voices, an ellipsis
+ * for hesitation, a comma pause for a slow sad or sly line.
+ */
+export function toneText(text, tone) {
+    let value = String(text || '').trim();
+    if (!value) return value;
+    const ends = /[.!?…]["”»]?$/u;
+    const terminal = ends.exec(value)?.[0] || '';
+    const body = terminal ? value.slice(0, -terminal.length) : value;
+    const quote = terminal.endsWith('"') || terminal.endsWith('”') || terminal.endsWith('»') ? terminal.slice(-1) : '';
+    const mark = terminal.replace(/["”»]$/u, '');
+    switch (tone) {
+    case 'shout':
+    case 'angry':
+    case 'excited':
+    case 'urgent':
+    case 'surprised':
+        if (!mark || mark === '.' || mark === '…') return `${body}!${quote}`;
+        return value;
+    case 'hesitant':
+    case 'afraid':
+    case 'pleading':
+        if (/[,;:]\s/u.test(body) && !/…|\.\.\./u.test(body)) return `${body.replace(/[,;:]\s/u, '… ')}${mark || '.'}${quote}`;
+        if (!mark || mark === '.') return `${body}…${quote}`;
+        return value;
+    case 'sad':
+    case 'tired':
+    case 'dreamy':
+    case 'lust':
+    case 'aroused':
+    case 'drunk':
+        if (!mark) return `${body}.${quote}`;
+        return value;
+    default:
+        return value;
+    }
+}
+
+/** Playback speed for a segment from its tone. */
+export function prosodyFor(segment, baseSpeed = 1) {
+    const base = Math.min(1.5, Math.max(0.6, Number(baseSpeed) || 1));
+    const tone = TONES[segment?.tone] || TONES.neutral;
+    const narration = segment?.kind === 'narration' ? 0.98 : segment?.kind === 'thought' ? 0.9 : 1;
+    const gain = segment?.kind === 'thought' ? Math.min(tone.gain, 0.85) : tone.gain;
+    const trailing = /[…]$|\.\.\.$/u.test(segment?.text || '') ? 0.2 : 0;
+    return {
+        speed: Math.round(base * tone.speed * narration * 100) / 100,
+        gain: Math.round(gain * 100) / 100,
+        pause: Math.round((tone.pause + trailing) * 100) / 100,
+    };
+}
+
+/** The voice id a segment is read in. */
+export function voiceForSegment(segment, { narratorVoice, playerVoice, unknownVoice, assignment, thoughtVoice = '' }) {
+    if (segment.kind === 'narration') return narratorVoice;
+    if (segment.kind === 'thought') {
+        if (segment.player) return playerVoice || narratorVoice;
+        if (segment.speaker) return assignment?.get(canonicalNameKey(segment.speaker)) || thoughtVoice || narratorVoice;
+        return thoughtVoice || narratorVoice;
+    }
+    if (segment.player) return playerVoice || narratorVoice;
+    if (segment.speaker) return assignment?.get(canonicalNameKey(segment.speaker)) || unknownVoice || narratorVoice;
+    return unknownVoice || narratorVoice;
+}
+
+export const __test = { quoteSpans, splitSentences, toneOf, hash };

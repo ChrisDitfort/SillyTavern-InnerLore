@@ -35,14 +35,26 @@ function normalizeSourceRef(value) {
     };
 }
 
+/**
+ * A text field the provider wrote as several `+=` lines (the DSL turns those
+ * into a list) is still one text: open models write "consequences += …"
+ * twice rather than one sentence, and the proposal is otherwise sound.
+ */
+export function textValue(value, limit) {
+    if (Array.isArray(value)) {
+        return cleanString(value.map(item => cleanString(item, limit)).filter(Boolean).join(' '), limit);
+    }
+    return cleanString(value, limit);
+}
+
 function normalizeDefinitionInput(value) {
     const source = objectValue(value);
     const triggerSeconds = source.triggerAfterSeconds ?? source.trigger_after_seconds;
     const revealSeconds = source.revealAfterSeconds ?? source.reveal_after_seconds;
     return {
-        key: canonicalNameKey(source.key).replace(/\s+/gu, '_').slice(0, 100),
-        title: cleanString(source.title, 240),
-        description: cleanString(source.description, 3_000),
+        key: canonicalNameKey(Array.isArray(source.key) ? source.key[0] : source.key).replace(/\s+/gu, '_').slice(0, 100),
+        title: textValue(source.title, 240),
+        description: textValue(source.description, 3_000),
         triggerMode: ['all', 'any'].includes(source.triggerMode ?? source.trigger_mode)
             ? (source.triggerMode ?? source.trigger_mode)
             : 'any',
@@ -52,12 +64,12 @@ function normalizeDefinitionInput(value) {
         triggerTimeCertainty: (source.triggerTimeCertainty ?? source.trigger_time_certainty) === 'definite'
             ? 'definite'
             : 'estimated',
-        actionCondition: cleanString(source.actionCondition ?? source.action_condition, 1_500),
+        actionCondition: textValue(source.actionCondition ?? source.action_condition, 1_500),
         actorScope: ['any', 'player', 'npc', 'named'].includes(source.actorScope ?? source.actor_scope)
             ? (source.actorScope ?? source.actor_scope)
             : 'any',
         actorName: cleanString(source.actorName ?? source.actor_name, 180),
-        cancellationCondition: cleanString(source.cancellationCondition ?? source.cancellation_condition, 1_500),
+        cancellationCondition: textValue(source.cancellationCondition ?? source.cancellation_condition, 1_500),
         activationVisibility: String(source.activationVisibility ?? source.activation_visibility ?? '')
             .trim().toLocaleLowerCase() === 'observable'
             ? 'observable'
@@ -65,9 +77,9 @@ function normalizeDefinitionInput(value) {
         revealAfterSeconds: revealSeconds === undefined || revealSeconds === null || revealSeconds === ''
             ? null
             : Math.max(0, numberOr(revealSeconds, 0)),
-        revealCondition: cleanString(source.revealCondition ?? source.reveal_condition, 1_500),
-        resolutionCondition: cleanString(source.resolutionCondition ?? source.resolution_condition, 1_500),
-        consequences: cleanString(source.consequences, 4_000),
+        revealCondition: textValue(source.revealCondition ?? source.reveal_condition, 1_500),
+        resolutionCondition: textValue(source.resolutionCondition ?? source.resolution_condition, 1_500),
+        consequences: textValue(source.consequences, 4_000),
         subjects: uniqueStrings(source.subjects || [], 30),
         priority: integer(source.priority, 55, 0, 65),
     };
@@ -341,7 +353,7 @@ export function validateEventDirectorPayload(payloadValue, options = {}) {
         confidence,
         sourceRefs,
         lineageDepth,
-        rationale: cleanString(raw.rationale, 2_000),
+        rationale: textValue(raw.rationale, 2_000),
     };
     const duplicate = duplicateProposal(candidate, options.state || {});
     if (duplicate) throw new Error(`Automatic Event Director proposal duplicates “${duplicate.title || duplicate.key}”.`);

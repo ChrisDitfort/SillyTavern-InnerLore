@@ -614,6 +614,18 @@
                         exactly.
                     </small>
 
+                    <label class="checkbox_label" for="il_game_tools">
+                        <input id="il_game_tools" type="checkbox" />
+                        <span>Game tools: the game system applies trades, the story narrates them</span>
+                    </label>
+                    <small class="inner-lore-hint">
+                        The story model calls a game tool whenever the turn buys, sells, gives, takes, pays or uses up
+                        something. InnerLore checks the purse, the stock and the price, applies the exchange, and the model
+                        narrates exactly what happened. Trade-screen buttons are applied the moment they are sent. On a
+                        provider that returns tool calls as text (Featherless community models) InnerLore reads the call,
+                        applies it and asks for the narration. Needs SillyTavern's "Function calling" on; InnerLore turns it on
+                        once and switches prompt post-processing to the tool-keeping variants.
+                    </small>
                     <label class="checkbox_label" for="il_game_ledger_enabled">
                         <input id="il_game_ledger_enabled" type="checkbox" />
                         <span>Game ledger: record what each reply changes</span>
@@ -723,6 +735,152 @@
                             <input id="il_portrait_cfg" class="text_pole" type="number" min="1" max="20" step="0.5" />
                         </label>
                     </div>
+                </div>
+            </div>
+
+            <div class="inline-drawer">
+                <div class="inline-drawer-toggle inline-drawer-header">
+                    <b><i class="fa-solid fa-volume-high"></i> Voice Narration</b>
+                    <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+                </div>
+                <div class="inline-drawer-content">
+                    <label class="checkbox_label" for="il_voice_enabled">
+                        <input id="il_voice_enabled" type="checkbox" />
+                        <span>Read each reply aloud with the local voice server</span>
+                    </label>
+                    <small class="inner-lore-hint">
+                        InnerLore's voice server (server/tts: sherpa-onnx running on the phone itself) reads the narration in
+                        the narrator's voice and every person's spoken lines in a voice cast from what the story says about
+                        them; pick anyone's voice on their page. Each sentence plays as soon as it is ready. Reached through
+                        SillyTavern's innerlore-storage plugin, so it also works from another device.
+                    </small>
+                    <label class="checkbox_label" for="il_voice_autoplay">
+                        <input id="il_voice_autoplay" type="checkbox" />
+                        <span>Start reading when a reply arrives (the Voice button in the game menu toggles this)</span>
+                    </label>
+                    <label class="checkbox_label" for="il_voice_dialogue">
+                        <input id="il_voice_dialogue" type="checkbox" />
+                        <span>Read spoken lines</span>
+                    </label>
+                    <label class="checkbox_label" for="il_voice_narration">
+                        <input id="il_voice_narration" type="checkbox" />
+                        <span>Read narration</span>
+                    </label>
+                    <label class="checkbox_label" for="il_voice_streaming">
+                        <input id="il_voice_streaming" type="checkbox" />
+                        <span>Start reading while the reply is still being written</span>
+                    </label>
+                    <label class="checkbox_label" for="il_voice_tags">
+                        <input id="il_voice_tags" type="checkbox" />
+                        <span>Ask the story model for hidden voice tags: who speaks or thinks each line, and in what tone</span>
+                    </label>
+                    <small class="inner-lore-hint">
+                        The narrator writes [[Name|tone]] before every line, thought and change of mood. The tags are hidden
+                        from the chat display, give each line the right voice and delivery (whisper, shout, sad, wary...),
+                        and let a character's inner thoughts be read in their own voice.
+                    </small>
+                    <label class="checkbox_label" for="il_voice_skip_tags">
+                        <input id="il_voice_skip_tags" type="checkbox" />
+                        <span>Skip bare dialogue tags ("she said") - the change of voice says who speaks</span>
+                    </label>
+                    <div class="inner-lore-grid two-columns">
+                        <label>
+                            <span>Narrator voice</span>
+                            <select id="il_voice_narrator" class="text_pole"></select>
+                        </label>
+                        <label>
+                            <span>Your voice</span>
+                            <select id="il_voice_player" class="text_pole"></select>
+                        </label>
+                        <label>
+                            <span>Unnamed speakers</span>
+                            <select id="il_voice_unknown" class="text_pole"></select>
+                        </label>
+                        <label>
+                            <span>Italic asides</span>
+                            <select id="il_voice_italics" class="text_pole">
+                                <option value="thought">Thoughts: yours in your voice, others as quiet asides</option>
+                                <option value="narrator">Read like narration</option>
+                                <option value="skip">Do not read</option>
+                            </select>
+                        </label>
+                        <label>
+                            <span>Aside voice</span>
+                            <select id="il_voice_thought" class="text_pole"></select>
+                        </label>
+                        <label>
+                            <span>Speed</span>
+                            <input id="il_voice_speed" class="text_pole" type="number" min="0.6" max="1.5" step="0.05" />
+                        </label>
+                        <label>
+                            <span>Pause between lines (ms)</span>
+                            <input id="il_voice_gap" class="text_pole" type="number" min="0" max="1000" step="10" />
+                        </label>
+                        <label>
+                            <span>Emotion strength (0 off, 1 normal)</span>
+                            <input id="il_voice_emotion" class="text_pole" type="number" min="0" max="1.5" step="0.1" />
+                        </label>
+                        <label>
+                            <span>Child voices: semitones raised (0 off)</span>
+                            <input id="il_voice_child_pitch" class="text_pole" type="number" min="0" max="8" step="0.5" />
+                        </label>
+                        <label>
+                            <span>Quality steps (0 = model default; more is slower)</span>
+                            <input id="il_voice_steps" class="text_pole" type="number" min="0" max="50" step="1" />
+                        </label>
+                        <label>
+                            <span>Pause scale at punctuation (0 = default)</span>
+                            <input id="il_voice_silence" class="text_pole" type="number" min="0" max="5" step="0.1" />
+                        </label>
+                        <label>
+                            <span>Takes per lively line (1 = one; 2-3 keep the most expressive draw, slower)</span>
+                            <input id="il_voice_takes" class="text_pole" type="number" min="1" max="3" step="1" />
+                        </label>
+                    </div>
+                    <div class="inner-lore-fieldset">
+                        <b>Speak instead of typing</b>
+                        <label class="checkbox_label" for="il_voice_input_enabled">
+                            <input id="il_voice_input_enabled" type="checkbox" />
+                            <span>Show a microphone beside Send</span>
+                        </label>
+                        <small class="inner-lore-hint">
+                            Tap the microphone, speak, and stop talking (or tap again): the words land in the message box,
+                            or are sent at once. "Local server" recognizes on the phone through the voice server (Parakeet);
+                            "Browser" uses the browser's own speech recognition.
+                        </small>
+                        <label class="checkbox_label" for="il_voice_live">
+                            <input id="il_voice_live" type="checkbox" />
+                            <span>Live chat: send what you say, read the reply, then listen again (also: hold the microphone, or the Live button in the game menu)</span>
+                        </label>
+                        <div class="inner-lore-grid two-columns">
+                            <label>
+                                <span>Recognizer</span>
+                                <select id="il_voice_input_provider" class="text_pole">
+                                    <option value="local">Local server (on the phone)</option>
+                                    <option value="browser">Browser speech recognition</option>
+                                </select>
+                            </label>
+                            <label>
+                                <span>After speaking</span>
+                                <select id="il_voice_input_mode" class="text_pole">
+                                    <option value="box">Put the words in the message box</option>
+                                    <option value="send">Send at once</option>
+                                </select>
+                            </label>
+                            <label>
+                                <span>Language (browser recognizer)</span>
+                                <input id="il_voice_input_language" class="text_pole" type="text" placeholder="en-US" />
+                            </label>
+                        </div>
+                    </div>
+                    <label for="il_voice_url">Voice server</label>
+                    <input id="il_voice_url" class="text_pole" type="text" placeholder="Empty: through the innerlore-storage plugin (http://127.0.0.1:8778 on the phone)" />
+                    <div class="flex-container">
+                        <button id="il_voice_test" class="menu_button">
+                            <i class="fa-solid fa-plug"></i> Check the voice server
+                        </button>
+                    </div>
+                    <small id="il_voice_status" class="inner-lore-hint"></small>
                 </div>
             </div>
 

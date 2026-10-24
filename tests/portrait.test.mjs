@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { createEmptyStore, mergeEntityOperations } from '../core.js?v=48';
-import { applyGameOperations, createGameState, gameContext, normalizeGameRecords } from '../game.js?v=2';
+import { applyGameOperations, createGameState, gameContext, normalizeGameRecords } from '../game.js?v=3';
 import {
     buildPortraitMessages,
     composePortraitPrompt,

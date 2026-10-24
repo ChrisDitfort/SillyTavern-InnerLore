@@ -86,20 +86,20 @@ export function gameKey(value) {
 }
 
 /** "the lean sailor", "Lean Sailor" and "lean sailor" are one key. */
-function nameKey(value) {
+export function nameKey(value) {
     return canonicalNameKey(value).replace(/^(?:the|a|an)\s+/u, '');
 }
 
 const NAME_FILLER = new Set(['a', 'an', 'the', 'of', 'and', 'for', 'per', 'with', 'to', 'in', 'on', 'at', 'some', 'one', 's']);
 
-function contentWords(value) {
+export function contentWords(value) {
     return new Set(canonicalNameKey(value).split(' ')
         .map(word => word.replace(/(?:es|s)$/u, ''))
         .filter(word => word.length > 1 && !NAME_FILLER.has(word)));
 }
 
 /** "ale" and "a tankard of ale", "bed under the eaves" and "a night's bed under the eaves". */
-function wordsContained(a, b) {
+export function wordsContained(a, b) {
     const small = a.size <= b.size ? a : b;
     const large = small === a ? b : a;
     return small.size > 0 && [...small].every(word => large.has(word));
@@ -301,6 +301,20 @@ export function gameStateBefore(value, boundary, options = {}) {
     return state;
 }
 
+/**
+ * The state with some journal entries left out (a swipe discards the game
+ * actions the replaced reply made), replayed exactly.
+ */
+export function gameStateWithout(value, predicate) {
+    const state = normalizeGameState(cloneValue(value));
+    const before = state.journal.length;
+    state.journal = state.journal.filter(entry => !predicate(entry));
+    if (state.journal.length === before) return state;
+    Object.assign(state, replay(state.base, state.journal));
+    state.derivedSequence = state.sequence;
+    return state;
+}
+
 function compactJournal(state) {
     if (state.journal.length <= MAX_JOURNAL_ENTRIES) return;
     const fold = state.journal.slice(0, state.journal.length - JOURNAL_COMPACT_TO);
@@ -423,7 +437,7 @@ export function formatMoney(amount, currency) {
 
 // --- holders -----------------------------------------------------------------
 
-function holderKey(holder) {
+export function holderKey(holder) {
     if (!holder) return '';
     if (holder.kind === 'player') return 'player';
     if (holder.kind === 'item') return `item:${holder.key}`;
@@ -495,7 +509,7 @@ export function resolveHolder(raw, context = {}) {
 }
 
 /** A known person by full name or alias, then by an unambiguous given name or surname ("Mara"). */
-function findPerson(entities, name) {
+export function findPerson(entities, name) {
     const key = nameKey(name);
     if (!key) return null;
     const people = Object.values(entities || {}).filter(record => (
@@ -636,14 +650,14 @@ export function isCarried(items, item, depth = 0) {
     return false;
 }
 
-function rootHolder(items, item, depth = 0) {
+export function rootHolder(items, item, depth = 0) {
     if (!item || depth > 6) return null;
     if (item.holder?.kind === 'item') return rootHolder(items, items[item.holder.key], depth + 1) || item.holder;
     return item.holder;
 }
 
 /** The key of the body an item lies on, directly or in a container on it. */
-function bodyHolding(items, item, depth = 0) {
+export function bodyHolding(items, item, depth = 0) {
     if (!item || depth > 6 || item.holder?.kind !== 'item') return null;
     const holder = items[item.holder.key];
     if (holder?.bodyOf) return holder.key;
@@ -1505,7 +1519,7 @@ export function applyGameOperations(value, operations, options = {}) {
 
 // --- queries ------------------------------------------------------------------
 
-function activeItems(state) {
+export function activeItems(state) {
     return Object.values(state?.items || {}).filter(item => item.status === 'active' && item.quantity > 0);
 }
 
@@ -1589,7 +1603,7 @@ function whereText(item) {
     return spot;
 }
 
-function itemLine(item, currency, { showValue = true, showPlace = false } = {}) {
+export function itemLine(item, currency, { showValue = true, showPlace = false } = {}) {
     const label = item.quantity > 1 ? `${item.name} ×${item.quantity}` : item.name;
     const notes = [];
     if (item.condition) notes.push(item.condition);
@@ -1600,7 +1614,7 @@ function itemLine(item, currency, { showValue = true, showPlace = false } = {}) 
     return notes.length ? `${label} (${notes.join('; ')})` : label;
 }
 
-function purseText(state) {
+export function purseText(state) {
     const purse = state?.purse || {};
     if (purse.amount === null || purse.amount === undefined) {
         return `not yet established; the story may reveal it${purse.spent ? ` (${formatMoney(purse.spent, state.currency)} spent so far)` : ''}`;
@@ -1610,7 +1624,7 @@ function purseText(state) {
     return purse.minimum ? `at least ${text} (the full amount was never established)` : text;
 }
 
-function entryText(entry, state, playerName) {
+export function entryText(entry, state, playerName) {
     const op = entry.op;
     const currency = state.currency;
     const who = holder => (holder?.kind === 'player' ? playerName : holderLabel(holder));
@@ -1770,6 +1784,10 @@ export function renderGamePacket(value, options = {}) {
     const stage = herePlace ? stageFor(state, herePlace) : null;
 
     const lines = [];
+    // What the game system already did this turn comes first: the narrator
+    // tells it as settled fact, and is told whether the tools are still open.
+    if (options.resolved) lines.push(options.resolved);
+    if (options.toolGuidance) lines.push(options.toolGuidance);
     lines.push(`Purse: ${purseText(state)}.`);
     lines.push(carrying.length
         ? `Carrying: ${carrying.map(item => itemLine(item, currency, { showPlace: item.holder?.kind === 'item' })).join('; ')}.`
