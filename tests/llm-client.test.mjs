@@ -6,6 +6,7 @@ import {
     connectionFallbackProfileIds,
     extractResponseText,
     featherlessCost,
+    limitedHost,
     isConcurrencyRejection,
     isTransientRequestError,
     oneAtATimeProvider,
@@ -388,5 +389,9 @@ test('story requests on limited providers get thinking off and the preset sample
     assert.deepEqual(storyProviderBodyLines('novelai.net', '', { top_k: 250, min_p: 0 }), ['top_k: 250']);
     assert.deepEqual(storyProviderBodyLines('featherless.ai', 'reasoning_effort: none\nchat_template_kwargs:\n  enable_thinking: false', { top_k: 64 }), ['top_k: 64']);
     assert.deepEqual(storyProviderBodyLines('', '', { top_k: 250 }), [], 'an unlimited provider is left alone');
+    assert.equal(limitedHost('https://nano-gpt.com/api/subscription/v1'), 'nano-gpt.com', 'the NanoGPT subscription is a budgeted provider');
+    assert.deepEqual(storyProviderBodyLines('nano-gpt.com', '', { custom_model: 'z-ai/glm-5.3-flash-uncensored', top_k: 0, min_p: 0 }), ['reasoning_effort: low'], 'GLM 5.3 thinks briefly on NanoGPT');
+    assert.deepEqual(storyProviderBodyLines('nano-gpt.com', 'reasoning_effort: medium', { custom_model: 'z-ai/glm-5.3-flash-uncensored' }), [], 'a connection\'s own effort line wins');
+    assert.deepEqual(storyProviderBodyLines('nano-gpt.com', '', { custom_model: 'nousresearch/hermes-4-405b', top_k: 40 }), ['top_k: 40'], 'other NanoGPT models get only the sampling lines');
     assert.deepEqual(storyProviderBodyLines('novelai.net', 'top_k: 40', {}, 'top_k: 250\nrepetition_penalty: 1.1\nextra:\n  a: 1'), ['repetition_penalty: 1.1', 'extra:', '  a: 1'], "the user's YAML replaces the defaults, minus keys already sent");
 });

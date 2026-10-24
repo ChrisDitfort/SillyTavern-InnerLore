@@ -1335,7 +1335,9 @@ function assistedFor(profileId) {
     if (mode === 'off') return false;
     const profile = findConnectionProfile(profileId);
     const size = modelSizeBillions(profile?.model);
-    return size < 70 || (!Number.isFinite(size) && Boolean(oneAtATimeProvider(profileId)));
+    // An unnamed size on NovelAI's single slot is its GLM 4.6; on a provider
+    // with a request budget (NanoGPT) unnamed models are the large ones.
+    return size < 70 || (!Number.isFinite(size) && oneAtATimeProvider(profileId) === 'novelai.net');
 }
 
 /** The story is written by a text-completion model (NovelAI, KoboldAI, text-generation-webui). */

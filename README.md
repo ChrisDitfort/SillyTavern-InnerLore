@@ -139,6 +139,10 @@ When SillyTavern's story API is a text-completion one (NovelAI, KoboldAI, text-g
 
 The background passes keep their own connection profiles, so every InnerLore feature still runs whatever writes the story. Erato and Kayra cannot run the passes themselves: the curator and World Progression prompts are larger than their whole context, and the passes' answers are longer than one request allows.
 
+## NanoGPT (subscription)
+
+Connections to `https://nano-gpt.com/api/subscription/v1` count as a provider with a budget of ten requests at once, like Featherless's four units and NovelAI's one: background passes share it with the story and keep the story's slot free. GLM 5.3 models there cannot stop thinking, so story requests to them carry `reasoning_effort: low` unless the connection's own body says otherwise; other NanoGPT models are sent as they are. Model sizes that are not in the name (`z-ai/glm-5.3-flash-uncensored`) count as large, so the assisted hints for small models stay off for them.
+
 ## World independence
 
 Every chat owns a world of its own, keyed deterministically to the chat id. New worlds are strictly independent of old worlds: a brand-new chat (greeting-only) never inherits InnerLore state from the chat it was started from - SillyTavern's cloned chat metadata is stripped of the previous world's pointer at load, so nothing can fork, reuse, or compare against it. The chat then creates its own world and card-seeds it. Genuine branches - ST's branch/checkpoint feature and swipes, which clone the full message history - still fork the source world by design. A save that would shrink a world below 70% of its committed entity count is blocked and the server state reloaded, so a stale snapshot in any tab cannot silently destroy a seeded world.

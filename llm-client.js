@@ -274,7 +274,9 @@ export async function waitForBackgroundIdle() {
  * through these providers share the budget here; the wait is not part of a
  * request's timeout.
  */
-const LIMITED_PROVIDERS = Object.freeze({ 'novelai.net': 1, 'featherless.ai': 4 });
+// Request budgets per provider: NovelAI serves one generation at a time, Featherless four concurrency
+// units, the NanoGPT subscription ten requests at once.
+const LIMITED_PROVIDERS = Object.freeze({ 'novelai.net': 1, 'featherless.ai': 4, 'nano-gpt.com': 10 });
 const providerUnits = new Map();
 
 export function limitedHost(url) {
@@ -345,6 +347,10 @@ export function storyProviderBodyLines(provider, existing, preset = {}, custom =
     if (provider === 'featherless.ai') {
         if (!has('reasoning_effort')) lines.push('reasoning_effort: none');
         if (!has('chat_template_kwargs')) lines.push('chat_template_kwargs:', '  enable_thinking: false');
+    }
+    // NanoGPT: GLM 5.3 cannot stop thinking, so it thinks briefly; other models are sent as they are.
+    if (provider === 'nano-gpt.com' && /glm-5\.3/iu.test(String(preset.custom_model || '')) && !has('reasoning_effort')) {
+        lines.push('reasoning_effort: low');
     }
     if (!has('top_k') && Number(preset.top_k) > 0) lines.push(`top_k: ${Math.round(Number(preset.top_k))}`);
     if (!has('min_p') && Number(preset.min_p) > 0) lines.push(`min_p: ${Number(preset.min_p)}`);
