@@ -23,6 +23,7 @@ import {
     shortCharacterReferences,
     uniqueStrings,
 } from './core.js?v=49';
+import { normalizeCommunication } from './communication.js?v=1';
 
 export const GAME_VERSION = 1;
 
@@ -139,6 +140,11 @@ export function canRejectMind(state, name) {
         || abilityLevel(state, { name }, ABILITY_KEYS.telepathy) >= USABLE_ABILITY_LEVEL;
 }
 
+/** Whether a person agreed to be reached mind to mind: { name, consent: 'granted'|'refused', note }, or null when it never came up. */
+export function linkOf(state, name) {
+    return state?.links?.[nameKey(name)] || null;
+}
+
 /** The player's device for messages from afar, as recorded: { known, present, name, channel, note }. */
 export function deviceOf(state) {
     const device = state?.device;
@@ -246,7 +252,7 @@ function impressionReason(impression) {
 
 // --- state -----------------------------------------------------------------
 
-const DERIVED_FIELDS = Object.freeze(['currency', 'purse', 'items', 'prices', 'standings', 'reputation', 'stages', 'purses', 'dead', 'abilities', 'device', 'contacts']);
+const DERIVED_FIELDS = Object.freeze(['currency', 'purse', 'items', 'prices', 'standings', 'reputation', 'stages', 'purses', 'dead', 'abilities', 'device', 'contacts', 'links']);
 
 function emptyDerived() {
     return {
@@ -268,6 +274,8 @@ function emptyDerived() {
         device: { known: false, present: false, name: '', channel: '', note: '', at: -1 },
         // People the player can reach on that device, by person key.
         contacts: {},
+        // Mind links by person key: whether they agreed to be reached mind to mind ('granted') or refused it.
+        links: {},
     };
 }
 
@@ -292,6 +300,10 @@ export function createGameState() {
         lastRunStats: null,
         lastError: '',
         planner: { lastRunIndex: -1, kitOffered: false, lastRunStats: null, lastError: '' },
+        // Exchanges the story told without the game tools, waiting for the
+        // player's word, and the ones the player said did not happen.
+        pending: [],
+        declined: [],
     };
 }
 
@@ -313,9 +325,20 @@ function replay(base, journal, boundary = Number.POSITIVE_INFINITY) {
     return derived;
 }
 
+// States this function produced, with the journal they were built from: a
+// pass normalizes the same state many times, and a current one is returned
+// as it is instead of being rebuilt and its journal re-validated.
+const normalizedStates = new WeakMap();
+
 export function normalizeGameState(value) {
     const fresh = createGameState();
     if (!value || typeof value !== 'object') return fresh;
+    const known = normalizedStates.get(value);
+    if (known && known.journal === value.journal && known.length === value.journal?.length
+        && value.derivedSequence === value.sequence && value.version === GAME_VERSION
+        && DERIVED_FIELDS.every(field => value[field] && typeof value[field] === 'object')) {
+        return value;
+    }
     const state = { ...fresh, ...value };
     state.version = GAME_VERSION;
     state.journal = Array.isArray(value.journal) ? value.journal.filter(validEntry) : [];
@@ -337,6 +360,8 @@ export function normalizeGameState(value) {
         ...(value.planner && typeof value.planner === 'object' ? value.planner : {}),
     };
     state.lastError = cleanString(value.lastError, 1_000);
+    state.pending = Array.isArray(value.pending) ? value.pending.filter(entry => entry && typeof entry === 'object' && entry.id) : [];
+    state.declined = Array.isArray(value.declined) ? value.declined.filter(entry => entry && typeof entry === 'object').slice(-50) : [];
     // The visible state is the journal's replay. Trust a saved copy only
     // when it was derived from exactly this journal.
     const savedIsCurrent = value.derivedSequence === state.sequence
@@ -345,6 +370,7 @@ export function normalizeGameState(value) {
         Object.assign(state, replay(state.base, state.journal));
         state.derivedSequence = state.sequence;
     }
+    normalizedStates.set(state, { journal: state.journal, length: state.journal.length });
     return state;
 }
 
@@ -382,6 +408,8 @@ export function gameStateBefore(value, boundary, options = {}) {
         .filter(([index]) => Number(index) < limit));
     state.introducedThrough = Math.min(state.introducedThrough, limit - 1);
     state.planner = { ...state.planner, lastRunIndex: Math.min(state.planner.lastRunIndex ?? -1, limit - 1) };
+    state.pending = (Array.isArray(state.pending) ? state.pending : []).filter(entry => Number(entry?.at) < limit);
+    state.declined = (Array.isArray(state.declined) ? state.declined : []).filter(entry => Number(entry?.at) < limit);
     return state;
 }
 
@@ -945,6 +973,11 @@ function reduceEntry(derived, entry) {
             if (!derived.contacts[to]) derived.contacts[to] = { ...derived.contacts[from], key: to, name: op.name || op.to };
             delete derived.contacts[from];
         }
+        if (derived.links?.[from]) {
+            folded += 1;
+            if (!derived.links[to]) derived.links[to] = { ...derived.links[from], key: to, name: op.name || op.to };
+            delete derived.links[from];
+        }
         return folded ? { ok: true } : { ok: false, reason: `nothing recorded under ${op.from}` };
     }
     case 'standing.change':
@@ -1100,6 +1133,15 @@ function reduceEntry(derived, entry) {
         delete derived.contacts[key];
         return { ok: true };
     }
+    case 'mind.link': {
+        const key = nameKey(op.name);
+        if (!key) return { ok: false, reason: 'a mind link needs a person' };
+        const consent = op.consent === 'refused' ? 'refused' : 'granted';
+        const existing = derived.links[key];
+        if (existing?.consent === consent) return { ok: true, unchanged: true };
+        derived.links[key] = { key, name: op.name, consent, note: op.note || '', since: existing?.since ?? at, updated: at };
+        return { ok: true };
+    }
     case 'device.set': {
         derived.device = {
             known: true,
@@ -1153,6 +1195,8 @@ export function gameContext(state, options = {}) {
         currency: state.currency,
         scenePlace: options.scenePlace || null,
         people: new Set([...Object.keys(state.purses || {}), ...Object.keys(state.dead || {}), ...Object.keys(state.standings || {})]),
+        // Whose gifts are already settled (the player as "player", people by key).
+        abilityHolders: new Set(Object.keys(state.abilities || {})),
         // Places where the story itself has stated prices: the planner adds none there.
         storyPricedPlaces: new Set((state.journal || [])
             .filter(entry => entry?.source === 'ledger' && entry.op?.type === 'price.set' && entry.op.place?.name)
@@ -1217,6 +1261,13 @@ export function normalizeGameRecords(payload, gameContextValue, options = {}) {
     // The planner may hand the player a purse and belongings once, when the
     // story has given them none; afterwards only the story changes them.
     const startingKit = source === 'planner' && options.allowStartingKit === true;
+    // What the world's communication allows: with the starting kit, the
+    // planner settles the player's gift and device when the world leaves them
+    // to the story; the people it prepares come with their gifts.
+    const comm = normalizeCommunication(options.communication);
+    const plannerMayGift = startingKit && comm.mind && comm.startMind === 'story';
+    const plannerMayDevice = startingKit && comm.text && comm.startPhone === 'story';
+    const level = value => (value !== undefined && value !== null && value !== '' && Number.isFinite(Number(value)) ? clamp(Math.round(Number(value)), 0, ABILITY_LIMIT) : null);
     let currency = context.currency;
     const currencyRaw = payload?.currency;
     if (currencyRaw && typeof currencyRaw === 'object' && Object.keys(currencyRaw).length) {
@@ -1523,8 +1574,12 @@ export function normalizeGameRecords(payload, gameContextValue, options = {}) {
     for (const raw of Array.isArray(payload?.abilities) ? payload.abilities : []) {
         if (!raw || typeof raw !== 'object') continue;
         if (source === 'planner') {
-            reject(raw, 'abilities come from the story or the judge, not the planner');
-            continue;
+            const holderName = normalizeName(raw.holder ?? raw.character ?? 'player');
+            const forPlayer = !holderName || /^(?:player|the player|pc)$/iu.test(holderName) || context.playerKeys.has(nameKey(holderName));
+            if (!plannerMayGift || !forPlayer) {
+                reject(raw, plannerMayGift ? 'the people the planner prepares take their gifts in their PERSON record' : 'abilities come from the story or the judge, not the planner');
+                continue;
+            }
         }
         const key = abilityKey(raw.key || raw.name);
         if (!key) {
@@ -1581,7 +1636,7 @@ export function normalizeGameRecords(payload, gameContextValue, options = {}) {
 
     const device = payload?.device;
     if (device && typeof device === 'object' && Object.keys(device).length) {
-        if (source === 'planner') reject(device, 'the device comes from the story or the judge, not the planner');
+        if (source === 'planner' && !plannerMayDevice) reject(device, 'the device comes from the story or the judge, not the planner');
         else if (device.present === undefined || device.present === null || device.present === '') reject(device, 'a device record needs present true or false');
         else {
             const present = device.present === true || /^(?:true|yes)$/iu.test(String(device.present));
@@ -1606,6 +1661,7 @@ export function normalizeGameRecords(payload, gameContextValue, options = {}) {
         .flatMap(([stageKey, stage]) => (stage.people || []).filter(person => !person.introduced)
             .map(person => ({ group: singularRoleOf(person.role), place: stage.place, stage: stageKey, name: person.name }))
             .filter(item => item.group));
+    const personGifts = [];
     for (const place of stagePlaces) {
         const raw = payload.stages.find(stage => placeRef(stage?.place || stage?.name, context)?.name === place.name) || {};
         const key = placeKey(place.name);
@@ -1647,6 +1703,14 @@ export function normalizeGameRecords(payload, gameContextValue, options = {}) {
                     ? clamp(Math.round(Number(lean)), -40, 40)
                     : null,
             });
+            // Their gifts are settled as they are made, so reaching them later needs no separate judging.
+            if (comm.mind) {
+                const name = normalizeName(person.name).slice(0, 120);
+                const gift = level(person.mind ?? person.telepathy);
+                const ward = level(person.ward ?? person.mind_ward);
+                personGifts.push({ type: 'ability.set', holder: { kind: 'character', name }, key: ABILITY_KEYS.mindWard, name: 'warded mind', level: ward ?? 0, note: ward ? 'prepared with a guarded mind' : 'prepared with an ordinary, open mind' });
+                if (gift) personGifts.push({ type: 'ability.set', holder: { kind: 'character', name }, key: ABILITY_KEYS.telepathy, name: 'mind-speech', level: gift, note: 'prepared with the gift' });
+            }
         }
         ops.push({
             type: 'stage.set',
@@ -1658,6 +1722,35 @@ export function normalizeGameRecords(payload, gameContextValue, options = {}) {
             people: people.slice(0, Math.max(1, Math.min(8, Number(options.maximumPeoplePerStage) || 8))),
             clockSeconds: Number.isFinite(options.clockSeconds) ? options.clockSeconds : null,
         });
+    }
+    ops.push(...personGifts);
+
+    // Consent to be reached mind to mind, as the story shows it given or refused.
+    for (const raw of Array.isArray(payload?.links) ? payload.links : []) {
+        if (!raw || typeof raw !== 'object') continue;
+        if (source === 'planner') {
+            reject(raw, 'mind links come from the story');
+            continue;
+        }
+        const rawName = normalizeName(raw.character ?? raw.name);
+        if (!rawName || context.playerKeys.has(nameKey(rawName))) {
+            reject(raw, 'a mind link needs a person other than the player');
+            continue;
+        }
+        const consent = /^(?:refused|refuse|revoked|denied|withdrawn|no|false)$/iu.test(String(raw.consent ?? '').trim()) ? 'refused' : 'granted';
+        ops.push({ type: 'mind.link', name: canonicalPerson(rawName, context).slice(0, 120), consent, note: noteOf(raw) });
+    }
+
+    // Someone the story brings in for the first time has their gifts settled
+    // now: an ordinary, open mind unless the ledger recorded otherwise.
+    if (source === 'ledger' && comm.mind) {
+        const gifted = new Set(ops.filter(op => op.type === 'ability.set' && op.holder?.kind === 'character').map(op => nameKey(op.holder.name)));
+        for (const op of ops.filter(entry => entry.type === 'standing.change' && (entry.group || Number.isFinite(entry.lean)))) {
+            const key = nameKey(op.name);
+            if (!key || gifted.has(key) || context.abilityHolders?.has(key)) continue;
+            gifted.add(key);
+            ops.push({ type: 'ability.set', holder: { kind: 'character', name: op.name }, key: ABILITY_KEYS.mindWard, name: 'warded mind', level: 0, note: 'met: an ordinary, open mind' });
+        }
     }
     // A starting purse that cannot pay for the lodging and meals priced in
     // the same answer empties on the first night: raise it to a modest float.
@@ -1897,6 +1990,8 @@ export function entryText(entry, state, playerName) {
         return `${op.name} removed from contacts`;
     case 'device.set':
         return op.present ? `has a ${op.name}${op.channel && op.channel !== 'text' ? ` (${op.channel})` : ''}` : `has no ${op.name || 'device'} for messages from afar`;
+    case 'mind.link':
+        return op.consent === 'refused' ? `${op.name} refuses to be reached mind to mind` : `${op.name} lets you reach their mind`;
     default:
         return '';
     }
@@ -1915,6 +2010,7 @@ function involvesPlayer(entry, items) {
     if (op.type === 'ability.set') return entry.source !== 'judge' && op.holder?.kind === 'player' && (Number.isFinite(op.delta) ? op.delta !== 0 : op.level > 0);
     if (op.type === 'contact.add' || op.type === 'contact.remove') return entry.source !== 'judge';
     if (op.type === 'device.set') return entry.source !== 'judge' && op.present === true;
+    if (op.type === 'mind.link') return true;
     return false;
 }
 
@@ -2179,7 +2275,11 @@ export function gameOverview(value, options = {}) {
         history: (item.history || []).map(step => ({ at: step.at, label: step.label, note: step.note })),
     });
     const totalValue = carriedItems(state).reduce((sum, item) => sum + (Number(item.value) || 0) * item.quantity, 0);
+    const pending = (Array.isArray(state.pending) ? state.pending : [])
+        .filter(entry => entry && entry.id && (entry.op || (Array.isArray(entry.ops) && entry.ops.length)))
+        .map(entry => ({ id: entry.id, at: entry.at, text: entry.text || (entry.op || entry.ops[0]).type, evidence: entry.evidence || '' }));
     return {
+        pending,
         purse: {
             text: purseText(state),
             amount: state.purse?.amount ?? null,

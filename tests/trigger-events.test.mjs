@@ -8,7 +8,7 @@ import {
     createProgressionState,
     progressionAgentSnapshot,
 } from '../progression.js';
-import { buildProgressionMessages } from '../progression-prompts.js';
+import { buildProgressionMessages } from '../progression-prompts.js?v=2';
 import {
     getTriggerEventStats,
     hasTriggerEventDeliveryAwaitingVerification,
@@ -770,7 +770,8 @@ test('the progression agent receives editor definitions and evidence-bound evalu
 
     assert.match(system, /exactly five top-level fields/u);
     assert.match(system, /Only definitions supplied in TRIGGERABLE_EVENT_DEFINITIONS/u);
-    assert.match(system, /message_indexes/u);
+    assert.match(system, /the engine locates the message it came from/u);
+    assert.doesNotMatch(system, /message_indexes/u, "the model is no longer asked for message indexes");
     assert.match(system, /intention, hypothetical, refusal, failed attempt/u);
     assert.match(system, /active means objectively underway but hidden/u);
     assert.match(system, /source_event_key/u);

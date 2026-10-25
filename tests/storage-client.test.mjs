@@ -8,7 +8,7 @@ import {
     InnerLoreStorageError,
     isInnerLoreStoragePointer,
     isLegacyInnerLoreStore,
-} from '../storage-client.js';
+} from '../storage-client.js?v=5';
 import { installMockInnerLoreStorage } from './mock-storage-server.mjs';
 
 const storeFor = chatId => ({

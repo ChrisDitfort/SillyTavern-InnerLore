@@ -209,14 +209,15 @@
 
                     <label class="checkbox_label" for="il_parallel_passes">
                         <input id="il_parallel_passes" type="checkbox" />
-                        <span>Run background passes together</span>
+                        <span>Run background passes together on providers without a known request budget</span>
                     </label>
                     <small class="inner-lore-hint">
-                        Sends the curator, World Progression, the game ledger and the scene planner at the same time
-                        instead of one after another, so a turn's background work takes as long as its slowest pass.
-                        Turn this on with the Claude bridge's agent pool, which runs them side by side in one request
-                        slot, or with a provider that serves several requests at once. Leave it off for a provider that
-                        allows only one request at a time.
+                        Passes on different providers always leave side by side, and so do passes on one provider whose
+                        request budget InnerLore knows (NanoGPT ten at once, Featherless its units, NovelAI one): the
+                        budget hands them out, so a turn's background work takes as long as its slowest pass. On a
+                        provider InnerLore does not know (a local bridge, another host) passes go one after another
+                        unless this is on. Turn it on with the Claude bridge's agent pool, which runs them side by side
+                        in one request slot.
                     </small>
 
                     <div class="inner-lore-grid two-columns">
@@ -719,6 +720,19 @@
                         person, so the narrator and the background passes know what was said. The <b>Phone</b> item in the menu bar
                         lists conversations, contacts and who can be reached.
                     </small>
+                    <label class="checkbox_label" for="il_private_chat_pictures">
+                        <input id="il_private_chat_pictures" type="checkbox" />
+                        <span>People may send pictures in texts and mind-speech</span>
+                    </label>
+                    <label class="checkbox_label" for="il_private_chat_moments">
+                        <input id="il_private_chat_moments" type="checkbox" />
+                        <span>In a quiet word, a camera button shows the person there and then</span>
+                    </label>
+                    <small class="inner-lore-hint">
+                        A person can answer with a photo, or show you an image in the mind, when you ask for one or when it
+                        fits. The picture is drawn on the server by the portrait image server, with its own scene. Anyone in
+                        it is drawn from their portrait's look and seed, so the face in the photo is the face on their card.
+                    </small>
                     <div class="inner-lore-grid two-columns">
                         <label for="il_private_chat_temperature">Reply temperature</label>
                         <input id="il_private_chat_temperature" class="text_pole" type="number" min="0" max="1.5" step="0.05" />
@@ -746,9 +760,11 @@
                     <small class="inner-lore-hint">
                         The game ledger's model turns what the story says about someone's looks into image tags, and an
                         image server with the Stable Diffusion WebUI API (Local Dream through LDBridge, for example) draws
-                        them one at a time. A person is drawn once the story has described them. Portraits are saved with
-                        the chat and show on the cards, in the top bar and on each person's page, where you can also have
-                        a new one drawn.
+                        them one at a time. A person is drawn once the story has described them, on a plain backdrop, with
+                        their build (a woman's chest included) stated so the model does not exaggerate it. Each person keeps
+                        a look: the tags and the seed of their portrait, which every picture of them reuses. Portraits are
+                        saved with the chat and show on the cards, in the top bar and on each person's page, where you can
+                        also have a new one drawn (a new portrait gives them a new look).
                     </small>
                     <label for="il_portrait_url">Image server</label>
                     <input id="il_portrait_url" class="text_pole" type="text" placeholder="Empty: the server set in Image Generation" />
@@ -756,6 +772,8 @@
                     <textarea id="il_portrait_style" class="text_pole textarea_compact" rows="2"></textarea>
                     <label for="il_portrait_negative">Negative prompt</label>
                     <textarea id="il_portrait_negative" class="text_pole textarea_compact" rows="2"></textarea>
+                    <label for="il_portrait_background">Portrait backdrop tags</label>
+                    <input id="il_portrait_background" class="text_pole" type="text" placeholder="Empty: no backdrop tag" />
                     <div class="inner-lore-grid two-columns">
                         <label>
                             <span>Steps</span>

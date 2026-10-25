@@ -37,13 +37,13 @@ import {
     markEventProposalArmed,
     recordEventDirectorAttempt,
     validateEventDirectorPayload,
-} from '../event-director.js';
+} from '../event-director.js?v=4';
 import { buildEventDirectorMessages, buildEventDirectorRepairMessages } from '../event-director-prompts.js';
 import { decideInnerLoreMaintenance } from '../maintenance-scheduler.js';
 import { syncLorebook } from '../lorebook.js';
-import { buildAnalysisMessages, buildRepairMessages, formatTranscript } from '../prompts.js';
-import { validateProgressionPayload } from '../progression-client.js';
-import { buildProgressionMessages, buildProgressionRepairMessages } from '../progression-prompts.js';
+import { buildAnalysisMessages, buildRepairMessages, formatTranscript } from '../prompts.js?v=12';
+import { validateProgressionPayload } from '../progression-client.js?v=2';
+import { buildProgressionMessages, buildProgressionRepairMessages } from '../progression-prompts.js?v=2';
 import { applyProgressionPatch, createProgressionState, getProgressionStats } from '../progression.js';
 import {
     appendDslEvaluationKeyContract,
@@ -51,7 +51,7 @@ import {
     outputParseDiagnostics,
     parseInnerLoreOutput,
     prepareOutputMessages,
-} from '../output-codec.js';
+} from '../output-codec.js?v=7';
 import {
     listTriggerEventRecords,
     markTriggerEventDeliveriesInjected,

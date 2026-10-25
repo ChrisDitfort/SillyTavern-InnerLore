@@ -50,7 +50,7 @@ test('the coverage checklist lists the amounts, times and arrangements the passa
 });
 
 test('an assisted progression prompt carries the sweep block with the passage commitments; plain prompts do not', async () => {
-    const { buildProgressionMessages } = await import('../progression-prompts.js');
+    const { buildProgressionMessages } = await import('../progression-prompts.js?v=2');
     const { createProgressionState } = await import('../progression.js');
     const base = { transcript: '[message 6; STORY]\nHob will pay for passage north; be back by first light.', store: harbourStore(), progression: createProgressionState(), currentIndex: 6, playerName: 'Jet', settings: {} };
     const assisted = buildProgressionMessages({ ...base, assisted: true }).map(m => m.content).join('\n');

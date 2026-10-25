@@ -2,9 +2,9 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { createEmptyStore, mergeEntityOperations, normalizeBrainRecord } from '../core.js?v=49';
-import { applyGameOperations, createGameState } from '../game.js?v=4';
+import { applyGameOperations, createGameState } from '../game.js?v=6';
 import { deriveSceneState } from '../scene.js?v=8';
-import { formatTranscript } from '../prompts.js?v=11';
+import { formatTranscript } from '../prompts.js?v=12';
 import {
     CHANNELS,
     PRIVATE_EXTRA_KEY,
@@ -27,8 +27,8 @@ import {
     sortedThreads,
     threadKey,
     threadPreview,
-} from '../private-chat.js?v=1';
-import { renderPhoneHome, renderThreadLog } from '../phone-view.js?v=1';
+} from '../private-chat.js?v=4';
+import { renderPhoneHome, renderThreadLog } from '../phone-view.js?v=4';
 
 function world() {
     const store = createEmptyStore('private');
@@ -155,13 +155,17 @@ test('the reply prompt briefs the person, states the channel rules, and alternat
 
 test('replies become bubbles: labels and the player\'s lines are stripped, marks become outcomes', () => {
     const options = { personName: 'Mara Venn', playerName: 'Jet', channel: 'text' };
-    assert.deepEqual(parsePersonReply('Mara Venn: Aye. Why?\nMara: Don\'t tell me you lost the key.\nJet: I didn\'t.\nMara: Good.', options), {
+    const parsePersonReplyOf = (text, opts) => {
+        const result = parsePersonReply(text, opts);
+        return { bubbles: result.bubbles, rejected: result.rejected, ended: result.ended };
+    };
+    assert.deepEqual(parsePersonReplyOf('Mara Venn: Aye. Why?\nMara: Don\'t tell me you lost the key.\nJet: I didn\'t.\nMara: Good.', options), {
         bubbles: ['Aye. Why?', 'Don\'t tell me you lost the key.'], rejected: false, ended: false,
     });
-    assert.deepEqual(parsePersonReply('**Mara Venn:** "Still here."\n*puts the phone down*\n[ends]', options), { bubbles: ['Still here.'], rejected: false, ended: true });
-    assert.deepEqual(parsePersonReply('```\n[rejects]\n```', { ...options, channel: 'mind' }), { bubbles: [], rejected: true, ended: false });
-    assert.deepEqual(parsePersonReply('[rejects] Not you. Not now.', { ...options, channel: 'mind' }), { bubbles: ['Not you. Not now.'], rejected: true, ended: false });
-    assert.deepEqual(parsePersonReply('<think>She is annoyed.</think>\n- Fine.\n- Come round the back.', options), { bubbles: ['Fine.', 'Come round the back.'], rejected: false, ended: false });
+    assert.deepEqual(parsePersonReplyOf('**Mara Venn:** "Still here."\n*puts the phone down*\n[ends]', options), { bubbles: ['Still here.'], rejected: false, ended: true });
+    assert.deepEqual(parsePersonReplyOf('```\n[rejects]\n```', { ...options, channel: 'mind' }), { bubbles: [], rejected: true, ended: false });
+    assert.deepEqual(parsePersonReplyOf('[rejects] Not you. Not now.', { ...options, channel: 'mind' }), { bubbles: ['Not you. Not now.'], rejected: true, ended: false });
+    assert.deepEqual(parsePersonReplyOf('<think>She is annoyed.</think>\n- Fine.\n- Come round the back.', options), { bubbles: ['Fine.', 'Come round the back.'], rejected: false, ended: false });
     const aside = parsePersonReply('*wipes the bar* Keep your voice down. *glances at the door*', { ...options, channel: 'aside' });
     assert.deepEqual(aside.bubbles, ['*wipes the bar* Keep your voice down. *glances at the door*'], 'a quiet word keeps its beats');
     const many = parsePersonReply('one\ntwo\nthree\nfour\nfive\nsix', options);
@@ -170,6 +174,48 @@ test('replies become bubbles: labels and the player\'s lines are stripped, marks
     assert.equal(sharedNumber('It\'s +44 7700 900123, lose it and I\'ll know.'), '+44 7700 900123');
     assert.equal(sharedNumber('Room 12, at 4 o\'clock.'), null);
     assert.equal(sharedNumber('In 1842 the quay burned.'), null);
+});
+
+test('a person can send one picture in a text or a mind: its own bubble, saved, told to the story, shown in the card', () => {
+    const options = { personName: 'Mara Venn', playerName: 'Jet', channel: 'text', pictures: true };
+    const reply = parsePersonReply('Mara Venn: Fine. Here.\n[picture: me behind the bar, ledger in hand]\nDon\'t get used to it.\n[picture: another one]', options);
+    assert.deepEqual(reply.items, [
+        { kind: 'text', text: 'Fine. Here.' },
+        { kind: 'picture', text: 'me behind the bar, ledger in hand' },
+        { kind: 'text', text: 'Don\'t get used to it.' },
+    ], 'one picture a reply, in its place');
+    assert.deepEqual(reply.bubbles, ['Fine. Here.', 'Don\'t get used to it.']);
+    assert.deepEqual(parsePersonReply('*sends a selfie* there you go', options).items, [{ kind: 'picture', text: 'a selfie of me' }, { kind: 'text', text: 'there you go' }]);
+    assert.deepEqual(parsePersonReply('The docks. Look. [image: the docks at night]', { ...options, channel: 'mind' }).pictures, ['the docks at night']);
+    assert.deepEqual(parsePersonReply('[picture: me] hi', { ...options, pictures: false }).items, [{ kind: 'text', text: 'hi' }], 'with pictures off the mark is dropped');
+    assert.deepEqual(parsePersonReply('[picture: me] hi', { ...options, channel: 'aside' }).items, [{ kind: 'text', text: 'hi' }], 'no pictures in a quiet word');
+
+    const thread = createThread('Mara Venn', 'text');
+    appendBubble(thread, 'player', 'send me a picture of the bar?');
+    appendBubble(thread, 'person', 'me behind the bar, ledger in hand', { picture: { id: 'pic-abc123' } });
+    appendBubble(thread, 'person', 'happy?', { picture: { id: 'Not An Id!' } });
+    assert.deepEqual(thread.bubbles[1].picture, { id: 'pic-abc123' });
+    assert.equal(thread.bubbles[2].picture, undefined, 'a malformed id is no picture');
+    const restored = normalizeThreads(JSON.parse(JSON.stringify({ [thread.key]: thread })))[thread.key];
+    assert.deepEqual(restored.bubbles[1].picture, { id: 'pic-abc123' }, 'a picture survives the save');
+    assert.equal(threadPreview({ ...thread, bubbles: thread.bubbles.slice(0, 2) }).lastText, 'Picture: me behind the bar, ledger in hand');
+
+    // Pictures are offered only when asked for, and the next prompt sees the sent one as it was written.
+    const messages = buildPrivateReplyMessages({ thread, playerName: 'Jet', personBrief: 'Mara Venn: innkeeper.', pictures: true });
+    assert.match(messages[0].content, /\[picture: what it shows/u);
+    assert.ok(messages.some(message => message.role === 'assistant' && /\[picture: me behind the bar, ledger in hand\]/u.test(message.content)));
+    assert.doesNotMatch(buildPrivateReplyMessages({ thread, playerName: 'Jet', personBrief: 'x' })[0].content, /\[picture:/u);
+    assert.match(buildPrivateReplyMessages({ thread: createThread('Mara Venn', 'mind'), playerName: 'Jet', personBrief: 'x', pictures: true })[0].content, /\[image: what it shows/u);
+    assert.doesNotMatch(buildPrivateReplyMessages({ thread: createThread('Mara Venn', 'aside'), playerName: 'Jet', personBrief: 'x', pictures: true })[0].content, /\[picture:|\[image:/u);
+
+    // The story hears of it in words; the card and the phone show a slot the page fills.
+    const text = renderTranscript(thread, { playerName: 'Jet', bubbles: thread.bubbles.slice(0, 2) });
+    assert.equal(text, '[Text messages between Jet and Mara Venn]\nJet: send me a picture of the bar?\nMara Venn: [sends a picture: me behind the bar, ledger in hand]');
+    const card = renderPrivateCard(text, { playerName: 'Jet', channel: 'text', pictures: [{ id: 'pic-abc123' }] });
+    assert.match(card, /is-picture"><figure class="il-sms-picture" data-picture="pic-abc123">/u);
+    assert.match(card, /<figcaption>me behind the bar, ledger in hand<\/figcaption>/u);
+    assert.match(renderTranscript(createThread('Mara Venn', 'mind'), { playerName: 'Jet', bubbles: [{ from: 'person', text: 'the docks at night', picture: { id: 'pic-def456' } }] }), /Mara Venn: \[shows an image in the mind: the docks at night\]/u);
+    assert.match(renderThreadLog(thread), /data-picture="pic-abc123"/u);
 });
 
 test('the story gets a plain transcript, which the scene ignores and the card renders as bubbles', () => {
@@ -228,4 +274,22 @@ test('the phone screen lists conversations, the people who can be reached and th
     assert.match(log, /shut you out\./u);
     assert.match(log, /il-sms-typing/u);
     assert.equal(CHANNELS.mind.composer, 'Think');
+});
+
+test('a picture of the moment in a quiet word is the player\'s own view: saved with its scene, never told to the story or the reply model', () => {
+    const thread = createThread('Mara Venn', 'aside');
+    appendBubble(thread, 'player', 'Keep your voice down.');
+    appendBubble(thread, 'person', '*leans across the bar* Then come closer.');
+    appendBubble(thread, 'person', 'Mara Venn at Salt Lantern, as you see them now', { picture: { id: 'pic-moment1', moment: true, about: 'Mara Venn, face to face with Jet at Salt Lantern, right now. She leans across the bar.' } });
+    assert.deepEqual(thread.bubbles[2].picture, { id: 'pic-moment1', moment: true, about: 'Mara Venn, face to face with Jet at Salt Lantern, right now. She leans across the bar.' });
+    const restored = normalizeThreads(JSON.parse(JSON.stringify({ [thread.key]: thread })))[thread.key];
+    assert.equal(restored.bubbles[2].picture.moment, true, 'kept across a save');
+    assert.match(restored.bubbles[2].picture.about, /leans across the bar/u);
+    assert.equal(pendingBubbles(thread).length, 2, 'the story is told what was said, not what the player looked at');
+    assert.doesNotMatch(renderTranscript(thread, { playerName: 'Jet' }), /as you see them now/u);
+    const messages = buildPrivateReplyMessages({ thread, playerName: 'Jet', personBrief: 'Mara Venn: innkeeper.' });
+    assert.ok(!messages.some(message => /as you see them now/u.test(message.content)), 'nor is the reply model');
+    assert.match(renderThreadLog(thread), /il-sms-bubble is-moment is-picture"><figure class="il-sms-picture" data-picture="pic-moment1"/u);
+    markFlushed(thread);
+    assert.equal(hasPendingStory(thread), false);
 });

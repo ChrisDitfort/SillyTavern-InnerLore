@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { renderTradePartner, tradeAction } from '../game-view.js';
+import { renderTradePartner, tradeAction } from '../game-view.js?v=4';
 
 test('trade buttons write the player\'s move for the story to narrate', () => {
     const hobb = { name: 'Hobb Varle' };

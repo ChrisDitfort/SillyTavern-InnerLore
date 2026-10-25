@@ -21,7 +21,12 @@ import {
     withRequestTimeout,
     fitsBesideStory,
     storyProviderBodyLines,
-} from '../llm-client.js';
+    scheduleBackgroundTasks,
+    describeBackgroundSchedule,
+    shellRoles,
+    setPeerProviderUnits,
+    peerProviderUsed,
+} from '../llm-client.js?v=21';
 
 test('response extraction prefers final content over private reasoning', () => {
     const text = extractResponseText({
@@ -424,4 +429,89 @@ test('under the fork the connection pickers read the shell records from settings
         globalThis.window = previousWindow;
         globalThis.SillyTavern = previousTavern;
     }
+});
+
+test('passes leave together on a budgeted provider and across providers, one after another on an unknown host unless asked', async () => {
+    const previousWindow = globalThis.window;
+    const previousTavern = globalThis.SillyTavern;
+    try {
+        globalThis.window = {};
+        globalThis.SillyTavern = {
+            getContext: () => ({
+                extensionSettings: {
+                    innerlore_shell: {
+                        connections: [
+                            { id: 'nano', name: 'NanoGPT', mode: 'cc', url: 'https://nano-gpt.com/api/subscription/v1', model: 'glm', background: true },
+                            { id: 'bridge', name: 'Bridge', mode: 'cc', url: 'http://127.0.0.1:8790/innerlore/v1', model: 'opus', background: true },
+                            { id: 'novel', name: 'NovelAI GLM', mode: 'cc', url: 'https://text.novelai.net/oa/v1', model: 'glm-4-6', background: true },
+                        ],
+                        roles: { story: 'nano', curator: 'nano', minds: '', progression: '', game: '', planner: 'bridge', private: '', fallback: '' },
+                    },
+                },
+            }),
+        };
+        assert.equal(shellRoles().planner, 'bridge', 'roles are read from the settings before the shell API exists');
+        const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+        const trace = [];
+        const task = (name, profileId, ms = 40, fail = false) => ({
+            name, profileId,
+            run: async () => {
+                trace.push(`${name}:start`);
+                await sleep(ms);
+                trace.push(`${name}:end`);
+                if (fail) throw new Error(`${name} failed`);
+                return name;
+            },
+        });
+        const startedBeforeEnded = (a, b) => trace.indexOf(`${a}:start`) < trace.indexOf(`${b}:end`) && trace.indexOf(`${b}:start`) < trace.indexOf(`${a}:end`);
+
+        // NanoGPT has a known budget: its passes overlap without any opt-in.
+        let outcomes = await scheduleBackgroundTasks([task('curator', 'nano'), task('progression', 'nano'), task('game', 'nano', 20, true)]);
+        assert.ok(startedBeforeEnded('curator', 'progression'), `curator and progression overlapped on NanoGPT: ${trace.join(' ')}`);
+        assert.equal(outcomes.curator.value, 'curator');
+        assert.match(outcomes.game.error.message, /game failed/u, 'a failed pass reports its error without stopping the others');
+        assert.equal(outcomes.progression.value, 'progression');
+
+        // An unknown host runs its passes in order unless the user opts in.
+        trace.length = 0;
+        await scheduleBackgroundTasks([task('curator', 'bridge'), task('progression', 'bridge')]);
+        assert.deepEqual(trace, ['curator:start', 'curator:end', 'progression:start', 'progression:end']);
+        trace.length = 0;
+        await scheduleBackgroundTasks([task('curator', 'bridge'), task('progression', 'bridge')], { parallel: true });
+        assert.ok(startedBeforeEnded('curator', 'progression'), 'with the opt-in the bridge passes overlap');
+
+        // Two providers overlap even without the opt-in; the unknown host keeps its own order.
+        trace.length = 0;
+        await scheduleBackgroundTasks([task('curator', 'bridge', 60), task('planner', 'nano', 10), task('game', 'bridge', 10)]);
+        assert.ok(startedBeforeEnded('curator', 'planner'), 'the NanoGPT planner ran beside the bridge curator');
+        assert.ok(trace.indexOf('game:start') > trace.indexOf('curator:end'), 'the bridge game waited for the bridge curator');
+
+        // A cancelled task ends its serial queue; the other queue is unaffected.
+        trace.length = 0;
+        const cancelled = { name: 'curator', profileId: 'bridge', run: async () => { throw new DOMException('stopped', 'AbortError'); } };
+        outcomes = await scheduleBackgroundTasks([cancelled, task('progression', 'bridge'), task('planner', 'nano')]);
+        assert.equal(outcomes.curator.error.name, 'AbortError');
+        assert.equal(outcomes.progression, undefined, 'the pass behind the cancelled one never started');
+        assert.equal(outcomes.planner.value, 'planner');
+
+        assert.equal(describeBackgroundSchedule([task('curator', 'nano'), task('game', 'nano'), task('planner', 'bridge')]), 'curator, game together on nano-gpt.com; planner on 127.0.0.1:8790');
+        assert.equal(describeBackgroundSchedule([task('curator', 'bridge'), task('game', 'bridge')]), 'curator, game one after another on 127.0.0.1:8790');
+        assert.equal(describeBackgroundSchedule([task('curator', 'novel'), task('game', 'novel')]), 'curator, game together on novelai.net');
+    } finally {
+        globalThis.window = previousWindow;
+        globalThis.SillyTavern = previousTavern;
+    }
+});
+
+test('what the server holds on a provider counts against the story\'s room', () => {
+    assert.equal(providerHasRoom('nano-gpt.com', 1), true);
+    setPeerProviderUnits('nano-gpt.com', 10);
+    assert.equal(peerProviderUsed('nano-gpt.com'), 10);
+    assert.equal(providerHasRoom('nano-gpt.com', 1), false, 'ten server requests fill NanoGPT');
+    assert.equal(providerInUse('nano-gpt.com'), true);
+    setPeerProviderUnits('nano-gpt.com', 9);
+    assert.equal(providerHasRoom('nano-gpt.com', 1), true);
+    setPeerProviderUnits('nano-gpt.com', 0);
+    assert.equal(providerInUse('nano-gpt.com'), false);
+    assert.equal(providerHasRoom('unknown.example', 99), true, 'an unknown host has no budget');
 });

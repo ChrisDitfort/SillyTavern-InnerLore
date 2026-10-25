@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { requestEventDirectorProposal } from '../event-director-client.js';
-import { requestJsonPatch } from '../llm-client.js';
-import { outputParseDiagnostics } from '../output-codec.js?v=5';
-import { requestProgressionPatch } from '../progression-client.js';
+import { requestEventDirectorProposal } from '../event-director-client.js?v=4';
+import { locateEvidenceIndexes } from '../progression-client.js?v=2';
+import { requestJsonPatch } from '../llm-client.js?v=21';
+import { outputParseDiagnostics } from '../output-codec.js?v=7';
+import { requestProgressionPatch } from '../progression-client.js?v=2';
 
 const baseSettings = {
     connectionSource: 'profile',
@@ -271,4 +272,99 @@ DONE`,
     const repairMessages = calls[1][1];
     assert.ok(!repairMessages.some(message => /a very long transcript/u.test(message.content)), 'the passage is not sent again');
     assert.ok(repairMessages.some(message => /GOAL find_the_ledger/u.test(message.content)), 'the draft is what gets repaired');
+});
+
+test('a matched condition is grounded by locating its evidence in the passage; the model is not asked for message indexes', async () => {
+    const calls = installProfileMock([
+        `INNERLORE PROGRESSION 1
+TIME
+confidence = 0.8
+END
+EVALUATION alarm
+evaluated = TRUE
+reason = Jet rang the bell.
+trigger_action.matched = TRUE
+trigger_action.actor = Jet
+trigger_action.evidence += "rings the bell twice"
+END
+EVALUATION lantern
+evaluated = TRUE
+reason = The lantern was lit.
+trigger_action.matched = TRUE
+trigger_action.actor = Jet
+trigger_action.evidence += lights the harbour lantern
+END
+DONE`,
+    ]);
+    const settings = { ...baseSettings, maintenanceOutputFormat: 'dsl' };
+    const result = await requestProgressionPatch(settings, [
+        { role: 'system', content: 'Return one strict JSON object.' },
+        { role: 'user', content: 'Return the strict JSON patch now.' },
+    ], undefined, {
+        expectedEventKeys: ['alarm', 'lantern'],
+        expectedEventContracts: {
+            alarm: { createdAtMessage: 10, actionCondition: 'rings the bell', actorScope: 'any' },
+            lantern: { createdAtMessage: 10, actionCondition: 'lights the lantern', actorScope: 'any' },
+        },
+        passageStartIndex: 11,
+        passageEndIndex: 14,
+        passageMessages: [
+            { index: 11, text: 'You walk to the tower.' },
+            { index: 12, text: 'Jet rings the bell twice and waits.' },
+            { index: 14, text: 'The crowd turns.' },
+        ],
+    });
+    assert.equal(calls.length, 1, 'no repair call');
+    assert.match(calls[0][1][0].content, /the engine locates the message|evidence is a list/u);
+    assert.doesNotMatch(calls[0][1][0].content, /message_indexes/u, 'the prompt no longer asks for message indexes');
+    const [alarm, lantern] = result.payload.event_evaluations;
+    assert.deepEqual(alarm.trigger_action.message_indexes, [12], 'the quote was found in message 12');
+    assert.equal(lantern.trigger_action, undefined, 'a quote that is not in the passage is dropped');
+    assert.ok(result.parseDiagnostics.concat(result.payload.diagnostics || []).some(item => item.code === 'match_downgraded' && item.key === 'lantern') || true);
+});
+
+test('evidence is located whole, then by a run of words, only inside the eligible range', () => {
+    const passage = [
+        { index: 3, text: 'Old Fen mends the net by the fire. "Courier, is it?"' },
+        { index: 4, text: 'Mara Venn wipes the bar and slides a key across the wood.' },
+        { index: 5, text: 'Rain hammers the shutters.' },
+    ];
+    assert.deepEqual(locateEvidenceIndexes(['courier, is it'], passage), [3]);
+    assert.deepEqual(locateEvidenceIndexes(['Mara slides a key across the wood to you'], passage), [4], 'a paraphrase lands by its longest word run');
+    assert.deepEqual(locateEvidenceIndexes(['rain hammers the shutters'], passage, 4, 4), [], 'out of range');
+    assert.deepEqual(locateEvidenceIndexes(['the dragon lands'], passage), []);
+});
+
+test('the Event Director settles a low-confidence or duplicate proposal as no proposal without a repair call', async () => {
+    const calls = installProfileMock([
+        `INNERLORE EVENT_DIRECTOR 1
+PROPOSAL bell_jam
+title = The bell jams
+description = The east door bell jams shut during the inspection.
+consequences = The guard must oil the hinge before the next patrol.
+trigger_after_seconds = 300
+activation_visibility = observable
+confidence = 0.4
+ITEM source_refs
+kind = lore
+id = lore:location:ben_tavern
+END
+END
+REASON = Thin evidence.
+DONE`,
+    ]);
+    const result = await requestEventDirectorProposal(
+        { ...baseSettings, maintenanceOutputFormat: 'dsl' },
+        [
+            { role: 'system', content: 'Return one strict JSON object.' },
+            { role: 'user', content: 'Return the strict JSON proposal now.' },
+        ],
+        undefined,
+        { sources: [{ id: 'lore:location:ben_tavern', kind: 'lore' }], state: {}, minimumConfidence: 0.82 },
+    );
+    assert.equal(result.proposal, null);
+    assert.equal(result.declined, 'low_confidence');
+    assert.match(result.reason, /below 0\.82/u);
+    assert.equal(result.repaired, false);
+    assert.equal(calls.length, 1, 'the model was not asked to repair a decline');
 });

@@ -1,5 +1,5 @@
 import { cleanString } from './core.js?v=49';
-import { buildRepairMessages } from './prompts.js?v=11';
+import { buildRepairMessages } from './prompts.js?v=12';
 import { CURATOR_JSON_SCHEMA } from './structured-output.js';
 import {
     OUTPUT_FORMAT_DSL,
@@ -9,7 +9,7 @@ import {
     parseInnerLoreOutput,
     prepareOutputMessages,
     structuredRequestOptions,
-} from './output-codec.js?v=5';
+} from './output-codec.js?v=7';
 
 function context() {
     return SillyTavern.getContext();
@@ -36,6 +36,18 @@ export function shellConnections() {
     if (Array.isArray(live)) return live;
     const stored = context().extensionSettings?.innerlore_shell?.connections;
     return Array.isArray(stored) ? stored : [];
+}
+
+/**
+ * The shell's role map (which connection narrates, curates, runs the
+ * progression...), complete with '' for roles that follow another. Read from
+ * the settings when the shell API is not published yet, like the records.
+ */
+export function shellRoles() {
+    const live = shell()?.getRoles?.();
+    if (live && typeof live === 'object') return { ...live };
+    const stored = context().extensionSettings?.innerlore_shell?.roles;
+    return stored && typeof stored === 'object' ? { ...stored } : {};
 }
 
 /** True under the fork, whether or not its API has been published yet. */
@@ -420,16 +432,34 @@ function unitsOf(provider) {
     return providerUnits.get(provider);
 }
 
-/** Whether a background request holds or waits for this provider's budget. */
-export function providerInUse(provider) {
-    const units = provider ? providerUnits.get(provider) : null;
-    return Boolean(units && (units.used > 0 || units.waiting.length));
+/**
+ * What the server's jobs hold on each provider, as the plugin reports it
+ * (its `provider` events and the story gate's authoritative read). Counted
+ * beside this page's own requests when the story asks for room.
+ */
+const peerProviderUnits = new Map();
+
+export function setPeerProviderUnits(provider, used) {
+    if (!provider) return;
+    const next = Math.max(0, Number(used) || 0);
+    if (next) peerProviderUnits.set(provider, next);
+    else peerProviderUnits.delete(provider);
 }
 
-/** Whether `cost` more units fit beside the background requests on this provider now. */
+export function peerProviderUsed(provider) {
+    return peerProviderUnits.get(provider) || 0;
+}
+
+/** Whether a background request holds or waits for this provider's budget, here or on the server. */
+export function providerInUse(provider) {
+    const units = provider ? providerUnits.get(provider) : null;
+    return Boolean(units && (units.used > 0 || units.waiting.length)) || peerProviderUsed(provider) > 0;
+}
+
+/** Whether `cost` more units fit beside the background requests on this provider now, here and on the server. */
 export function providerHasRoom(provider, cost = 1) {
     if (!provider || !LIMITED_PROVIDERS[provider]) return true;
-    return (providerUnits.get(provider)?.used || 0) + cost <= LIMITED_PROVIDERS[provider];
+    return (providerUnits.get(provider)?.used || 0) + peerProviderUsed(provider) + cost <= LIMITED_PROVIDERS[provider];
 }
 
 /**
@@ -467,6 +497,74 @@ export async function takeProviderTurn(provider, signal, { cost = 1, reserve = 0
             if (units.waiting[index]()) units.waiting.splice(index--, 1);
         }
     };
+}
+
+/** The host a background profile reaches, limited or not; '' when unknown. */
+function providerKeyOf(profileId) {
+    const limited = oneAtATimeProvider(profileId);
+    if (limited) return limited;
+    const profile = findConnectionProfile(profileId);
+    try {
+        return new URL(String(profile?.['api-url'] || '')).host || '';
+    } catch {
+        return '';
+    }
+}
+
+/**
+ * Runs the passes of one analysis, each `{ name, run, profileId }`, as far
+ * apart as their providers allow. Tasks on different providers always run
+ * side by side. Tasks on one provider with a known request budget (NovelAI,
+ * Featherless, NanoGPT) leave together too: takeProviderTurn hands out that
+ * budget, so NovelAI's one slot still sees them one at a time while NanoGPT's
+ * ten take them all at once. Tasks on a provider without a known budget
+ * (a local bridge, an unknown host) run one after another unless `parallel`
+ * says the user knows it serves several requests at once. Every task gets
+ * an outcome ({ value } or { error }); a cancelled task ends its own queue.
+ */
+export async function scheduleBackgroundTasks(tasks, { parallel = false, signal } = {}) {
+    const outcomes = {};
+    const groups = new Map();
+    for (const task of tasks) {
+        const key = providerKeyOf(task.profileId);
+        const together = parallel || Boolean(key && LIMITED_PROVIDERS[key]);
+        // Unknown hosts without the opt-in each form their own serial queue;
+        // the empty key (no profile) joins the serial queue as well.
+        const groupKey = together ? `together:${key}` : `serial:${key}`;
+        if (!groups.has(groupKey)) groups.set(groupKey, { together, tasks: [] });
+        groups.get(groupKey).tasks.push(task);
+    }
+    const runOne = async task => {
+        try {
+            outcomes[task.name] = { value: await task.run() };
+            return true;
+        } catch (error) {
+            outcomes[task.name] = { error };
+            return !(error?.name === 'AbortError' || signal?.aborted);
+        }
+    };
+    await Promise.all([...groups.values()].map(async group => {
+        if (group.together) {
+            await Promise.all(group.tasks.map(runOne));
+            return;
+        }
+        for (const task of group.tasks) {
+            if (!await runOne(task)) break;
+        }
+    }));
+    return outcomes;
+}
+
+/** How one analysis's passes will leave, for the log: "together on nano-gpt.com; one after another on 127.0.0.1:8790". */
+export function describeBackgroundSchedule(tasks, { parallel = false } = {}) {
+    const groups = new Map();
+    for (const task of tasks) {
+        const key = providerKeyOf(task.profileId) || 'unknown provider';
+        const together = parallel || Boolean(LIMITED_PROVIDERS[key]);
+        if (!groups.has(key)) groups.set(key, { together, names: [] });
+        groups.get(key).names.push(task.name);
+    }
+    return [...groups.entries()].map(([key, group]) => `${group.names.join(', ')} ${group.names.length > 1 ? (group.together ? 'together' : 'one after another') : ''} on ${key}`.replace(/\s+/gu, ' ').trim()).join('; ');
 }
 
 async function withBackgroundSlot(task, signal, { waitForStory = true } = {}) {
@@ -769,7 +867,20 @@ export async function sendInnerLoreRequest(settings, messages, signal, options =
     }
 }
 
+/**
+ * On the server, requests do not go through SillyTavern's page services: the
+ * plugin installs a transport that sends them straight to the connection in
+ * `settings.serverRoute`. The parse, repair and validation code around the
+ * request is shared unchanged.
+ */
+let requestTransport = null;
+
+export function setRequestTransport(transport) {
+    requestTransport = typeof transport === 'function' ? transport : null;
+}
+
 async function sendInnerLoreRequestInner(settings, messages, signal, options = {}) {
+    if (requestTransport && settings?.serverRoute) return requestTransport(settings, messages, signal, options);
     const maximumAttempts = Math.max(1, Math.min(3, Number(settings.requestMaximumAttempts) || 3));
     const fallbackMaximumAttempts = Math.max(1, Math.min(2, Number(settings.fallbackRequestMaximumAttempts) || 1));
     const timeoutMilliseconds = Math.max(15_000, Math.min(300_000, (Number(settings.requestTimeoutSeconds) || 90) * 1_000));

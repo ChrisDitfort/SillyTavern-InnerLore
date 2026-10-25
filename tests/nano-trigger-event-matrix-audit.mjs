@@ -16,9 +16,9 @@ import {
     generatedProseIssue,
 } from '../core.js';
 import { compileTriggerEventDeliveryPreview } from '../event-delivery.js';
-import { formatTranscript } from '../prompts.js';
-import { validateProgressionPayload } from '../progression-client.js';
-import { buildProgressionMessages, buildProgressionRepairMessages } from '../progression-prompts.js';
+import { formatTranscript } from '../prompts.js?v=12';
+import { validateProgressionPayload } from '../progression-client.js?v=2';
+import { buildProgressionMessages, buildProgressionRepairMessages } from '../progression-prompts.js?v=2';
 import { applyProgressionPatch, createProgressionState } from '../progression.js';
 import {
     listTriggerEventRecords,

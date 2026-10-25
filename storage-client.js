@@ -197,6 +197,55 @@ export class InnerLoreStorageClient {
         });
     }
 
+    /**
+     * The writer's changes as path operations (store-diff.js). The server
+     * applies them onto its current snapshot and answers with the new
+     * revision; `moved` with a `snapshot` means others wrote in between.
+     */
+    patch(worldId, chatId, patch, { baseRevision, reason = 'save', writer = '' } = {}) {
+        return this.#request(`/worlds/${encodeURIComponent(worldId)}/innerlore/store`, {
+            method: 'PATCH',
+            body: {
+                chatId,
+                patch,
+                ...(Number.isInteger(baseRevision) ? { baseRevision } : {}),
+                ...(writer ? { writer } : {}),
+                reason,
+            },
+        });
+    }
+
+    // ---- background jobs the server runs for a world ----
+
+    submitJob(worldId, { kind, key = '', input = {}, chatId = '', baseRevision, replace = false }) {
+        return this.#request(`/worlds/${encodeURIComponent(worldId)}/jobs`, {
+            method: 'POST',
+            body: { kind, key, input, chatId, replace, ...(Number.isInteger(baseRevision) ? { baseRevision } : {}) },
+        });
+    }
+
+    listJobs(worldId, { active = true } = {}) {
+        return this.#request(`/worlds/${encodeURIComponent(worldId)}/jobs?active=${active ? 1 : 0}`);
+    }
+
+    getJob(jobId) {
+        return this.#request(`/jobs/${encodeURIComponent(jobId)}`, { allowMissing: true });
+    }
+
+    cancelJob(jobId, reason = 'cancelled') {
+        return this.#request(`/jobs/${encodeURIComponent(jobId)}/cancel`, { method: 'POST', body: { reason }, allowMissing: true });
+    }
+
+    /** Whether background work on the world is in flight and whether its provider has room for the story. */
+    background(worldId, { provider = '', cost = 1, signal } = {}) {
+        const query = new URLSearchParams({ provider, cost: String(cost) });
+        return this.#request(`/worlds/${encodeURIComponent(worldId)}/background?${query}`, { signal });
+    }
+
+    storyClaim(worldId, { phase, provider = '', cost = 1, quiet = false }) {
+        return this.#request(`/worlds/${encodeURIComponent(worldId)}/story-claim`, { method: 'POST', body: { phase, provider, cost, quiet } });
+    }
+
     buildContext(worldId, input, { signal } = {}) {
         return this.#request(`/worlds/${encodeURIComponent(worldId)}/innerlore/context/build`, {
             method: 'POST', body: input, signal,

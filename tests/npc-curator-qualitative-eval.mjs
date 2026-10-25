@@ -8,7 +8,7 @@ import {
     extractJsonObject,
     mergeMindOperations,
 } from '../core.js';
-import { buildAnalysisMessages } from '../prompts.js';
+import { buildAnalysisMessages } from '../prompts.js?v=12';
 
 const model = process.env.INNERLORE_QUALITATIVE_MODEL || 'deepseek/deepseek-v4-pro-0813';
 const secretData = JSON.parse(fs.readFileSync('data/default-user/secrets.json', 'utf8'));

@@ -147,6 +147,11 @@ test('the ledger, planner and curator run together and the game reaches the narr
     const requestService = {
         getSupportedProfiles: () => extensionSettings.connectionManager.profiles,
         sendRequest: (_profileId, messages) => new Promise(resolve => {
+            // Newcomers' gifts are settled in the background: answered at once (nobody gifted), outside the passes this test holds.
+            if (/Ability Judge/u.test(messages.map(message => message.content).join('\n'))) {
+                resolve({ content: 'INNERLORE ABILITIES 1\nDONE' });
+                return;
+            }
             const kind = kindOf(messages);
             kinds.push(kind);
             pending.push({ kind, prompt: messages.map(message => message.content).join('\n'), answer: content => resolve({ content }) });
@@ -234,6 +239,14 @@ test('the ledger, planner and curator run together and the game reaches the narr
     for (const request of pending.splice(0)) request.answer(request.kind === 'ledger' ? LEDGER_FIRST : '{"entities":[],"minds":[]}');
     await waitFor(() => chatMetadata.inner_lore.game?.lastProcessedIndex === 2, 8_000, 'the first ledger commit');
     game = chatMetadata.inner_lore.game;
+    // A purchase the story only narrated does not move the purse on the model's word: it waits for the player.
+    assert.equal(game.purse.amount, 10, 'the purse is untouched until the player confirms');
+    assert.equal(game.pending.length, 1, 'the candle and its payment are one question');
+    assert.deepEqual(game.pending[0].ops.map(op => op.type).sort(), ['item.add', 'money'], 'the candle and its payment await confirmation together');
+    assert.match(game.pending[0].text, /Mara Quell/u);
+    for (const entry of [...game.pending]) await globalThis.InnerLore.test.confirmTrade(entry.id, true);
+    game = chatMetadata.inner_lore.game;
+    assert.equal(game.pending.length, 0);
     assert.equal(game.purse.amount, 8, 'the kit purse less the candle');
     assert.deepEqual(Object.values(game.items).filter(item => item.holder.kind === 'player').map(item => item.name).sort(), ['clasp knife', 'tallow candle']);
     assert.equal(game.journal.find(entry => entry.op.type === 'money').op.to.name, 'Mara Quell');

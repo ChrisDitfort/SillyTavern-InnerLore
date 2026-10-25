@@ -27,9 +27,9 @@ import {
 } from '../core.js';
 import { compileContext } from '../context-compiler.js';
 import { syncLorebook } from '../lorebook.js';
-import { buildAnalysisMessages, buildRepairMessages, formatTranscript } from '../prompts.js';
-import { validateProgressionPayload } from '../progression-client.js';
-import { buildProgressionMessages, buildProgressionRepairMessages } from '../progression-prompts.js';
+import { buildAnalysisMessages, buildRepairMessages, formatTranscript } from '../prompts.js?v=12';
+import { validateProgressionPayload } from '../progression-client.js?v=2';
+import { buildProgressionMessages, buildProgressionRepairMessages } from '../progression-prompts.js?v=2';
 import { applyProgressionPatch, createProgressionState, getProgressionStats } from '../progression.js';
 
 const extensionRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');

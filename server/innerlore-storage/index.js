@@ -18,6 +18,18 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
+import { applyPatch, isEmptyPatch, normalizePatch } from '../../store-diff.js?v=4';
+import { directoriesOf, requireWs, stHelpers } from './st-bridge.js';
+import { createBudget } from './provider-budget.js';
+import { createLlm } from './llm.js';
+import { createImages } from './images.js';
+import { createHub } from './hub.js';
+import { createJobRunner } from './jobs.js';
+import { createPortraitJob } from './passes/portrait.js';
+import { createPictureJob } from './passes/picture.js';
+import { createPassJob, installServerTransport } from './passes/pass.js';
+import { createPrivateReplyJob } from './passes/private-reply.js';
+import { createRebuildJob } from './passes/rebuild.js';
 
 const DEFAULT_RELATIVE_DB = ['data', 'worlds', 'innerlore-storage.db'];
 
@@ -34,6 +46,8 @@ function openDatabase(commandLineArgs) {
     const db = new DatabaseSync(target);
     db.exec('PRAGMA journal_mode = WAL');
     db.exec('PRAGMA foreign_keys = ON');
+    // Deleted rows are overwritten with zeros, so a deleted world's text does not linger in free pages.
+    db.exec('PRAGMA secure_delete = ON');
     db.exec(`
         CREATE TABLE IF NOT EXISTS worlds (
             id TEXT PRIMARY KEY,
@@ -88,9 +102,94 @@ export const info = {
 };
 
 let db = null;
+/** The transactional snapshot writer, shared with the job runner once init has built it. */
+let storeWriter = null;
+export function getStoreWriter() { return storeWriter; }
+/** The hub, budget and runner of this plugin instance (null until init). */
+export const services = { hub: null, budget: null, runner: null, llm: null, images: null };
+const logLine = (...args) => console.log('[innerlore-storage]', ...args);
+
+function safeParse(text) {
+    try { return JSON.parse(text); } catch { return {}; }
+}
 
 export function init(router, args) {
     db = openDatabase(args?.commandLineArgs);
+
+    // Background work and its push channel. SillyTavern gives a plugin only
+    // a router; the HTTP server is taken from the first request's socket so
+    // the WebSocket upgrade can be served on the same port.
+    const budget = createBudget();
+    const hub = createHub({
+        ws: requireWs(),
+        log: (...parts) => logLine('hub:', ...parts),
+        onSubscribe: ({ worldId, revision }) => subscriptionState(worldId, revision),
+        onMessage: (message) => {
+            if (message.type === 'story') applyStoryClaim(message);
+        },
+    });
+    const llm = createLlm({ helpers: stHelpers, budget, log: (...parts) => logLine('llm:', ...parts) });
+    const images = createImages({ helpers: stHelpers, log: (...parts) => logLine('images:', ...parts) });
+    const runner = createJobRunner({
+        db, hub, log: (...parts) => logLine('jobs:', ...parts),
+        // A pass must not read a reply that is still being written; a portrait may.
+        shouldHold: job => !['portrait', 'picture', 'private-reply'].includes(job.kind) && budget.storyFresh(job.worldId),
+    });
+    Object.assign(services, { hub, budget, runner, llm, images });
+    // Jobs of worlds deleted before a deletion took its jobs along (their chat names and status lines).
+    try { db.prepare('DELETE FROM jobs WHERE world_id NOT IN (SELECT id FROM worlds)').run(); } catch (error) { logLine('could not clear the jobs of deleted worlds:', error?.message || error); }
+    // The runner has just wiped old job inputs and results; fold the write-ahead log in so the old pages go.
+    try { db.exec('PRAGMA wal_checkpoint(TRUNCATE)'); } catch (error) { logLine('startup checkpoint failed:', error?.message || error); }
+    // Every page learns how much of each provider the server's jobs hold, so
+    // its story gate can count it beside its own requests.
+    budget.onChange(detail => {
+        try { hub.broadcastAll({ type: 'provider', ...detail }); } catch { /* no sockets */ }
+    });
+    if (typeof router.use === 'function') {
+        router.use((request, response, next) => {
+            try { hub.ensureAttached(request); } catch (error) { logLine('hub attach failed:', error?.message || error); }
+            next();
+        });
+    }
+    const storeAccess = {
+        read(worldId) {
+            const row = db.prepare('SELECT * FROM stores WHERE world_id = ?').get(String(worldId));
+            return row ? loadShape(row) : null;
+        },
+        /** Applies `transform` to the latest snapshot inside a transaction and pushes the new revision. */
+        commit(worldId, chatId, transform, { reason = 'job', except = null } = {}) {
+            const attempt = storeWriter(String(worldId), String(chatId || ''), { transform });
+            if (attempt.unchanged) return attempt;
+            hub.broadcast(String(worldId), { type: 'store', revision: attempt.revision, snapshot: attempt.snapshotObject, origin: reason }, { except });
+            return attempt;
+        },
+    };
+    runner.register('portrait', createPortraitJob({ llm, images, store: storeAccess, hub, log: (...parts) => logLine('portrait:', ...parts) }));
+    runner.register('picture', createPictureJob({ llm, images, store: storeAccess, hub, log: (...parts) => logLine('picture:', ...parts) }));
+    installServerTransport(llm);
+    runner.register('pass', createPassJob({ store: storeAccess, log: (...parts) => logLine('pass:', ...parts) }));
+    runner.register('private-reply', createPrivateReplyJob({ llm, log: (...parts) => logLine('private:', ...parts) }));
+    runner.register('rebuild', createRebuildJob({ store: storeAccess, log: (...parts) => logLine('rebuild:', ...parts) }));
+    function subscriptionState(worldId, clientRevision) {
+        const row = db.prepare('SELECT revision, snapshot FROM stores WHERE world_id = ?').get(String(worldId));
+        const revision = row ? row.revision : 0;
+        return {
+            revision,
+            ...(row && revision > (Number(clientRevision) || 0) ? { snapshot: safeParse(row.snapshot) } : {}),
+            jobs: runner.list(String(worldId)),
+            recent: runner.recent(String(worldId)),
+            story: budget.storyClaim(String(worldId)),
+            providers: budget.snapshots(),
+        };
+    }
+    function applyStoryClaim(message) {
+        const worldId = String(message?.worldId || '');
+        if (!worldId) return null;
+        if (message.phase === 'end') budget.releaseStory(worldId);
+        else budget.claimStory(worldId, { provider: String(message.provider || ''), cost: Number(message.cost) || 1, quiet: Boolean(message.quiet) });
+        if (message.phase === 'end') runner.pump(worldId);
+        return budget.storyClaim(worldId);
+    }
 
     router.get('/v1/health', (request, response) => {
         const worldId = String(request.query.worldId || '');
@@ -99,7 +198,7 @@ export function init(router, args) {
             return sendData(response, { status: 'ok', plugin: info.id, openWorlds: row ? 1 : 0 });
         }
         const count = db.prepare('SELECT COUNT(*) AS n FROM worlds').get().n;
-        return sendData(response, { status: 'ok', plugin: info.id, openWorlds: count });
+        return sendData(response, { status: 'ok', plugin: info.id, openWorlds: count, hub: hub.describe() });
     });
 
     // Voice narration: InnerLore's local text-to-speech server (server/tts)
@@ -324,6 +423,65 @@ export function init(router, args) {
         return sendData(response, loadShape(row));
     });
 
+    /**
+     * Writes a snapshot as the next revision inside one transaction. With
+     * `expectedRevision` it refuses a moved store ({conflict}); with
+     * `transform` the current snapshot is read inside the transaction and the
+     * function's result is what gets written, so a patch or a job commit
+     * lands on the latest state whatever happened since the writer read it.
+     */
+    const writeSnapshot = (worldId, chatId, { expectedRevision = null, snapshot = null, transform = null }) => {
+        // Defense in depth: clear a leaked transaction instead of failing.
+        try { db.exec('ROLLBACK'); } catch { /* no transaction open */ }
+        db.exec('BEGIN');
+        try {
+            // A job that finishes after its world was deleted has nothing to write to.
+            if (!db.prepare('SELECT id FROM worlds WHERE id = ?').get(worldId)) {
+                db.exec('ROLLBACK');
+                return { unchanged: true, missing: true, revision: 0, snapshotObject: null };
+            }
+            const row = db.prepare('SELECT revision, snapshot FROM stores WHERE world_id = ?').get(worldId);
+            const currentRevision = row ? row.revision : 0;
+            if (expectedRevision !== null && expectedRevision !== currentRevision) {
+                // Returning inside the transaction would leak an open BEGIN
+                // and wedge every later write on this connection.
+                db.exec('ROLLBACK');
+                return { conflict: currentRevision };
+            }
+            let next = snapshot;
+            if (typeof transform === 'function') {
+                const current = row ? safeParse(row.snapshot) : {};
+                next = transform(current, currentRevision);
+                if (!next || typeof next !== 'object') {
+                    db.exec('ROLLBACK');
+                    return { unchanged: true, revision: currentRevision, snapshotObject: current };
+                }
+            }
+            const serialized = JSON.stringify(next);
+            const nextRevision = currentRevision + 1;
+            const updatedAt = new Date().toISOString();
+            if (row) {
+                db.prepare(`UPDATE stores SET chat_id = ?, revision = ?, snapshot = ?, updated_at = ?
+                            WHERE world_id = ?`).run(chatId, nextRevision, serialized, updatedAt, worldId);
+            } else {
+                db.prepare(`INSERT INTO stores (world_id, chat_id, revision, snapshot, updated_at)
+                            VALUES (?, ?, ?, ?, ?)`).run(worldId, chatId, nextRevision, serialized, updatedAt);
+            }
+            // Bounded history: keep the latest 20 revisions per world.
+            db.prepare(`INSERT INTO store_revisions (world_id, revision, chat_id, snapshot)
+                        VALUES (?, ?, ?, ?)`).run(worldId, nextRevision, chatId, serialized);
+            db.prepare(`DELETE FROM store_revisions WHERE world_id = ? AND revision <= ?`)
+                .run(worldId, nextRevision - 20);
+            db.prepare(`UPDATE worlds SET updated_at = datetime('now') WHERE id = ?`).run(worldId);
+            db.exec('COMMIT');
+            return { revision: nextRevision, previousRevision: currentRevision, updatedAt, snapshotObject: next };
+        } catch (error) {
+            db.exec('ROLLBACK');
+            throw error;
+        }
+    };
+    storeWriter = writeSnapshot;
+
     router.put('/v1/worlds/:worldId/innerlore/store', (request, response) => {
         const worldId = String(request.params.worldId);
         const chatId = String(request.body?.chatId || '').trim();
@@ -337,43 +495,7 @@ export function init(router, args) {
         const world = db.prepare('SELECT id FROM worlds WHERE id = ?').get(worldId);
         if (!world) return sendError(response, 404, 'World not found', 'WORLD_NOT_FOUND');
 
-        const snapshot = JSON.stringify(store);
-        const attempt = (() => {
-            // Defense in depth: clear a leaked transaction instead of failing.
-            try { db.exec('ROLLBACK'); } catch { /* no transaction open */ }
-            db.exec('BEGIN');
-            try {
-            const row = db.prepare('SELECT revision FROM stores WHERE world_id = ?').get(worldId);
-            const currentRevision = row ? row.revision : 0;
-            if (expectedRevision !== null && expectedRevision !== currentRevision) {
-                // Returning inside the transaction would leak an open BEGIN
-                // and wedge every later write on this connection.
-                db.exec('ROLLBACK');
-                return { conflict: currentRevision };
-            }
-            const nextRevision = currentRevision + 1;
-            const updatedAt = new Date().toISOString();
-            if (row) {
-                db.prepare(`UPDATE stores SET chat_id = ?, revision = ?, snapshot = ?, updated_at = ?
-                            WHERE world_id = ?`).run(chatId, nextRevision, snapshot, updatedAt, worldId);
-            } else {
-                db.prepare(`INSERT INTO stores (world_id, chat_id, revision, snapshot, updated_at)
-                            VALUES (?, ?, ?, ?, ?)`).run(worldId, chatId, nextRevision, snapshot, updatedAt);
-            }
-            // Bounded history: keep the latest 20 revisions per world.
-            db.prepare(`INSERT INTO store_revisions (world_id, revision, chat_id, snapshot)
-                        VALUES (?, ?, ?, ?)`).run(worldId, nextRevision, chatId, snapshot);
-            db.prepare(`DELETE FROM store_revisions WHERE world_id = ? AND revision <= ?`)
-                .run(worldId, nextRevision - 20);
-                db.prepare(`UPDATE worlds SET updated_at = datetime('now') WHERE id = ?`).run(worldId);
-                db.exec('COMMIT');
-                return { revision: nextRevision, updatedAt };
-            } catch (error) {
-                db.exec('ROLLBACK');
-                throw error;
-            }
-        })();
-
+        const attempt = writeSnapshot(worldId, chatId, { expectedRevision, snapshot: store });
         if (attempt.conflict !== undefined) {
             return sendError(response, 409, `Revision conflict: expected ${expectedRevision}, found ${attempt.conflict}`,
                 'REVISION_CONFLICT');
@@ -384,6 +506,99 @@ export function init(router, args) {
             snapshotHash: '',
             updatedAt: attempt.updatedAt,
         });
+    });
+
+    /**
+     * A writer's changes as path operations (see store-diff.js), applied onto
+     * the current snapshot: no revision conflicts. When the store had moved
+     * since the writer's `baseRevision`, the new snapshot comes back so the
+     * writer can adopt what the others did.
+     */
+    router.patch('/v1/worlds/:worldId/innerlore/store', (request, response) => {
+        const worldId = String(request.params.worldId);
+        const chatId = String(request.body?.chatId || '').trim();
+        if (!chatId) return sendError(response, 400, 'A chat id is required', 'INVALID_CHAT_ID');
+        const patch = normalizePatch(request.body?.patch);
+        const baseRevision = Number.isInteger(request.body?.baseRevision) ? request.body.baseRevision : null;
+        const row = db.prepare('SELECT revision FROM stores WHERE world_id = ?').get(worldId);
+        if (!row) return sendError(response, 404, 'InnerLore store not found', 'STORE_NOT_FOUND');
+        if (isEmptyPatch(patch)) {
+            return sendData(response, { worldId, chatId, revision: row.revision, moved: baseRevision !== null && baseRevision !== row.revision, snapshotHash: '', unchanged: true });
+        }
+        const attempt = writeSnapshot(worldId, chatId, { transform: current => applyPatch(current, patch) });
+        const moved = baseRevision !== null && baseRevision !== attempt.previousRevision;
+        const writer = String(request.body?.writer || '');
+        // Other pages on this world learn of the new revision at once; the
+        // writer itself already has it (and learns of others' changes from
+        // the response when the store had moved).
+        hub.broadcast(worldId, { type: 'store', revision: attempt.revision, snapshot: attempt.snapshotObject, origin: 'patch', writer }, { exceptWriter: writer });
+        return sendData(response, {
+            worldId, chatId,
+            revision: attempt.revision,
+            updatedAt: attempt.updatedAt,
+            snapshotHash: '',
+            moved,
+            ...(moved ? { snapshot: attempt.snapshotObject } : {}),
+        });
+    });
+
+    // ---- background jobs and the story's claim ----
+    router.post('/v1/worlds/:worldId/jobs', (request, response) => {
+        const worldId = String(request.params.worldId);
+        const body = request.body && typeof request.body === 'object' ? request.body : {};
+        const kind = String(body.kind || '').trim();
+        if (!kind) return sendError(response, 400, 'A job kind is required', 'INVALID_JOB');
+        const world = db.prepare('SELECT id FROM worlds WHERE id = ?').get(worldId);
+        if (!world) return sendError(response, 404, 'World not found', 'WORLD_NOT_FOUND');
+        try {
+            const result = runner.submit({
+                worldId,
+                chatId: String(body.chatId || ''),
+                kind,
+                key: String(body.key || ''),
+                input: body.input && typeof body.input === 'object' ? body.input : {},
+                directories: directoriesOf(request),
+                baseRevision: Number(body.baseRevision) || 0,
+                replace: body.replace === true,
+            });
+            return sendData(response, result);
+        } catch (error) {
+            return sendError(response, 400, error?.message || String(error), 'INVALID_JOB');
+        }
+    });
+    router.get('/v1/worlds/:worldId/jobs', (request, response) => {
+        const active = String(request.query.active ?? '1') !== '0';
+        return sendData(response, { jobs: runner.list(String(request.params.worldId), { active }) });
+    });
+    router.get('/v1/jobs/:jobId', (request, response) => {
+        const job = runner.get(String(request.params.jobId));
+        if (!job) return sendError(response, 404, 'Job not found', 'JOB_NOT_FOUND');
+        return sendData(response, { job });
+    });
+    router.post('/v1/jobs/:jobId/cancel', (request, response) => {
+        const job = runner.cancel(String(request.params.jobId), String(request.body?.reason || 'cancelled'));
+        if (!job) return sendError(response, 404, 'Job not found or already finished', 'JOB_NOT_FOUND');
+        return sendData(response, { job });
+    });
+    /** What the story gate asks before leaving: is background work on this world in flight, and is there room on its provider. */
+    router.get('/v1/worlds/:worldId/background', (request, response) => {
+        const worldId = String(request.params.worldId);
+        const provider = String(request.query.provider || '');
+        const cost = Math.max(0, Number(request.query.cost) || 0);
+        const active = runner.activeJob(worldId);
+        const queued = runner.list(worldId).filter(job => job.status === 'queued');
+        return sendData(response, {
+            inFlight: active ? 1 : 0,
+            activeJob: active ? { id: active.id, kind: active.kind, key: active.key, status: active.status } : null,
+            queued: queued.length,
+            room: provider ? budget.hasRoom(provider, cost || 1, { ignoreReserve: true }) : true,
+            providers: budget.snapshots(),
+            story: budget.storyClaim(worldId),
+        });
+    });
+    router.post('/v1/worlds/:worldId/story-claim', (request, response) => {
+        const claim = applyStoryClaim({ ...(request.body || {}), worldId: String(request.params.worldId) });
+        return sendData(response, { story: claim });
     });
 
     router.post('/v1/worlds/:worldId/innerlore/fork', (request, response) => {
@@ -427,6 +642,7 @@ export function init(router, args) {
     });
 
     router.delete('/v1/worlds/:worldId/innerlore/store', (request, response) => {
+        try { runner.cancelWorld(String(request.params.worldId)); } catch { /* no jobs */ }
         const worldId = String(request.params.worldId);
         const chatId = String(request.query.chatId || '').trim();
         if (chatId) {
@@ -441,12 +657,16 @@ export function init(router, args) {
             result = db.prepare('DELETE FROM stores WHERE world_id = ?').run(worldId).changes > 0;
             db.prepare('DELETE FROM store_revisions WHERE world_id = ?').run(worldId);
             db.prepare('DELETE FROM context_profiles WHERE world_id = ?').run(worldId);
+            // The jobs carried the world's messages and replies (their input and result).
+            db.prepare('DELETE FROM jobs WHERE world_id = ?').run(worldId);
             db.prepare('DELETE FROM worlds WHERE id = ?').run(worldId);
             db.exec('COMMIT');
         } catch (error) {
             db.exec('ROLLBACK');
             throw error;
         }
+        // The write-ahead log still holds the pages as they were written; fold it in and empty it.
+        try { db.exec('PRAGMA wal_checkpoint(TRUNCATE)'); } catch (error) { logLine('checkpoint after a world delete failed:', error?.message || error); }
         return sendData(response, {
             worldId, chatId,
             deleted: result, missing: !result, recoverable: false,
@@ -575,6 +795,8 @@ export function init(router, args) {
 }
 
 export function exit() {
+    try { services.runner?.close(); } catch { /* stopping */ }
+    try { services.hub?.close(); } catch { /* stopping */ }
     try { db?.close(); } catch { /* already closed */ }
 }
 

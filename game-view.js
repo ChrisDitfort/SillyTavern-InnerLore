@@ -7,25 +7,25 @@
  */
 
 import { canonicalNameKey, cleanString, escapeHtml, resolveLocationReference } from './core.js?v=49';
-import { gameOverview, normalizeGameState, placeRefOf, tradeOverview } from './game.js?v=4';
+import { gameOverview, normalizeGameState, placeRefOf, tradeOverview } from './game.js?v=6';
 
 const STYLE_ID = 'il_game_inline_styles_v3';
 const STYLES = `
 /* An explicit size: a theme or extension can transform <html>, and inset:0 then measures against it, not the screen. */
-.il-screen{--il-gold:#ecd9ac;--il-line:rgba(255,255,255,.09);--il-muted:#8f99a8;position:fixed;top:0;left:0;width:100vw;height:100vh;height:100dvh;z-index:31000;background:#070a0f;display:flex;justify-content:center;color:#d6dbe4;font-size:14px;line-height:1.38}
+.il-screen{--il-gold:#ecd9ac;--il-line:rgba(255,255,255,.09);--il-muted:#8f99a8;--il-gutter:22px;position:fixed;top:0;left:0;width:100vw;height:100vh;height:100dvh;z-index:31000;background:#070a0f;display:flex;justify-content:center;color:#d6dbe4;font-size:12.5px;line-height:1.4}
 .il-screen *{box-sizing:border-box}
 .il-game-panel{width:100%;max-width:820px;height:100%;display:flex;flex-direction:column;padding:env(safe-area-inset-top) env(safe-area-inset-right) 0 env(safe-area-inset-left)}
-.il-game-head{display:flex;align-items:center;gap:12px;padding:12px 14px 10px}
+.il-game-head{display:flex;align-items:center;gap:12px;padding:12px var(--il-gutter) 10px}
 .il-game-title{flex:1;min-width:0}
 .il-game-kicker{display:block;font-size:.66em;letter-spacing:.18em;text-transform:uppercase;color:#7d8796}
 .il-game-title h3{margin:1px 0 0;font-size:1.12em;color:var(--il-gold);font-weight:650;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .il-game-close{flex:none;width:38px;height:38px;border-radius:12px;border:1px solid var(--il-line);background:rgba(255,255,255,.04);color:#cfd6e0;display:grid;place-items:center;cursor:pointer;padding:0}
 .il-game-close:hover{border-color:rgba(226,201,154,.45);color:var(--il-gold)}
 .il-game-close svg{width:18px;height:18px}
-.il-game-tabs{display:flex;gap:4px;margin:0 14px 8px;padding:3px;border-radius:12px;background:rgba(255,255,255,.04);border:1px solid var(--il-line)}
+.il-game-tabs{display:flex;gap:4px;margin:0 var(--il-gutter) 8px;padding:3px;border-radius:12px;background:rgba(255,255,255,.04);border:1px solid var(--il-line)}
 .il-game-tab{flex:1;border:0;background:none;color:#9aa3b0;padding:9px 4px;border-radius:9px;font:inherit;font-size:.88em;cursor:pointer;white-space:nowrap}
 .il-game-tab.is-active{background:rgba(226,201,154,.16);color:var(--il-gold)}
-.il-game-body{flex:1;overflow-y:auto;padding:6px 14px calc(18px + env(safe-area-inset-bottom,0px))}
+.il-game-body{flex:1;overflow-y:auto;padding:6px var(--il-gutter) calc(18px + env(safe-area-inset-bottom,0px))}
 .il-game-purse{display:flex;align-items:center;gap:12px;padding:12px;border-radius:14px;border:1px solid rgba(226,201,154,.22);background:linear-gradient(135deg,rgba(226,201,154,.10),rgba(255,255,255,.02));margin-bottom:10px}
 .il-game-purse svg{flex:none;width:30px;height:30px;color:var(--il-gold)}
 .il-game-purse b{display:block;color:var(--il-gold);font-size:1.06em}
@@ -33,7 +33,7 @@ const STYLES = `
 .il-game-section{margin:14px 0 6px;font-size:.68em;letter-spacing:.16em;text-transform:uppercase;color:#7d8796;font-weight:600}
 .il-game-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:5px}
 .il-game-row{border:1px solid var(--il-line);border-radius:11px;background:rgba(255,255,255,.03)}
-.il-game-row>button{display:flex;align-items:flex-start;gap:9px;width:100%;padding:8px 10px;border:0;background:none;color:inherit;font:inherit;text-align:left;cursor:pointer}
+.il-game-row>button{display:flex;align-items:flex-start;gap:9px;width:100%;padding:8px 14px;border:0;background:none;color:inherit;font:inherit;text-align:left;cursor:pointer}
 .il-game-row>button:hover{background:rgba(255,255,255,.03)}
 .il-game-row.is-nested{margin-left:18px}
 .il-game-main{flex:1;min-width:0}
@@ -52,14 +52,19 @@ const STYLES = `
 .il-game-bar::after{content:'';position:absolute;left:50%;top:0;bottom:0;width:1px;background:rgba(255,255,255,.22)}
 .il-game-bar.is-plain::after{display:none}
 .il-game-empty{color:#6d7684;font-style:italic;font-size:.88em;margin:6px 0}
-.il-game-change{display:flex;gap:9px;padding:7px 2px;border-bottom:1px solid var(--il-line);font-size:.9em}
+.il-game-change{display:flex;gap:9px;padding:7px 4px;border-bottom:1px solid var(--il-line);font-size:.9em}
+.il-game-confirm{display:flex;align-items:center;gap:10px;padding:9px 12px;margin:6px 0;border-radius:12px;border:1px dashed rgba(226,201,154,.45);background:rgba(226,201,154,.06)}
+.il-game-confirm .il-game-main{flex:1;min-width:0}
+.il-game-confirm .il-game-main small{color:var(--il-muted);font-size:.82em}
+.il-game-confirm-actions{display:flex;gap:6px;flex:none}
+.il-game-note{color:var(--il-muted);font-size:.86em;margin:4px 0 8px}
 .il-game-change small{flex:none;color:#7d8796;min-width:44px}
-.il-trade-partners{display:flex;gap:6px;overflow-x:auto;margin:0 14px 8px;padding-bottom:2px;scrollbar-width:none}
+.il-trade-partners{display:flex;gap:6px;overflow-x:auto;margin:0 var(--il-gutter) 8px;padding-bottom:2px;scrollbar-width:none}
 .il-trade-partners::-webkit-scrollbar{display:none}
 .il-trade-partner{flex:none;padding:8px 13px;border-radius:999px;border:1px solid var(--il-line);background:rgba(255,255,255,.03);color:#c4ccd7;font:inherit;font-size:.88em;cursor:pointer;white-space:nowrap}
 .il-trade-partner.is-active{border-color:rgba(226,201,154,.5);background:rgba(226,201,154,.14);color:var(--il-gold)}
 .il-trade-partner.is-body{border-style:dashed}
-.il-trade-row{display:flex;align-items:center;gap:8px;padding:8px 10px}
+.il-trade-row{display:flex;align-items:center;gap:8px;padding:8px 14px}
 .il-trade-row .il-game-main{flex:1;min-width:0}
 .il-trade-actions{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:6px;flex:none;max-width:52%}
 .il-trade-act{border:1px solid rgba(226,201,154,.38);background:rgba(226,201,154,.09);color:var(--il-gold);border-radius:9px;padding:6px 11px;font:inherit;font-size:.82em;cursor:pointer;white-space:nowrap}
@@ -181,9 +186,13 @@ export function renderGameTab(tab, overview, { place = '' } = {}) {
         return `<div class="il-game-section">How people regard you</div>${people}<div class="il-game-section">Reputation</div>${groups}${contacts}`;
     }
     if (tab === 'ledger') {
-        return overview.ledger.length
+        const pending = (overview.pending || []).length
+            ? `<div class="il-game-section">Awaiting your word</div><div class="il-game-note">The story told of these without the game tools; nothing moves until you say so.</div>${overview.pending.map(entry => `<div class="il-game-confirm" data-pending="${escapeHtml(entry.id)}"><span class="il-game-main"><b>${escapeHtml(entry.text)}</b>${entry.evidence ? `<small>${escapeHtml(entry.evidence)}</small>` : ''}</span><span class="il-game-confirm-actions"><button type="button" class="il-trade-act" data-confirm="${escapeHtml(entry.id)}" data-accept="1">Yes, that happened</button><button type="button" class="il-trade-act is-quiet" data-confirm="${escapeHtml(entry.id)}" data-accept="0">No</button></span></div>`).join('')}<div class="il-game-section">Recorded</div>`
+            : '';
+        const recorded = overview.ledger.length
             ? overview.ledger.map(change => `<div class="il-game-change"><small>msg ${change.at}</small><span>${escapeHtml(change.text)}</span></div>`).join('')
             : empty('No purchases, gifts or losses recorded yet.');
+        return `${pending}${recorded}`;
     }
     const purse = `<div class="il-game-purse">${ICON.purse}<div><b>${escapeHtml(overview.purse.text)}</b><small>${escapeHtml(overview.carryingValue ? `Belongings worth about ${overview.carryingValue}` : 'Purse')}</small></div></div>`;
     const bag = overview.carrying.length
@@ -192,7 +201,10 @@ export function renderGameTab(tab, overview, { place = '' } = {}) {
     const gifts = overview.abilities?.length
         ? `<ul class="il-game-list">${overview.abilities.map(gift => `<li class="il-game-row"><button type="button" data-toggle="1"><span class="il-game-main"><b>${escapeHtml(gift.name)}</b><span class="il-game-tier ${gift.level >= 40 ? 'is-good' : ''}">${escapeHtml(gift.tier)}</span>${giftBar(gift.level)}</span><span class="il-game-side">${gift.level}</span></button><div class="il-game-more">${escapeHtml(gift.note || 'Judged from the story and your character.')}</div></li>`).join('')}</ul>`
         : empty(overview.abilitiesJudged ? 'No notable gifts: the world has weighed it.' : 'Nothing judged yet. Reaching for someone\'s mind, or for a phone, asks the world what you can do.');
-    return `${purse}<div class="il-game-section">Carrying</div>${bag}<div class="il-game-section">Gifts and skills</div>${gifts}`;
+    const awaiting = (overview.pending || []).length
+        ? `<div class="il-game-confirm"><span class="il-game-main"><b>${overview.pending.length === 1 ? 'One exchange awaits' : `${overview.pending.length} exchanges await`} your word</b><small>Told in the story without the game tools; see the Ledger tab.</small></span><span class="il-game-confirm-actions"><button type="button" class="il-trade-act is-quiet" data-tab="ledger">Review</button></span></div>`
+        : '';
+    return `${purse}${awaiting}<div class="il-game-section">Carrying</div>${bag}<div class="il-game-section">Gifts and skills</div>${gifts}`;
 }
 
 /** The scene's place as the game state names it. */
@@ -203,7 +215,7 @@ function scenePlace(store, scene) {
     return placeRefOf(record, name);
 }
 
-export function createGamePanel({ onPerson } = {}) {
+export function createGamePanel({ onPerson, onConfirm } = {}) {
     let overlay = null;
     let body = null;
     let activeTab = 'bag';
@@ -235,6 +247,11 @@ export function createGamePanel({ onPerson } = {}) {
             if (tab) {
                 activeTab = tab.dataset.tab;
                 return paint();
+            }
+            const confirm = event.target.closest('[data-confirm]');
+            if (confirm) {
+                confirm.disabled = true;
+                return onConfirm?.(confirm.dataset.confirm, confirm.dataset.accept === '1');
             }
             const person = event.target.closest('[data-person]');
             if (person) return onPerson?.(person.dataset.person);

@@ -1,6 +1,6 @@
 import { canonicalNameKey } from './core.js?v=49';
-import { sendInnerLoreRequest } from './llm-client.js?v=19';
-import { buildProgressionRepairMessages } from './progression-prompts.js';
+import { sendInnerLoreRequest } from './llm-client.js?v=21';
+import { buildProgressionRepairMessages } from './progression-prompts.js?v=2';
 import { PROGRESSION_JSON_SCHEMA } from './structured-output.js';
 import {
     appendDslEvaluationKeyContract,
@@ -11,7 +11,7 @@ import {
     parseInnerLoreOutput,
     prepareOutputMessages,
     structuredRequestOptions,
-} from './output-codec.js?v=5';
+} from './output-codec.js?v=7';
 
 function progressionRequestSettings(settings) {
     const dedicatedProfile = settings.progressionConnectionProfileId || settings.connectionProfileId;
@@ -53,6 +53,52 @@ function discardImpossibleConfiguredMatches(evaluation, options = {}) {
     }
 }
 
+/** Text as the passage is searched: lower case, one space between words, no quotes, dashes or trailing punctuation. */
+function searchableText(value) {
+    return String(value ?? '')
+        .toLocaleLowerCase()
+        .replace(/[\u2018\u2019\u201c\u201d"'`*_]/gu, '')
+        .replace(/[\u2013\u2014-]/gu, ' ')
+        .replace(/\s+/gu, ' ')
+        .trim();
+}
+
+/**
+ * Which passage messages hold a matched condition's evidence. The model is
+ * no longer asked for message indexes (it got them wrong as often as right);
+ * each quote is looked up in the passage instead, whole first, then by its
+ * longest run of five words, so a paraphrase still lands on its message.
+ * Only messages inside [minimumIndex, maximumIndex] count.
+ */
+export function locateEvidenceIndexes(evidence, passageMessages, minimumIndex = Number.MIN_SAFE_INTEGER, maximumIndex = Number.MAX_SAFE_INTEGER) {
+    const messages = (Array.isArray(passageMessages) ? passageMessages : [])
+        .filter(message => Number.isInteger(message?.index) && message.index >= minimumIndex && message.index <= maximumIndex)
+        .map(message => ({ index: message.index, text: searchableText(message.text ?? message.mes) }))
+        .filter(message => message.text);
+    const found = new Set();
+    for (const item of (Array.isArray(evidence) ? evidence : [])) {
+        const quote = searchableText(item);
+        if (quote.length < 4) continue;
+        const whole = messages.filter(message => message.text.includes(quote));
+        if (whole.length) {
+            for (const message of whole) found.add(message.index);
+            continue;
+        }
+        const words = quote.split(' ').filter(Boolean);
+        for (let size = Math.min(5, words.length); size >= 3 && !whole.length; size--) {
+            let hit = false;
+            for (let start = 0; start + size <= words.length; start++) {
+                const run = words.slice(start, start + size).join(' ');
+                for (const message of messages) {
+                    if (message.text.includes(run)) { found.add(message.index); hit = true; }
+                }
+            }
+            if (hit) break;
+        }
+    }
+    return [...found].sort((a, b) => a - b);
+}
+
 function validateMatchedCondition(evaluation, field, options = {}) {
     const condition = evaluation[field];
     if (condition === undefined) return;
@@ -65,11 +111,6 @@ function validateMatchedCondition(evaluation, field, options = {}) {
     if (!Array.isArray(condition.evidence) || !condition.evidence.some(item => typeof item === 'string' && item.trim())) {
         throw new Error(`World Progression event evaluation "${evaluation.key}" matched "${field}" without evidence.`);
     }
-    if (!Array.isArray(condition.message_indexes)
-        || !condition.message_indexes.length
-        || !condition.message_indexes.every(Number.isInteger)) {
-        throw new Error(`World Progression event evaluation "${evaluation.key}" matched "${field}" without integer message_indexes.`);
-    }
     const contract = options.expectedEventContracts?.[evaluation.key];
     const minimumIndex = Math.max(
         Number.isInteger(options.passageStartIndex) ? options.passageStartIndex : Number.MIN_SAFE_INTEGER,
@@ -78,6 +119,18 @@ function validateMatchedCondition(evaluation, field, options = {}) {
     const maximumIndex = Number.isInteger(options.passageEndIndex)
         ? options.passageEndIndex
         : Number.MAX_SAFE_INTEGER;
+    const supplied = Array.isArray(condition.message_indexes) && condition.message_indexes.length
+        && condition.message_indexes.every(Number.isInteger);
+    if (!supplied) {
+        // The code locates the evidence; the model is not asked for indexes.
+        const located = locateEvidenceIndexes(condition.evidence, options.passageMessages, minimumIndex, maximumIndex);
+        if (!located.length) {
+            throw new Error(Array.isArray(options.passageMessages)
+                ? `World Progression event evaluation "${evaluation.key}" matched "${field}" with evidence that is not in the eligible passage.`
+                : `World Progression event evaluation "${evaluation.key}" matched "${field}" without integer message_indexes.`);
+        }
+        condition.message_indexes = located;
+    }
     if (!condition.message_indexes.every(index => index >= minimumIndex && index <= maximumIndex)) {
         throw new Error(`World Progression event evaluation "${evaluation.key}" matched "${field}" outside the eligible message range ${minimumIndex}–${maximumIndex}.`);
     }

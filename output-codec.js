@@ -61,8 +61,8 @@ const PRIMITIVE_LIST_PATHS = Object.freeze({
 });
 // Game ledger, planner and ability-judge record words, and the payload list each fills.
 const GAME_RECORDS = Object.freeze({
-    game: { OBJECT: ['objects', 'key'], MONEY: ['money', ''], PRICE: ['prices', 'key'], STANDING: ['standings', 'character'], REPUTATION: ['reputation', 'group'], DEATH: ['deaths', 'character'], ABILITY: ['abilities', 'holder'], CONTACT: ['contacts', 'character'] },
-    planner: { STAGE: ['stages', 'place'], PERSON: ['people', 'name'], OBJECT: ['objects', 'key'], PRICE: ['prices', 'key'] },
+    game: { OBJECT: ['objects', 'key'], MONEY: ['money', ''], PRICE: ['prices', 'key'], STANDING: ['standings', 'character'], REPUTATION: ['reputation', 'group'], DEATH: ['deaths', 'character'], ABILITY: ['abilities', 'holder'], CONTACT: ['contacts', 'character'], LINK: ['links', 'character'] },
+    planner: { STAGE: ['stages', 'place'], PERSON: ['people', 'name'], OBJECT: ['objects', 'key'], PRICE: ['prices', 'key'], ABILITY: ['abilities', 'holder'] },
     abilities: { ABILITY: ['abilities', 'holder'], CONTACT: ['contacts', 'character'] },
 });
 
@@ -317,12 +317,11 @@ function openRecord(task, line, result, lineNumber) {
     }
     if (GAME_LIKE_TASKS.has(task)) {
         // "price = 3" inside an OBJECT is a field, not a PRICE record.
-        const match = /^(CURRENCY|PURSE|DEVICE|OBJECT|MONEY|PRICE|STANDING|REPUTATION|DEATH|STAGE|PERSON|ABILITY|CONTACT)(?:\s+(?!\+?=)(.+))?$/iu.exec(line);
+        const match = /^(CURRENCY|PURSE|DEVICE|OBJECT|MONEY|PRICE|STANDING|REPUTATION|DEATH|STAGE|PERSON|ABILITY|CONTACT|LINK)(?:\s+(?!\+?=)(.+))?$/iu.exec(line);
         if (!match) return null;
         const word = match[1].toLocaleUpperCase();
         const value = decodedHeaderValue(match[2] || '', lineNumber);
         if (SINGLETON_RECORDS.has(word)) {
-            if (word === 'DEVICE' && task === 'planner') return null;
             const field = word.toLocaleLowerCase();
             if (result[`__${field}Seen`]) throw dslError(lineNumber, `${word} may appear only once.`);
             result[`__${field}Seen`] = true;
@@ -353,8 +352,8 @@ function initialPayload(task) {
             time: {}, goals: [], processes: [], events: [], event_evaluations: [], __timeSeen: false,
         };
     }
-    if (task === 'game') return { objects: [], money: [], prices: [], standings: [], reputation: [], deaths: [], abilities: [], contacts: [] };
-    if (task === 'planner') return { stages: [], people: [], objects: [], prices: [] };
+    if (task === 'game') return { objects: [], money: [], prices: [], standings: [], reputation: [], deaths: [], abilities: [], contacts: [], links: [] };
+    if (task === 'planner') return { stages: [], people: [], objects: [], prices: [], abilities: [] };
     if (task === 'abilities') return { abilities: [], contacts: [] };
     return { proposal: null, reason: '', __proposalSeen: false, __reasonSeen: false };
 }
@@ -370,7 +369,7 @@ function topLevelDeclaration(task) {
     } else if (task === 'progression') {
         pattern = /^(?:TIME|GOAL|PROCESS|EVENT|EVALUATION)(?:\s+.+)?$/iu;
     } else if (GAME_LIKE_TASKS.has(task)) {
-        const singletons = task === 'planner' ? 'CURRENCY|PURSE' : 'CURRENCY|PURSE|DEVICE';
+        const singletons = 'CURRENCY|PURSE|DEVICE';
         pattern = new RegExp(`^(?:${singletons}|${Object.keys(GAME_RECORDS[task]).join('|')})(?:\\s+(?!\\+?=).+)?$`, 'iu');
     } else {
         pattern = /^(?:PROPOSAL(?:\s+.+)?|NO_PROPOSAL|REASON\s*=\s*.+)$/iu;
@@ -968,7 +967,7 @@ export function stringifyInnerLoreDsl(payload, requestedTask) {
     } else if (GAME_LIKE_TASKS.has(task)) {
         if (payload?.currency && Object.keys(payload.currency).length) pushRecord(lines, 'CURRENCY', payload.currency);
         if (payload?.purse && Object.keys(payload.purse).length) pushRecord(lines, 'PURSE', payload.purse);
-        if (task !== 'planner' && payload?.device && Object.keys(payload.device).length) pushRecord(lines, 'DEVICE', payload.device);
+        if (payload?.device && Object.keys(payload.device).length) pushRecord(lines, 'DEVICE', payload.device);
         for (const [word, [field, identity]] of Object.entries(GAME_RECORDS[task])) {
             for (const record of Array.isArray(payload?.[field]) ? payload[field] : []) {
                 const header = identity && record?.[identity] ? `${word} ${encodeText(record[identity])}` : word;
@@ -1030,12 +1029,19 @@ DONE`;
     if (task === 'progression') {
         return `INNERLORE PROGRESSION 1
 TIME
-elapsed.minimum_seconds = 20
-elapsed.estimated_seconds = 35
-elapsed.maximum_seconds = 60
 confidence = 0.8
 basis += One short exchange and a walk across the room.
 completed_actions += Freesia crosses the room.
+ITEM timeline
+key = crossing
+description = Freesia crosses the room.
+actor = Freesia
+kind = movement
+duration.minimum_seconds = 20
+duration.estimated_seconds = 35
+duration.maximum_seconds = 60
+evidence = She crosses the room without a word.
+END
 END
 GOAL prove_them_wrong
 owner = Freesia
@@ -1178,7 +1184,7 @@ To clear Current Mind, use current_mind = NULL and clear_current_mind = TRUE.`;
     }
     if (task === 'progression') {
         return `DSL FIELD REFERENCE
-TIME record scalar paths: elapsed.minimum_seconds, elapsed.estimated_seconds, elapsed.maximum_seconds, confidence, explicit_anchor, current_time_label
+TIME record scalar paths: confidence, explicit_anchor, current_time_label (no elapsed totals: the engine sums the timeline)
 TIME text lists using +=: basis, completed_actions
 TIME timeline map-list block: ITEM timeline
   fields: key, description, actor, kind, parallel_group, overlap_confirmed, overlap_evidence, duration.minimum_seconds, duration.estimated_seconds, duration.maximum_seconds, evidence
@@ -1186,7 +1192,7 @@ TIME timeline map-list block: ITEM timeline
 GOAL stable_key fields: owner, title, description, status, progress, visibility, source_event_key, due_in_seconds.minimum_seconds, due_in_seconds.estimated_seconds, due_in_seconds.maximum_seconds, next_step; blockers, requirements, evidence use +=
 PROCESS stable_key fields: subject_type, subject_name, kind, title, description, status, stage, progress, visibility, source_event_key, due_in_seconds.minimum_seconds, due_in_seconds.estimated_seconds, due_in_seconds.maximum_seconds, outcome; conditions and evidence use +=
 EVENT stable_key fields: title, kind, description, status, trigger, priority, visibility, source_event_key, requires_player_action, due_in_seconds.minimum_seconds, due_in_seconds.estimated_seconds, due_in_seconds.maximum_seconds, canon_impact; subjects and evidence use +=
-EVALUATION exact_definition_key requires evaluated = TRUE and reason = text. Emit only matched condition blocks. For each matched trigger_action, cancellation, revelation, public_reveal, or resolution, use dotted fields such as trigger_action.matched = TRUE; its evidence and message_indexes are lists, so always write trigger_action.evidence += quote and trigger_action.message_indexes += index (one item per line, never =); trigger_action also requires actor.`;
+EVALUATION exact_definition_key requires evaluated = TRUE and reason = text. Emit only matched condition blocks. For each matched trigger_action, cancellation, revelation, public_reveal, or resolution, use dotted fields such as trigger_action.matched = TRUE; evidence is a list, so always write trigger_action.evidence += quote (one quote per line, copied from the passage, never =); trigger_action also requires actor.`;
     }
     if (task === 'game') {
         return `DSL FIELD REFERENCE
@@ -1200,6 +1206,7 @@ REPUTATION group name fields: kind (faction|organization|place|people|other), de
 DEATH canonical name or descriptor fields: place (where the body lies), cause, evidence
 ABILITY holder (player, or a person's canonical name) fields: key (telepathy, mind_ward, or a lower_snake_case name), name, level (0-100, when newly established) or delta (growth or loss), evidence
 CONTACT canonical character name fields: number (or handle/address), op (add|remove), evidence
+LINK canonical character name fields: consent (granted|refused: agreed to be reached mind to mind, or refused it), evidence
 DEVICE (at most once): present (TRUE|FALSE), name (phone, sending stone...), channel (text, sending...), evidence
 Write the player as holder/to/from = player. Emit only records for changes this passage establishes; an empty document is just the header and DONE.`;
     }
@@ -1208,17 +1215,19 @@ Write the player as holder/to/from = player. Emit only records for changes this 
 ABILITY holder (player, or a person's canonical name) fields: key (telepathy for mind-speech, mind_ward for sensing and shutting out mental contact, or a lower_snake_case name for another notable gift), name (what the world calls it), level (0-100: 0 none, 1-19 latent, 20-39 novice, 40-69 adept, 70-89 expert, 90-100 master), evidence
 DEVICE (at most once): present (TRUE|FALSE), name (what the player's message device is called), channel (what a message on it is called), evidence
 CONTACT canonical character name fields: number (or handle/address, when the story gives one), evidence
-Emit an ABILITY record for every holder and key the request asks about, with level 0 when the evidence shows no such gift.`;
+Emit an ABILITY record only for a gift that is present (level 1 or more) and a DEVICE only when one exists; a question left without a record means none, level 0.`;
     }
     if (task === 'planner') {
         return `DSL FIELD REFERENCE
 CURRENCY (only when CURRENCY is none): name; ITEM units blocks with fields name, plural, abbreviation, value (relative worth; the smallest unit is 1)
 PURSE (only when STARTING_KIT_NEEDED is true): set, unit
 STAGE exact place name fields: summary; hooks use +=
-PERSON proper name fields: location (the STAGE place), role, appearance, manner, wants, secret, group (whose view of the player they share), lean (-20..20, warmer or cooler than that group by personality), coin (money they carry, e.g. 4 copper); sells use +=
+PERSON proper name fields: location (the STAGE place), role, appearance, manner, wants, secret, group (whose view of the player they share), lean (-20..20, warmer or cooler than that group by personality), coin (money they carry, e.g. 4 copper), mind and ward (0-100: their own gift of mind-speech, and how well their mind shuts out a mental touch; only when the world has mind-speech); sells use +=
+ABILITY player (only when STARTING_KIT_NEEDED and the instructions ask you to settle the player's gift) fields: key (telepathy), name, level
+DEVICE (at most once; only when STARTING_KIT_NEEDED and the instructions ask you to settle the player's device): present (TRUE|FALSE), name, channel
 OBJECT stable_key fields: location (the STAGE place), name, kind, quantity, value, price, unit, place (spot within it), owner, seller, condition, description, hidden, holder (a PERSON name for something they carry; player only for the starting kit)
 PRICE stable_key fields: name, kind (item|food|drink|lodging|service|transport|fee|other), price, unit, per, seller, location
-Emit one STAGE for every place in PLACES_TO_PREPARE, each followed by its PERSON, OBJECT and PRICE records.`;
+Emit a STAGE for a place in PLACES_TO_PREPARE when you have a summary or hooks for it, followed by its PERSON, OBJECT and PRICE records; a place with nothing to say about itself needs no STAGE, its records name it in location.`;
     }
     return `DSL FIELD REFERENCE
 PROPOSAL stable_key scalar fields: title, description, trigger_mode, trigger_after_seconds, trigger_time_certainty, action_condition, actor_scope, actor_name, cancellation_condition, activation_visibility, reveal_after_seconds, reveal_condition, resolution_condition, consequences, priority, confidence, rationale
@@ -1254,9 +1263,9 @@ export function dslOutputContract(requestedTask) {
         : task === 'progression'
             ? 'Use exactly one TIME record and zero or more GOAL, PROCESS, and EVENT records. Put each stable key after the record word. When a DSL_EVALUATION_KEYS block is present, emit its EVALUATION records first, immediately after the header line; otherwise emit EVALUATION records after the other records.'
             : task === 'game'
-                ? 'Use CURRENCY, PURSE, OBJECT, MONEY, PRICE, STANDING, REPUTATION, DEATH, ABILITY, CONTACT, or DEVICE records. Put the object or price key, the character name, the group name, or the ability holder after the record word; MONEY, CURRENCY, PURSE and DEVICE take nothing after it.'
+                ? 'Use CURRENCY, PURSE, OBJECT, MONEY, PRICE, STANDING, REPUTATION, DEATH, ABILITY, CONTACT, LINK, or DEVICE records. Put the object or price key, the character name, the group name, or the ability holder after the record word; MONEY, CURRENCY, PURSE and DEVICE take nothing after it.'
                 : task === 'planner'
-                    ? 'Use STAGE, PERSON, OBJECT, and PRICE records, plus CURRENCY and PURSE only when allowed. Put the place name, person name, or object or price key after the record word.'
+                    ? 'Use STAGE, PERSON, OBJECT, and PRICE records, plus CURRENCY, PURSE, ABILITY player and DEVICE only when allowed. Put the place name, person name, object or price key, or player after the record word.'
                     : task === 'abilities'
                         ? 'Use ABILITY, CONTACT, and DEVICE records. Put the holder (player, or the person\'s canonical name) after ABILITY and the character name after CONTACT; DEVICE takes nothing after it.'
                         : 'Use one PROPOSAL record with its stable key, or the single line NO_PROPOSAL. After it, emit exactly one top-level REASON = text line.';
@@ -1360,14 +1369,13 @@ EVALUATION <key copied from above>
 evaluated = TRUE
 reason = <one grounded sentence>
 END
-Shape when the passage meets a key's configured condition (use the field that matched; evidence and message_indexes are lists, always +=):
+Shape when the passage meets a key's configured condition (use the field that matched; evidence is a list, always +=):
 EVALUATION <key copied from above>
 evaluated = TRUE
 reason = <one grounded sentence>
 trigger_action.matched = TRUE
 trigger_action.actor = <who did it>
-trigger_action.evidence += <short quote from the passage>
-trigger_action.message_indexes += <index of the message holding the quote>
+trigger_action.evidence += <short quote copied from the passage>
 END
 </DSL_EVALUATION_KEYS>`
         : '<DSL_EVALUATION_KEYS priority="hard">Emit no EVALUATION records because no triggerable-event definitions were supplied.</DSL_EVALUATION_KEYS>';

@@ -6,6 +6,7 @@ import {
     buildLatestTurnContract,
     canonicalNameKey,
     cleanString,
+    clipAtBoundary,
     createEmptyStore,
     createHistoryPrefixPromptStore,
     createStoreCheckpoint,
@@ -70,6 +71,7 @@ import {
     providerConcurrency,
     recordTelemetryEntry,
     setPeerBackgroundInFlight,
+    setPeerProviderUnits,
     setSlotListener,
     isTransientRequestError,
     listConnectionProfiles,
@@ -87,7 +89,11 @@ import {
     providerHasRoom,
     storyCost,
     storyProvider,
-} from './llm-client.js?v=19';
+    scheduleBackgroundTasks,
+    describeBackgroundSchedule,
+    shellRoles,
+    underShell,
+} from './llm-client.js?v=21';
 import {
     deleteInnerLorebooksForChat,
     openInnerLorebook,
@@ -101,9 +107,9 @@ import {
     formatTranscript,
     insufficientResponseCap,
     planNarratorPromptDelivery,
-} from './prompts.js?v=11';
+} from './prompts.js?v=12';
 import { compileTriggerEventDeliveryPreview } from './event-delivery.js?v=2';
-import { requestEventDirectorProposal } from './event-director-client.js?v=3';
+import { requestEventDirectorProposal } from './event-director-client.js?v=4';
 import { buildEventDirectorMessages } from './event-director-prompts.js';
 import {
     addEventProposal,
@@ -114,12 +120,12 @@ import {
     rejectEventProposal,
     removeEventProposal,
     recordEventDirectorAttempt,
-} from './event-director.js?v=3';
+} from './event-director.js?v=4';
 import { decideInnerLoreMaintenance } from './maintenance-scheduler.js?v=4';
 import { CHOICES_EXTRA_KEY, extractReplyChoices, fallbackChoices, storedChoices } from './player-choices.js?v=1';
 import { EmbeddedStorageClient } from './embedded-storage.js?v=1';
-import { requestProgressionPatch, testProgressionConnection } from './progression-client.js';
-import { buildProgressionMessages } from './progression-prompts.js';
+import { requestProgressionPatch, testProgressionConnection } from './progression-client.js?v=2';
+import { buildProgressionMessages } from './progression-prompts.js?v=2';
 import {
     applyGameOperations,
     createGameState,
@@ -145,8 +151,8 @@ import {
     contactList,
     contactOf,
     deviceOf,
-} from './game.js?v=4';
-import { buildAbilityJudgeMessages, buildLedgerMessages, buildPlannerMessages } from './game-prompts.js?v=4';
+} from './game.js?v=6';
+import { buildAbilityJudgeMessages, buildLedgerMessages, buildPlannerMessages } from './game-prompts.js?v=7';
 import {
     CHANNELS,
     CHANNEL_KEYS,
@@ -161,7 +167,9 @@ import {
     createThread,
     hasPendingStory,
     isChannel,
+    isPictureId,
     markFlushed,
+    newPictureId,
     normalizeThreads,
     parsePersonReply,
     pendingBubbles,
@@ -172,14 +180,19 @@ import {
     sortedThreads,
     threadKey,
     threadPreview,
-} from './private-chat.js?v=1';
-import { PHONE_ICON, createPhonePanel } from './phone-view.js?v=1';
-import { requestGamePatch } from './game-client.js?v=2';
+} from './private-chat.js?v=4';
+import { PHONE_ICON, createPhonePanel } from './phone-view.js?v=4';
+import { COMMUNICATION_DEFAULTS, communicationRules, defaultCommunicationRules, normalizeCommunication, startingCommunicationOps } from './communication.js?v=1';
+import { requestGamePatch } from './game-client.js?v=4';
 import { isTextCompletionApi, renderTextPacket, textPacketBudget } from './text-packet.js?v=1';
-import { createGamePanel, createTradePanel } from './game-view.js?v=3';
+import { createGamePanel, createTradePanel } from './game-view.js?v=4';
 import {
     ACTION_SOURCE,
     GAME_TOOLS,
+    GAME_TOOL_NAMES,
+    actionConsented,
+    describeAction,
+    playerExchangeIntent,
     actionAlreadyApplied,
     actionEntriesInRange,
     actionFromToolCall,
@@ -189,7 +202,7 @@ import {
     renderResolvedActions,
     renderToolGuidance,
     resolveGameAction,
-} from './game-actions.js?v=2';
+} from './game-actions.js?v=3';
 import { TONE_NAMES, castVoices, cleanForSpeech, inferGender, isChild, prosodyFor, segmentSpeech, settledSegmentCount, stripVoiceTags, toneText, voiceForSegment } from './speech.js?v=11';
 import { applyToneEffects, pitchShift } from './voice-fx.js?v=4';
 import { TARGET_RATE, bytesToBase64, concatChunks, createSilenceTracker, encodeWav, resample, tidyTranscript, trimSilence } from './voice-input.js?v=1';
@@ -201,16 +214,22 @@ import {
     chatPortraitFiles,
     composePortraitPrompt,
     createPortraitQueue,
+    findLook,
     findPortrait,
     foreignPortraitRecords,
     isLegacyPortraitFileOf,
     orphanPortraitFiles,
+    lookTags,
     portraitFileName,
     portraitFileStem,
+    portraitNegativeFor,
     portraitPayload,
     portraitSource,
     requestPortraitTags,
-} from './portrait.js?v=2';
+    seedFromInfo,
+    withChestTag,
+    withoutImagePrompts,
+} from './portrait.js?v=9';
 import {
     applyProgressionPatch,
     createProgressionState,
@@ -236,7 +255,41 @@ import {
     InnerLoreStorageClient,
     isInnerLoreStoragePointer,
     isLegacyInnerLoreStore,
-} from './storage-client.js?v=3';
+} from './storage-client.js?v=5';
+import { applyPatch, diffStore, isEmptyPatch } from './store-diff.js?v=4';
+import { createServerEvents } from './server-events.js?v=2';
+import {
+    adoptGameLedger,
+    alreadyRecordedLines,
+    analyzePassRange,
+    assistedForModel,
+    codecStatsFromResponse,
+    commitPlannerResponse,
+    completedRebuildBatchEnd,
+    gameLedgerDue,
+    lastCompletedStoryIndex,
+    lastPlayerMessageIndex,
+    maybeRecordCheckpoint,
+    planPass,
+    plannerMessagesFor,
+    plannerPlaces,
+    plannerPlanFor,
+    plannerProfileId,
+    runPassBatches,
+    summarizeRun,
+    trimChatForJob,
+    boundedProgressionEnd,
+    completedAssistantTurnCount,
+    gamePlaceOf,
+    passageMessagesFor,
+    structuredFoundationBrains,
+    throwForSubsystemFailure,
+    pendingOps,
+    sameExchangeOp,
+    carryManualState,
+    copyCardExpressionFoundation,
+    rebuildStore,
+} from './pass-pipeline.js?v=5';
 import {
     createLocalContextPacket,
     INNERLORE_CONTEXT_MACROS,
@@ -375,18 +428,66 @@ const MAIN_PROFILE_KEY = 'connectionProfileId';
 const FALLBACK_PROFILE_KEYS = ['fallbackConnectionProfileId', 'progressionFallbackConnectionProfileId'];
 const PASS_PROFILE_KEYS = ['progressionConnectionProfileId', 'gameConnectionProfileId', 'plannerConnectionProfileId', 'mindsConnectionProfileId'];
 
+/** The shell's roles as the extension's picker settings: which key each role fills. */
+const ROLE_SETTING_KEYS = Object.freeze({
+    curator: 'connectionProfileId',
+    minds: 'mindsConnectionProfileId',
+    progression: 'progressionConnectionProfileId',
+    game: 'gameConnectionProfileId',
+    planner: 'plannerConnectionProfileId',
+    fallback: 'fallbackConnectionProfileId',
+});
+
 /**
- * Under the fork's shell the narrator prompt is edited per API connection
- * (Settings → API), so the extension's own template editor steps aside.
+ * Under the fork's shell every connection choice lives in one place, the
+ * API tab's roles (Settings → API): narration, curator, NPC minds, world
+ * progression, game ledger, scene planner, private conversations and the
+ * fallback. The extension mirrors them into its own picker settings, which
+ * every pass already reads, so a role change reaches the next request. The
+ * open world's own curator pin (Settings → World) overrides the curator role
+ * while that world is open. The pickers in the extension's panel are hidden;
+ * the narrator prompt is edited per connection there too.
  */
+function syncRolesFromShell() {
+    if (typeof window === 'undefined' || !underShell()) return false;
+    const settings = getSettings();
+    const roles = shellRoles();
+    const known = listConnectionProfiles();
+    const valid = id => (id && known.some(profile => profile.id === id) ? id : '');
+    const world = typeof window.InnerLoreShell?.activeWorld === 'function' ? window.InnerLoreShell.activeWorld() : null;
+    const pinned = valid(cleanString(world?.backgroundConnectionId, 80));
+    const wanted = {
+        connectionSource: 'profile',
+        connectionProfileId: pinned || valid(roles.curator) || valid(settings.connectionProfileId) || (known[0]?.id || ''),
+        mindsConnectionProfileId: valid(roles.minds),
+        progressionConnectionProfileId: valid(roles.progression),
+        gameConnectionProfileId: valid(roles.game),
+        plannerConnectionProfileId: valid(roles.planner),
+        fallbackConnectionProfileId: valid(roles.fallback),
+        // One fallback for every pass; the progression's own is retired.
+        progressionFallbackConnectionProfileId: '',
+    };
+    let changed = false;
+    for (const [key, value] of Object.entries(wanted)) {
+        if (settings[key] === value) continue;
+        settings[key] = value;
+        changed = true;
+    }
+    if (changed) {
+        saveSettings();
+        if (typeof document !== 'undefined') populateProfiles();
+        const name = known.find(profile => profile.id === settings.connectionProfileId)?.name || 'none';
+        log(`Connections follow the API tab's roles${pinned ? ' and the open world\'s pin' : ''}: curator on ${name}.`);
+    }
+    return changed;
+}
+
 function applyShellIntegration() {
     if (typeof window === 'undefined' || !window.InnerLoreShell) return;
     const settings = getSettings();
     const ctx = context();
     // Connection ids: SillyTavern profile ids become the shell's connection ids
-    // (the shell recorded the mapping when it imported the profiles), and the
-    // per-pass overrides collapse into one background connection plus a
-    // fallback, which every pass then shares.
+    // (the shell recorded the mapping when it imported the profiles).
     const profileMap = ctx.extensionSettings?.innerlore_shell?.profileMap || {};
     let changed = false;
     for (const key of [MAIN_PROFILE_KEY, ...FALLBACK_PROFILE_KEYS, ...PASS_PROFILE_KEYS]) {
@@ -396,25 +497,11 @@ function applyShellIntegration() {
             changed = true;
         }
     }
-    // Earlier shell builds collapsed every pass onto the one background
-    // connection and hid the per-pass pickers, and a hidden picker could keep
-    // a stale pick (the progression pass stayed on a connection the user had
-    // long moved away from). Once: every pass follows the background
-    // connection again, and the pickers are back for real choices.
-    if (settings.shellPassPickers !== 1) {
-        for (const key of [...FALLBACK_PROFILE_KEYS.slice(1), ...PASS_PROFILE_KEYS]) {
-            if (settings[key]) settings[key] = '';
-        }
-        settings.shellPassPickers = 1;
-        changed = true;
-    }
-    const known = listConnectionProfiles();
-    for (const key of [MAIN_PROFILE_KEY, ...FALLBACK_PROFILE_KEYS, ...PASS_PROFILE_KEYS]) {
-        if (!settings[key] || known.some(profile => profile.id === settings[key])) continue;
-        settings[key] = key === MAIN_PROFILE_KEY ? (known[0]?.id || '') : '';
-        changed = true;
-    }
+    if (settings.shellPassPickers !== 1) settings.shellPassPickers = 1;
     if (changed) saveSettings();
+    // The shell folded the extension's picks into its roles once (migrateRoles,
+    // before this runs); from here the roles are the source of truth.
+    syncRolesFromShell();
     if (runtime.shellIntegrated || typeof document === 'undefined') return;
     runtime.shellIntegrated = true;
     const textarea = document.getElementById('il_narrator_prompt');
@@ -422,46 +509,43 @@ function applyShellIntegration() {
         textarea.disabled = true;
         textarea.insertAdjacentHTML('beforebegin', '<div class="il-shell-note">The story prompt is edited per API connection under Settings → API. This template is used only when no connection is active.</div>');
     }
-    const relabel = (id, text) => {
+    // The pickers step aside for the API tab's roles. Their rows are hidden,
+    // not removed: populateProfiles still keeps their values in step, and a
+    // test can read them.
+    const hide = id => {
+        const element = document.getElementById(id);
         const label = document.querySelector(`label[for="${id}"]`);
-        if (label) label.textContent = text;
+        if (element) element.classList.add('il-shell-hidden');
+        if (label) label.classList.add('il-shell-hidden');
+        if (element?.nextElementSibling?.matches?.('small.inner-lore-hint')) element.nextElementSibling.classList.add('il-shell-hidden');
     };
-    relabel('il_connection_profile', 'Background connection');
-    relabel('il_fallback_connection_profile', 'Fallback connection after transient failures');
-    relabel('il_minds_profile', 'NPC minds connection');
-    relabel('il_progression_profile', 'World progression connection');
-    relabel('il_progression_fallback_profile', 'Progression fallback connection after transient failures');
-    relabel('il_game_profile', 'Game ledger connection');
-    relabel('il_planner_profile', 'Scene planner connection');
-    const sourceOption = document.querySelector('#il_connection_source option[value="profile"]');
-    if (sourceOption) sourceOption.textContent = 'Background connection (Settings → API)';
+    for (const id of ['il_connection_source', 'il_connection_profile', 'il_fallback_connection_profile', 'il_minds_profile', 'il_progression_profile', 'il_progression_fallback_profile', 'il_game_profile', 'il_planner_profile']) hide(id);
+    const row = document.getElementById('il_profile_row');
+    if (row) {
+        row.insertAdjacentHTML('afterbegin', '<div class="il-shell-note il-shell-roles-note">Which connection does what (curator, NPC minds, world progression, game ledger, scene planner, private conversations, fallback) is chosen under Settings → API, with the narration. <button type="button" class="menu_button il-shell-open-api">Open the API tab</button></div>');
+        row.querySelector('.il-shell-open-api')?.addEventListener('click', () => window.InnerLoreShell.openTab?.('api'));
+    }
     populateProfiles();
     applyWorldConnections();
     window.InnerLoreShell.onChange?.(change => {
-        if (change?.type === 'connections') populateProfiles();
+        if (change?.type === 'connections') {
+            populateProfiles();
+            syncRolesFromShell();
+        }
+        if (change?.type === 'roles') syncRolesFromShell();
         if (change?.type === 'world') applyWorldConnections();
     });
 }
 
 /**
- * A world that names its own background connection (Settings → World) has the
- * passes run on it whenever it is open; a world without one leaves the
- * extension's picker alone.
+ * A world that pins its own curator connection (Settings → World) has the
+ * passes run on it whenever it is open; a world without one runs them on
+ * the curator role from the API tab. Both go through the role sync, which
+ * also keeps the other roles in step.
  */
 function applyWorldConnections() {
     if (typeof window === 'undefined' || typeof window.InnerLoreShell?.activeWorld !== 'function') return false;
-    const world = window.InnerLoreShell.activeWorld();
-    const wanted = cleanString(world?.backgroundConnectionId, 80);
-    if (!wanted) return false;
-    const settings = getSettings();
-    if (settings.connectionProfileId === wanted) return false;
-    const profile = listConnectionProfiles().find(entry => entry.id === wanted);
-    if (!profile) return false;
-    settings.connectionProfileId = wanted;
-    saveSettings();
-    if (typeof document !== 'undefined') populateProfiles();
-    log(`Background connection follows the open world: ${profile.name}.`);
-    return true;
+    return syncRolesFromShell();
 }
 
 /** The picker in the extension's settings pins the choice to the open world when that world has its own. */
@@ -556,6 +640,7 @@ function narratorPill() {
 function showNarratorPill(label) {
     const pill = narratorPill();
     if (!pill) return;
+    pill.classList.remove('is-background');
     pill.querySelector('span').textContent = label;
     pill.style.display = 'flex';
 }
@@ -564,6 +649,105 @@ function hideNarratorPill() {
     clearInterval(narratorPillTimer);
     narratorPillTimer = null;
     document.getElementById('il_narrator_pill')?.style.setProperty('display', 'none');
+    // Background work the server is still doing shows once the story is told.
+    setTimeout(renderActivityPill, 0);
+}
+
+/** One line for a game tool's result, as the player reads it. */
+function toolOutcomeLine(result) {
+    const text = String(result || '').trim();
+    if (/^DONE:/u.test(text)) return text.replace(/^DONE:\s*/u, '');
+    return '';
+}
+
+/**
+ * SillyTavern records each tool call as a small system message holding the
+ * raw call. For InnerLore's game tools that record is replaced, on screen
+ * only, by what actually happened ("paid 2 coppers to Bryn Tolley"); a call
+ * that changed nothing is not shown at all.
+ */
+function decorateToolMessages() {
+    if (typeof document === 'undefined' || typeof document.querySelectorAll !== 'function') return;
+    const chat = context().chat || [];
+    for (const element of document.querySelectorAll('#chat .mes[mesid]')) {
+        const message = chat[Number(element.getAttribute('mesid'))];
+        const invocations = message?.extra?.tool_invocations;
+        if (!Array.isArray(invocations) || !invocations.length || !invocations.every(call => GAME_TOOL_NAMES.includes(call?.name))) continue;
+        const lines = invocations.map(call => toolOutcomeLine(call.result)).filter(Boolean);
+        const signature = JSON.stringify(lines);
+        if (element.dataset.ilTool === signature) continue;
+        element.dataset.ilTool = signature;
+        element.classList.add('il-tool-message');
+        element.classList.toggle('il-tool-noop', lines.length === 0);
+        const text = element.querySelector('.mes_text');
+        if (!text) continue;
+        text.querySelector('.il-tool-outcome')?.remove();
+        if (!lines.length) continue;
+        const box = document.createElement('div');
+        box.className = 'il-tool-outcome';
+        for (const line of lines) {
+            const row = document.createElement('div');
+            const icon = document.createElement('i');
+            icon.className = 'fa-solid fa-coins';
+            icon.setAttribute('aria-hidden', 'true');
+            row.append(icon, document.createTextNode(` ${line}`));
+            box.append(row);
+        }
+        text.append(box);
+    }
+}
+
+/** A person's name as the story writes it, from a portrait job's key. */
+function personNameForKey(key) {
+    const store = getChatStore();
+    const record = Object.values(store?.entities || {}).find(entity => entity?.type === 'character'
+        && (canonicalNameKey(entity.name) === key || (entity.aliases || []).some(alias => canonicalNameKey(alias) === key)));
+    return record?.name || String(key || '').replace(/\b\w/gu, letter => letter.toLocaleUpperCase());
+}
+
+/** What the server is doing for this world, in the words the pill shows. */
+function activityLabel(job) {
+    const detail = cleanString(job?.detail, 120);
+    switch (job?.kind) {
+        case 'pass': return detail ? `Updating the world · ${detail}` : 'Updating the world';
+        case 'rebuild': return detail ? `Rebuilding the world · ${detail.replace(/^rebuilding\s+/u, '')}` : 'Rebuilding the world';
+        case 'portrait': return `Drawing ${personNameForKey(job.key)}${detail === 'choosing the look' ? ' · choosing the look' : ''}`;
+        case 'private-reply': return detail || 'Someone is answering';
+        case 'picture': {
+            const sender = pictureBubble(job.key)?.thread.person;
+            return `${sender ? `${sender}'s picture` : 'A picture'}${detail ? ` · ${detail}` : ''}`;
+        }
+        default: return 'Working';
+    }
+}
+
+/**
+ * While no story is being told, the pill shows the server's work for this
+ * world (a world update, a rebuild, a portrait) in a quieter style, and goes
+ * away when it is done; the summary then shows as before.
+ */
+function renderActivityPill() {
+    if (typeof document === 'undefined' || typeof document.getElementById !== 'function' || typeof document.createElement !== 'function') return;
+    // A story being told owns the pill. (activeStoryGenerationId names the
+    // last story generation and stays set after its reply, so it cannot say
+    // whether one is under way.)
+    if (storyClaimFresh()) return;
+    const pill = document.getElementById('il_narrator_pill');
+    const jobs = [...(runtime.serverJobs?.values?.() || [])];
+    const job = getSettings().enabled ? (jobs.find(entry => entry.status === 'running') || jobs.find(entry => entry.status === 'queued')) : null;
+    if (!job) {
+        if (pill?.classList.contains('is-background')) {
+            pill.classList.remove('is-background');
+            pill.style.display = 'none';
+        }
+        return;
+    }
+    if (pill && pill.style.display === 'flex' && !pill.classList.contains('is-background')) return;
+    const target = narratorPill();
+    if (!target) return;
+    target.classList.add('is-background');
+    target.querySelector('span').textContent = activityLabel(job);
+    target.style.display = 'flex';
 }
 
 function trackNarrationStreamingStart() {
@@ -575,7 +759,10 @@ function trackNarrationStreamingStart() {
         // WHO owns the last bubble (DOM classes differ between builds); only
         // visible ASSISTANT text may hide the pill, never the user's message.
         const messages = context()?.chat || [];
-        if (messages.length && !messages[messages.length - 1]?.is_user) {
+        const last = messages[messages.length - 1];
+        // A system message (SillyTavern's record of a game tool call) is not
+        // story text: the narration it leads to is still coming.
+        if (messages.length && last && !last.is_user && !last.is_system) {
             const visible = cleanString(document.querySelector('#chat .mes:last-child .mes_text')?.textContent || '');
             if (visible.length > 15) hideNarratorPill();
         }
@@ -799,6 +986,9 @@ const defaultSettings = Object.freeze({
     portraitServerUrl: '',
     portraitStyle: PORTRAIT_DEFAULTS.style,
     portraitNegative: PORTRAIT_DEFAULTS.negative,
+    portraitNegativeVersion: 1,
+    // The backdrop of every portrait: plain, so the person is the picture.
+    portraitBackground: PORTRAIT_DEFAULTS.background,
     portraitSteps: PORTRAIT_DEFAULTS.steps,
     portraitCfg: PORTRAIT_DEFAULTS.cfg,
     // The people here as a row of cards under the top bar.
@@ -810,6 +1000,12 @@ const defaultSettings = Object.freeze({
     // answers through the story's own model; the story gets a transcript when
     // the conversation closes.
     privateChatEnabled: true,
+    // In a text or mind-speech, the person may send a picture: drawn on the
+    // server by the portrait image server, from their portrait's look and seed.
+    privateChatPictures: true,
+    // In a quiet word in person, a camera button draws the person as the
+    // player sees them there and then: only when asked.
+    privateChatMomentPictures: true,
     privateChatTemperature: 0.8,
     privateChatMaximumTokens: 220,
     privateChatCustomInstructions: '',
@@ -934,6 +1130,14 @@ const runtime = {
     storeChatId: '',
     storageWorldId: '',
     storageRevision: 0,
+    // The last snapshot adopted from the server; a save sends the diff against it.
+    storageBase: null,
+    // The plugin's push channel and the server-side jobs of the open world.
+    serverEvents: null,
+    serverJobs: new Map(),
+    clientId: '',
+    serverJobsUnsupported: false,
+    lorebookMirrorTimer: null,
     storageSnapshotHash: '',
     storageReady: false,
     storageError: '',
@@ -1022,6 +1226,14 @@ function getSettings() {
         if (Number(settings.processEveryAssistantTurns) === 1) settings.processEveryAssistantTurns = 3;
         if (Number(settings.progressionEveryAssistantTurns) === 2) settings.progressionEveryAssistantTurns = 4;
         settings.maintenanceSchedulingVersion = 1;
+    }
+    // Older settings carried "nsfw" in the portrait negative. It is taken out
+    // once, so a later choice to put it back stands.
+    if (!Object.hasOwn(settings, 'portraitNegativeVersion')) {
+        if (typeof settings.portraitNegative === 'string') {
+            settings.portraitNegative = settings.portraitNegative.split(',').map(tag => tag.trim()).filter(tag => tag && tag.toLocaleLowerCase() !== 'nsfw').join(', ');
+        }
+        settings.portraitNegativeVersion = 1;
     }
     for (const [key, value] of Object.entries(defaultSettings)) {
         if (!Object.hasOwn(settings, key)) settings[key] = clone(value);
@@ -1210,6 +1422,9 @@ async function cleanupDeletedChat(chatId, { silent = false } = {}) {
         runtime.storeChatId = '';
         runtime.storageWorldId = '';
         runtime.storageRevision = 0;
+        runtime.storageBase = null;
+        runtime.serverEvents?.unsubscribe();
+        runtime.serverJobs = new Map();
         runtime.storageSnapshotHash = '';
         runtime.storageReady = false;
     }
@@ -1374,11 +1589,7 @@ function assistedFor(profileId) {
     const mode = getSettings().assistedBackground || 'auto';
     if (mode === 'on') return true;
     if (mode === 'off') return false;
-    const profile = findConnectionProfile(profileId);
-    const size = modelSizeBillions(profile?.model);
-    // An unnamed size on NovelAI's single slot is its GLM 4.6; on a provider
-    // with a request budget (NanoGPT) unnamed models are the large ones.
-    return size < 70 || (!Number.isFinite(size) && oneAtATimeProvider(profileId) === 'novelai.net');
+    return assistedForModel(findConnectionProfile(profileId)?.model, oneAtATimeProvider(profileId), mode);
 }
 
 /** The story is written by a text-completion model (NovelAI, KoboldAI, text-generation-webui). */
@@ -1440,22 +1651,7 @@ function getChatStore(options = {}) {
         // backfill path; live progression begins at the current watermark.
         store.progression.lastProcessedIndex = store.lastProcessedIndex;
     }
-    // SillyTavern normally emits edit/swipe/delete events, but a selected
-    // message can also change while the extension is unloaded (for example,
-    // through an external repair or restored chat file). Compare every saved
-    // processed fingerprint on load so stale minds, lore, and progression are
-    // quarantined rather than silently surviving the changed history.
-    const curatorHistoryTracked = Object.keys(store.processedFingerprints || {}).length > 0;
-    const progressionHistoryTracked = Object.keys(store.progression.processedFingerprints || {}).length > 0;
-    const savedHistoryChanged = hadStore && !store.needsRebuild && (
-        (curatorHistoryTracked && !messageRangeMatchesSnapshot(ctx.chat, store.processedFingerprints))
-        || (progressionHistoryTracked && !messageRangeMatchesSnapshot(ctx.chat, store.progression.processedFingerprints))
-    );
-    if (savedHistoryChanged) {
-        store.needsRebuild = true;
-        store.updatedAt = Date.now();
-        options.onChanged?.();
-    }
+    if (hadStore && checkSavedHistory(store, ctx.chat)) options.onChanged?.();
 
     // Expression readiness is independent from objective continuity. An old
     // mind now receives a focused card-backed warm-up instead of quarantining
@@ -1466,6 +1662,27 @@ function getChatStore(options = {}) {
     if (hadStore && storedVersion !== store.version) options.onChanged?.();
     rememberLorebook(store);
     return store;
+}
+
+/**
+ * SillyTavern normally emits edit/swipe/delete events, but a selected message
+ * can also change while the extension is unloaded (an external repair, a
+ * restored chat file) or while a pass ran elsewhere. Every saved processed
+ * fingerprint is compared against the chat so stale minds, lore and
+ * progression are quarantined rather than silently surviving the changed
+ * history. Returns true when the store was just marked for a rebuild.
+ */
+function checkSavedHistory(store, chat) {
+    if (!store || store.needsRebuild || !Array.isArray(chat)) return false;
+    const progression = store.progression || {};
+    const curatorHistoryTracked = Object.keys(store.processedFingerprints || {}).length > 0;
+    const progressionHistoryTracked = Object.keys(progression.processedFingerprints || {}).length > 0;
+    const changed = (curatorHistoryTracked && !messageRangeMatchesSnapshot(chat, store.processedFingerprints))
+        || (progressionHistoryTracked && !messageRangeMatchesSnapshot(chat, progression.processedFingerprints));
+    if (!changed) return false;
+    store.needsRebuild = true;
+    store.updatedAt = Date.now();
+    return true;
 }
 
 function createInitialChatStore(chatId, legacyValue = null) {
@@ -1599,6 +1816,9 @@ async function loadChatStore() {
         if (generation !== runtime.storageLoadGeneration || chatId !== currentChatId()) return null;
 
         runtime.store = normalizeStore(result.store, chatId);
+        // What the server holds right now: the first save sends the diff
+        // between this and whatever normalization or seeding changes.
+        runtime.storageBase = clone(result.store ?? initialStore);
         runtime.committedEntityCount = Object.keys(runtime.store?.entities || {}).length;
         runtime.storeChatId = chatId;
         // Self-healing seeds: a greeting-only chat re-seeds from its card on
@@ -1613,6 +1833,7 @@ async function loadChatStore() {
         runtime.storageRevision = result.revision;
         runtime.storageSnapshotHash = result.snapshotHash;
         runtime.storageReady = true;
+        subscribeServerEvents();
         if (runtime.storageBackendUsed === 'embedded') {
             // Standalone mode: the full store lives in the chat's own metadata
             // (the legacy location), persisted with the chat file automatically.
@@ -1644,6 +1865,9 @@ async function loadChatStore() {
         let changed = false;
         getChatStore({ onChanged: () => { changed = true; } });
         if (changed) await saveChatStore();
+        await migratePortraitRecordsIntoStore();
+        await dropImagePrompts();
+        await applyWorldStart(runtime.store);
         if (result.projection?.ok === false) {
             console.warn(`${LOG_PREFIX} SQLite committed, but graph projection remains queued: ${result.projection.error}`);
         }
@@ -1666,14 +1890,106 @@ async function reloadCurrentChatStore() {
         // load() returns the stored record; the world itself is its store.
         const loaded = await activeStorageClient().load(runtime.storageWorldId);
         if (loaded?.store && loaded.chatId === chatId) {
-            runtime.store = normalizeStore(loaded.store, chatId);
-            runtime.committedEntityCount = Object.keys(runtime.store?.entities || {}).length;
-            if (Number.isFinite(loaded.revision)) runtime.storageRevision = loaded.revision;
-            updateUI();
+            // The local store was stale (it lost entities): the committed
+            // world replaces it outright, nothing local is replayed.
+            adoptSnapshotNow(Number(loaded.revision) || runtime.storageRevision, loaded.store, { reason: 'reload', force: true, replay: false });
         }
     } catch (error) {
         console.error('[InnerLore] Could not reload the committed store after blocking a shrinking save:', error);
     }
+}
+
+/** A cheap signature of the lore records, to know whether the native lorebook needs a mirror pass. */
+function entitySignature(store) {
+    return Object.values(store?.entities || {})
+        .map(record => `${record?.id}|${record?.revision ?? ''}|${record?.updatedAt ?? ''}|${record?.enabled !== false}`)
+        .sort()
+        .join('\n');
+}
+
+/**
+ * The lorebook mirror after an adoption: the entries follow the store with a
+ * short debounce so a burst of pushed revisions costs one World Info write.
+ */
+function scheduleLorebookMirror() {
+    clearTimeout(runtime.lorebookMirrorTimer);
+    runtime.lorebookMirrorTimer = setTimeout(async () => {
+        runtime.lorebookMirrorTimer = null;
+        const store = getChatStore();
+        if (!store || !getSettings().autoLoreEnabled) return;
+        try {
+            await syncLorebook(store, { chatId: store.chatId, characterName: context().name2, removeMissing: true });
+            await saveChatStore({ reason: 'lorebook' });
+        } catch (error) {
+            console.warn(`${LOG_PREFIX} The lorebook mirror after a pushed revision failed:`, error);
+        }
+    }, 1_500);
+}
+
+/**
+ * Makes a snapshot the server pushed (or answered a save with) the live
+ * store. The store object keeps its identity, because handlers and passes
+ * hold references to it; its contents are replaced, then any edits made here
+ * since the last save are replayed on top and saved again. Derived caches are
+ * dropped and every view re-renders. Runs inside the save chain: callers use
+ * adoptStoreSnapshot; saveChatStore calls this directly.
+ */
+function adoptSnapshotNow(revision, snapshot, { reason = 'server', force = false, replay = true } = {}) {
+    const chatId = currentChatId();
+    if (!chatId || runtime.storeChatId !== chatId || !runtime.store || !snapshot || typeof snapshot !== 'object') return false;
+    if (!force && Number.isFinite(revision) && revision <= runtime.storageRevision) return false;
+    const pending = replay && runtime.storageBase ? diffStore(runtime.storageBase, runtime.store) : null;
+    const before = entitySignature(runtime.store);
+    const normalized = normalizeStore(clone(snapshot), chatId);
+    for (const key of Object.keys(runtime.store)) delete runtime.store[key];
+    Object.assign(runtime.store, normalized);
+    runtime.storageBase = clone(snapshot);
+    if (pending && !isEmptyPatch(pending)) applyPatch(runtime.store, pending);
+    if (Number.isFinite(revision)) runtime.storageRevision = revision;
+    runtime.committedEntityCount = Object.keys(runtime.store.entities || {}).length;
+    runtime.preparedContext = null;
+    runtime.contextPreparation?.controller?.abort();
+    runtime.contextPreparation = null;
+    runtime.localContext = null;
+    runtime.lastCompilation = null;
+    runtime.activeContextKey = '';
+    const pointer = context().chatMetadata?.[MODULE_KEY];
+    if (isInnerLoreStoragePointer(pointer) && pointer.worldId === runtime.storageWorldId && Number.isFinite(revision)) {
+        pointer.revision = revision;
+        pointer.updatedAt = new Date().toISOString();
+    }
+    const historyChanged = checkSavedHistory(runtime.store, context().chat);
+    rememberLorebook(runtime.store);
+    log(`Adopted store revision ${revision} (${reason})${pending && !isEmptyPatch(pending) ? ', local edits replayed' : ''}${historyChanged ? ', history changed: rebuild needed' : ''}.`);
+    refreshViewsAfterAdoption();
+    if (entitySignature(runtime.store) !== before) scheduleLorebookMirror();
+    if ((pending && !isEmptyPatch(pending)) || historyChanged) {
+        // Outside the save chain this may be running in.
+        setTimeout(() => { void saveChatStore({ reason: 'replay' }).catch(() => {}); }, 0);
+    }
+    return true;
+}
+
+/** Everything that shows the store, after its contents were replaced. */
+function refreshViewsAfterAdoption() {
+    if (typeof document === 'undefined') return;
+    try {
+        updateUI();
+        paintPhone();
+        const popup = document.getElementById('il_entity_card');
+        if (popup && popup.dataset.name && !popup.classList.contains('displayNone')) showEntityCard(popup.dataset.name, 'details');
+        fillPictureSlots(document.getElementById('chat'));
+        void prepareServerContext();
+    } catch (error) {
+        console.error(`${LOG_PREFIX} Could not refresh after adopting a store revision:`, error);
+    }
+}
+
+/** Adopts a pushed revision through the save chain, so it never interleaves with a save in flight. */
+async function adoptStoreSnapshot(revision, snapshot, options = {}) {
+    const queued = runtime.storageSaveChain.catch(() => {}).then(() => adoptSnapshotNow(revision, snapshot, options));
+    runtime.storageSaveChain = queued;
+    return queued;
 }
 
 async function saveChatStore(options = {}) {
@@ -1694,15 +2010,66 @@ async function saveChatStore(options = {}) {
             await reloadCurrentChatStore();
             return;
         }
-        const snapshot = clone(runtime.store);
-        const branch = narrativeBranchDescriptor();
-        const scene = narrativeScene(runtime.lastCompilation?.scene);
-        const result = await activeStorageClient().save(worldId, requestedChatId, snapshot, {
-            expectedRevision,
-            branch,
-            scene,
-            observation: contextObservation(branch),
-        });
+        const client = activeStorageClient();
+        // The server owns revisions: a save sends what changed here since the
+        // last adopted snapshot, and the server applies it onto its current
+        // state, so another writer (a tab, a server job) never produces a
+        // conflict. A whole-snapshot PUT remains for the backends and callers
+        // that need it (the embedded store, an explicit `whole`).
+        const patchMode = !options.whole && !runtime.patchUnsupported && typeof client.patch === 'function'
+            && runtime.storageBase && typeof runtime.storageBase === 'object';
+        let result;
+        let patched = false;
+        if (patchMode) {
+            const patch = diffStore(runtime.storageBase, runtime.store);
+            if (isEmptyPatch(patch)) {
+                updateInjection();
+                return;
+            }
+            try {
+                result = await client.patch(worldId, requestedChatId, patch, { baseRevision: expectedRevision, reason: options.reason || 'save', writer: runtime.clientId });
+                patched = true;
+            } catch (error) {
+                // A store that is gone (its world was deleted while this save
+                // was out) takes nothing: it is not recreated, and the patch
+                // route stays in use for every other world.
+                if (error?.code === 'STORE_NOT_FOUND' || error?.code === 'WORLD_NOT_FOUND') {
+                    console.warn(`${LOG_PREFIX} The InnerLore store of this chat is gone (deleted); nothing was saved.`);
+                    return;
+                }
+                // A server plugin from before the patch route answers a plain
+                // 404: whole snapshots with revision checks, as before, until
+                // it is restarted on the new code.
+                if (error?.status !== 404) throw error;
+                runtime.patchUnsupported = true;
+                console.warn(`${LOG_PREFIX} The server store has no patch route yet; saving whole snapshots until it restarts.`);
+            }
+        }
+        if (patched) {
+            const patch = diffStore(runtime.storageBase, runtime.store);
+            if (runtime.storeChatId === requestedChatId && runtime.storageWorldId === worldId) {
+                // The base now holds exactly what the server has from us; edits
+                // made while the request was out stay pending for the next save.
+                runtime.storageBase = applyPatch(clone(runtime.storageBase), patch);
+                if (result.moved && result.snapshot && typeof result.snapshot === 'object') {
+                    adoptSnapshotNow(result.revision, result.snapshot, { reason: 'save', force: true });
+                    return;
+                }
+            }
+        } else {
+            const snapshot = clone(runtime.store);
+            const branch = narrativeBranchDescriptor();
+            const scene = narrativeScene(runtime.lastCompilation?.scene);
+            result = await client.save(worldId, requestedChatId, snapshot, {
+                expectedRevision,
+                branch,
+                scene,
+                observation: contextObservation(branch),
+            });
+            if (runtime.storeChatId === requestedChatId && runtime.storageWorldId === worldId) {
+                runtime.storageBase = snapshot;
+            }
+        }
         if (runtime.storeChatId === requestedChatId && runtime.storageWorldId === worldId) {
             runtime.storageRevision = result.revision;
             runtime.committedEntityCount = Object.keys(runtime.store?.entities || {}).length;
@@ -2284,9 +2651,287 @@ function portraitsOn() {
     return settings.enabled && settings.portraitsEnabled !== false;
 }
 
+/**
+ * Portrait records live in the store (`portraits`, keyed by name), so they
+ * travel with the world through forks and the server can add to them. Chats
+ * from before kept them in the chat's metadata; those move over on open.
+ */
 function portraitRecords() {
-    const records = context().chatMetadata?.[PORTRAIT_METADATA_KEY];
+    const records = getChatStore()?.portraits;
     return records && typeof records === 'object' ? records : {};
+}
+
+function writePortraitRecords(records) {
+    const store = getChatStore();
+    if (!store) return;
+    store.portraits = records && typeof records === 'object' ? records : {};
+    void saveChatStore({ reason: 'portraits' }).catch(error => console.warn(`${LOG_PREFIX} Could not save the portrait records:`, error));
+}
+
+async function migratePortraitRecordsIntoStore() {
+    const ctx = context();
+    const legacy = ctx.chatMetadata?.[PORTRAIT_METADATA_KEY];
+    if (!legacy || typeof legacy !== 'object' || !Object.keys(legacy).length || !runtime.store) return false;
+    runtime.store.portraits = { ...legacy, ...(runtime.store.portraits && typeof runtime.store.portraits === 'object' ? runtime.store.portraits : {}) };
+    delete ctx.chatMetadata[PORTRAIT_METADATA_KEY];
+    try {
+        await ctx.saveMetadata?.();
+        await saveChatStore({ reason: 'portraits-migration' });
+    } catch (error) {
+        console.warn(`${LOG_PREFIX} Could not move the portrait records into the store:`, error);
+    }
+    return true;
+}
+
+/** Image records from before keep their file, look and seed, not the prompt that was sent. */
+async function dropImagePrompts() {
+    if (!runtime.store) return false;
+    const pruned = withoutImagePrompts({ portraits: runtime.store.portraits, pictures: runtime.store.pictures });
+    if (!pruned.changed) return false;
+    if (runtime.store.portraits) runtime.store.portraits = pruned.portraits;
+    if (runtime.store.pictures) runtime.store.pictures = pruned.pictures;
+    try {
+        await saveChatStore({ reason: 'image-prompts' });
+    } catch (error) {
+        console.warn(`${LOG_PREFIX} Could not drop the old image prompts:`, error);
+    }
+    return true;
+}
+
+/** Whether someone's portrait is being drawn, here or on the server. */
+function portraitDrawing(key) {
+    return Boolean(runtime.portraitQueue?.isDrawing(key)) || serverJobActive('portrait', key);
+}
+
+// ---- server-side jobs and the push channel ----
+
+function serverJobsAvailable() {
+    const setting = getSettings().serverJobs;
+    // On by default in a real page; the Node tests run everything in-process
+    // unless they opt in.
+    const livePage = typeof document !== 'undefined' && typeof document.createElement === 'function' && typeof window !== 'undefined';
+    const enabled = setting === true || (setting !== false && livePage);
+    return enabled
+        && runtime.storageBackendUsed === 'sqlite'
+        && !runtime.serverJobsUnsupported
+        && Boolean(runtime.storageWorldId);
+}
+
+function serverJobActive(kind, key = '') {
+    for (const job of runtime.serverJobs.values()) {
+        if (job.kind === kind && (!key || job.key === key) && (job.status === 'queued' || job.status === 'running')) return true;
+    }
+    return false;
+}
+
+/** The server jobs of this world that occupy a provider right now (portraits hold the image server, not a model slot for long). */
+function runningServerPasses() {
+    return [...runtime.serverJobs.values()].filter(job => job.status === 'running' && job.kind !== 'portrait').length;
+}
+
+/**
+ * Waits for a server job to finish: the job event settles it, and a poll
+ * every few seconds (and on every wake) covers a socket that died while the
+ * tab slept. Resolves to the finished job view.
+ */
+function awaitServerJob(jobId, { timeoutMs = 300_000 } = {}) {
+    return new Promise((resolve, reject) => {
+        const waiters = runtime.serverJobWaiters ||= new Map();
+        const settle = job => {
+            clearInterval(poll);
+            clearTimeout(limit);
+            waiters.delete(jobId);
+            if (job?.status === 'done') resolve(job);
+            else reject(Object.assign(new Error(job?.error || `the server job ${job?.status || 'ended'}`), { name: job?.status === 'cancelled' ? 'AbortError' : 'Error', job }));
+        };
+        waiters.set(jobId, settle);
+        const poll = setInterval(async () => {
+            if (!waiters.has(jobId)) return;
+            try {
+                const result = await storageClient.getJob(jobId);
+                if (result?.job && ['done', 'failed', 'cancelled'].includes(result.job.status)) settle(result.job);
+            } catch { /* the next poll or event answers */ }
+        }, 5_000);
+        const limit = setTimeout(() => settle({ status: 'failed', error: 'the server job did not finish in time' }), timeoutMs);
+    });
+}
+
+function rememberServerJob(job) {
+    if (!job?.id) return;
+    const finished = ['done', 'failed', 'cancelled'].includes(job.status);
+    if (finished) runtime.serverJobs.delete(job.id);
+    else runtime.serverJobs.set(job.id, job);
+    if (finished) runtime.serverJobWaiters?.get(job.id)?.(job);
+    setPeerBackgroundInFlight(runningServerPasses());
+    if (job.kind === 'portrait') refreshPortraitViews();
+    if (job.kind === 'picture') refreshPictureViews();
+    if (job.kind === 'rebuild') {
+        if (!finished) {
+            runtime.serverRebuildJobId = job.id;
+            setStatus('working', 'Rebuilding', job.detail ? `Server: ${job.detail}` : 'The server is rebuilding the world…');
+        } else if (runtime.serverRebuildJobId === job.id || !runtime.serverRebuildJobId) {
+            runtime.serverRebuildJobId = '';
+            void afterServerRebuild(job);
+        }
+    }
+    if (job.kind === 'pass') {
+        if (!finished) {
+            runtime.serverPassJobId = job.id;
+            setStatus('working', 'Analyzing', job.detail ? `Server: ${job.detail}` : 'The server is reading the latest replies…');
+        } else if (runtime.serverPassJobId === job.id || !runtime.serverPassJobId) {
+            runtime.serverPassJobId = '';
+            runtime.serverPassRange = null;
+            void afterServerPass(job);
+        }
+    }
+    renderActivityPill();
+    if (finished && job.status === 'failed') console.warn(`${LOG_PREFIX} Server job ${job.kind} failed: ${job.error}`);
+}
+
+/** The connection record a server job sends with (ids and endpoint; the key stays in the secret store). */
+function connectionRecordForJob(profileId) {
+    if (!profileId) return null;
+    const record = shell()?.getConnection?.(profileId);
+    if (record && record.mode === 'cc' && record.url && record.model) {
+        return { id: record.id, name: record.name, url: record.url, model: record.model, secretId: record.secretId || '', promptPostProcessing: record.promptPostProcessing || '', includeBody: record.includeBody || '' };
+    }
+    const profile = findConnectionProfile(profileId);
+    if (!profile || !profile['api-url'] || !profile.model) return null;
+    return { id: profile.id, name: profile.name, url: profile['api-url'], model: profile.model, secretId: profile['secret-id'] || '', promptPostProcessing: profile['prompt-post-processing'] || '', includeBody: '' };
+}
+
+async function submitServerJob(kind, { key = '', input = {}, replace = false } = {}) {
+    const worldId = runtime.storageWorldId;
+    const chatId = currentChatId();
+    if (!worldId || !chatId || !serverJobsAvailable()) return null;
+    try {
+        const result = await storageClient.submitJob(worldId, { kind, key, input, chatId, baseRevision: runtime.storageRevision, replace });
+        if (result?.job) rememberServerJob(result.job);
+        return result;
+    } catch (error) {
+        if (error?.status === 404) {
+            runtime.serverJobsUnsupported = true;
+            console.warn(`${LOG_PREFIX} The server plugin has no job routes yet (restart it on the new code); background work stays in the page.`);
+            return null;
+        }
+        console.warn(`${LOG_PREFIX} Could not hand the ${kind} job to the server:`, error);
+        return null;
+    }
+}
+
+function ensureServerEvents() {
+    if (runtime.serverEvents) return runtime.serverEvents;
+    // A real page only: Node has a WebSocket global too, and the tests stub a document.
+    if (typeof globalThis.WebSocket !== 'function' || typeof document === 'undefined' || typeof document.createElement !== 'function' || typeof window === 'undefined') return null;
+    runtime.clientId ||= globalThis.crypto?.randomUUID?.() || `page-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    runtime.serverEvents = createServerEvents({
+        apiRoot: getSettings().storageApiRoot || '/api/plugins/innerlore-storage/v1',
+        getHeaders: () => context().getRequestHeaders?.() || {},
+        clientId: runtime.clientId,
+        onMessage: handleServerEvent,
+        onStatus: status => log(`Server events ${status}.`),
+        log: (...args) => log('Server events:', ...args),
+    });
+    return runtime.serverEvents;
+}
+
+function subscribeServerEvents() {
+    if (runtime.storageBackendUsed !== 'sqlite' || !runtime.storageWorldId) return;
+    const events = ensureServerEvents();
+    if (!events) return;
+    events.subscribe(runtime.storageWorldId, currentChatId(), () => runtime.storageRevision);
+}
+
+/** What the server pushes: the world's state on (re)subscribe, job progress, new revisions, finished portraits. */
+function handleServerEvent(message) {
+    if (!message || typeof message !== 'object') return;
+    if (message.worldId && message.worldId !== runtime.storageWorldId) return;
+    switch (message.type) {
+        case 'state': {
+            // Jobs this page was following that finished while it was away
+            // (a frozen tab, a dropped socket) are settled now: their summary
+            // shows, the status moves on, the Event Director gets its turn.
+            const active = new Map((Array.isArray(message.jobs) ? message.jobs : []).filter(job => job?.id).map(job => [job.id, job]));
+            const recent = new Map((Array.isArray(message.recent) ? message.recent : []).filter(job => job?.id).map(job => [job.id, job]));
+            const missed = [...runtime.serverJobs.keys()].filter(id => !active.has(id));
+            for (const id of missed) {
+                const finished = recent.get(id);
+                if (finished) rememberServerJob(finished);
+                else runtime.serverJobs.delete(id);
+            }
+            if (missed.length && runtime.serverPassJobId && !active.has(runtime.serverPassJobId) && !recent.has(runtime.serverPassJobId)) {
+                runtime.serverPassJobId = '';
+                runtime.serverPassRange = null;
+                setStatus('idle', 'Idle', 'The last world update finished while this page was away.');
+            }
+            runtime.serverJobs = active;
+            renderActivityPill();
+            setPeerBackgroundInFlight(runningServerPasses());
+            for (const detail of (Array.isArray(message.providers) ? message.providers : [])) setPeerProviderUnits(detail.provider, detail.used);
+            if (message.snapshot && Number(message.revision) > runtime.storageRevision) {
+                void adoptStoreSnapshot(Number(message.revision), message.snapshot, { reason: 'sync' });
+            }
+            refreshPortraitViews();
+            break;
+        }
+        case 'store':
+            if (message.snapshot && typeof message.snapshot === 'object') {
+                void adoptStoreSnapshot(Number(message.revision), message.snapshot, { reason: message.origin || 'server', replay: message.origin !== 'rebuild' });
+            }
+            break;
+        case 'job':
+            rememberServerJob(message.job);
+            break;
+        case 'portrait':
+            refreshPortraitViews();
+            break;
+        case 'provider':
+            setPeerProviderUnits(message.provider, message.used);
+            break;
+        default:
+            break;
+    }
+}
+
+/**
+ * The server's word on background work for this world, for the story gate:
+ * the page's mirror can be stale after a sleep, so the gate asks once before
+ * deciding and keeps asking while it waits. Updates the mirror as it goes.
+ */
+async function refreshServerBackground(provider, cost) {
+    if (!serverJobsAvailable()) return null;
+    try {
+        const remote = await storageClient.background(runtime.storageWorldId, { provider, cost });
+        if (!remote) return null;
+        runtime.serverBackground = remote;
+        setPeerBackgroundInFlight(Math.max(0, Number(remote.inFlight) || 0));
+        for (const detail of (Array.isArray(remote.providers) ? remote.providers : [])) setPeerProviderUnits(detail.provider, detail.used);
+        return remote;
+    } catch (error) {
+        if (error?.status === 404) runtime.serverJobsUnsupported = true;
+        return null;
+    }
+}
+
+/** Tells the server the story's request is out (start, renewed while it streams) or done. */
+function notifyServerStory(active) {
+    if (!serverJobsAvailable()) return;
+    const worldId = runtime.storageWorldId;
+    const message = active
+        ? { phase: runtime.storyClaimAnnounced ? 'renew' : 'start', worldId, provider: storyProvider(), cost: storyCost(), quiet: Boolean(runtime.storyClaimIsQuiet) }
+        : { phase: 'end', worldId };
+    runtime.storyClaimAnnounced = active;
+    clearInterval(runtime.storyClaimRenewTimer);
+    runtime.storyClaimRenewTimer = null;
+    const sent = runtime.serverEvents?.story?.(message);
+    if (!sent) void storageClient.storyClaim(worldId, message).catch(() => {});
+    if (active) {
+        runtime.storyClaimRenewTimer = setInterval(() => {
+            if (!storyClaimFresh()) { notifyServerStory(false); return; }
+            const renew = { phase: 'renew', worldId, provider: storyProvider(), cost: storyCost(), quiet: Boolean(runtime.storyClaimIsQuiet) };
+            if (!runtime.serverEvents?.story?.(renew)) void storageClient.storyClaim(worldId, renew).catch(() => {});
+        }, 30_000);
+    }
 }
 
 function portraitOf(name) {
@@ -2306,18 +2951,44 @@ function portraitQueue() {
  * Queue a portrait for each person named who has none and whose looks the
  * story has described. Shrinking and showing pictures needs a browser.
  */
-function wantPortraits(names, { force = false } = {}) {
+function wantPortraits(names, { force = false, newLook = false } = {}) {
     if (shellTestMode() && !force) return;
-    if (!portraitsOn() || typeof globalThis.Image !== 'function') return;
+    if (!portraitsOn()) return;
     const chatId = currentChatId();
     const store = getChatStore();
     if (!chatId || !store) return;
+    const wanted = names
+        .filter(name => force || (!portraitOf(name) && !portraitDrawing(canonicalNameKey(name))))
+        .filter(name => portraitSource(store, name))
+        .map(name => ({ key: canonicalNameKey(name), name, chatId, force, newLook }));
+    if (!wanted.length) return;
+    if (serverJobsAvailable()) {
+        // The server draws: the tab may sleep, the picture still lands in the store.
+        const settings = getSettings();
+        const ctx = context();
+        const shared = {
+            placeName: resolveSceneLocation(store, runtime.lastCompilation?.scene).name || '',
+            settings: {
+                portraitStyle: settings.portraitStyle, portraitNegative: settings.portraitNegative,
+                portraitSteps: settings.portraitSteps, portraitCfg: settings.portraitCfg,
+                portraitBackground: settings.portraitBackground ?? PORTRAIT_DEFAULTS.background,
+                requestTimeoutSeconds: settings.requestTimeoutSeconds,
+            },
+            connection: connectionRecordForJob(settings.gameConnectionProfileId || settings.connectionProfileId),
+            fallback: connectionRecordForJob(settings.fallbackConnectionProfileId),
+            service: portraitServer(),
+            names: { characterName: ctx.name2, playerName: ctx.name1 },
+        };
+        if (!shared.connection) return;
+        for (const job of wanted) {
+            void submitServerJob('portrait', { key: job.key, input: { ...shared, name: job.name, force, newLook } });
+        }
+        return;
+    }
+    if (typeof globalThis.Image !== 'function') return;
     const queue = portraitQueue();
     queue.keepChat(chatId);
-    queue.want(names
-        .filter(name => force || (!portraitOf(name) && !queue.isDrawing(canonicalNameKey(name))))
-        .filter(name => portraitSource(store, name))
-        .map(name => ({ key: canonicalNameKey(name), name, chatId, force })));
+    queue.want(wanted);
 }
 
 /** The fork's image service, when the extension runs inside the shell. */
@@ -2368,20 +3039,30 @@ async function shrinkPortrait(base64) {
 async function drawPortrait(job) {
     const settings = getSettings();
     const store = getChatStore();
-    const source = store && portraitSource(store, job.name, {
-        placeName: resolveSceneLocation(store, runtime.lastCompilation?.scene).name || '',
-    });
-    if (!source) throw new Error('the story has not described them yet');
-    const tags = await requestPortraitTags(settings, source);
-    const payload = portraitPayload(composePortraitPrompt(tags, settings.portraitStyle), {
-        negative: settings.portraitNegative,
+    const entity = Object.values(store?.entities || {}).find(record => record?.type === 'character'
+        && [record.name, ...(record.aliases || [])].some(alias => canonicalNameKey(alias) === job.key));
+    const existing = job.newLook ? null : findLook(portraitRecords(), job.name, [entity?.name, ...(entity?.aliases || [])].filter(Boolean));
+    let tags;
+    if (existing) {
+        tags = withChestTag(lookTags(existing.record));
+    } else {
+        const source = store && portraitSource(store, job.name, {
+            placeName: resolveSceneLocation(store, runtime.lastCompilation?.scene).name || '',
+        });
+        if (!source) throw new Error('the story has not described them yet');
+        tags = withChestTag(await requestPortraitTags(settings, source));
+    }
+    const payload = portraitPayload(composePortraitPrompt(tags, settings.portraitStyle, { background: settings.portraitBackground ?? PORTRAIT_DEFAULTS.background }), {
+        negative: portraitNegativeFor(tags, settings.portraitNegative),
         steps: settings.portraitSteps,
         cfg: settings.portraitCfg,
+        seed: existing?.record.seed,
     });
     // Local Dream takes about 90 s a picture, and waits while it is not running.
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 300_000);
     let image;
+    let usedSeed = payload.seed;
     try {
         const server = portraitServer();
         if (server.provider === 'openai-images') {
@@ -2403,7 +3084,9 @@ async function drawPortrait(job) {
                 signal: controller.signal,
             });
             if (!response.ok) throw new Error(`the image server failed (HTTP ${response.status})`);
-            image = (await response.json())?.images?.[0];
+            const body = await response.json();
+            image = body?.images?.[0];
+            usedSeed = seedFromInfo(body?.info, payload.seed);
         }
     } catch (error) {
         const message = controller.signal.aborted ? 'the image server did not answer within 5 minutes' : error?.message || String(error);
@@ -2417,17 +3100,15 @@ async function drawPortrait(job) {
     const upload = await fetch('/api/images/upload', {
         method: 'POST',
         headers: context().getRequestHeaders(),
-        body: JSON.stringify({ image: picture.data, format: picture.format, ch_name: PORTRAIT_FOLDER, filename: `${portraitFileStem(job.chatId, job.key)}-${payload.seed}` }),
+        body: JSON.stringify({ image: picture.data, format: picture.format, ch_name: PORTRAIT_FOLDER, filename: `${portraitFileStem(job.chatId, existing?.key || job.key)}-${usedSeed}` }),
     });
     if (!upload.ok) throw new Error(`the portrait could not be saved (HTTP ${upload.status})`);
     const { path } = await upload.json();
-    const ctx = context();
-    if (!path || currentChatId() !== job.chatId || !ctx.chatMetadata) return;
-    ctx.chatMetadata[PORTRAIT_METADATA_KEY] = {
+    if (!path || currentChatId() !== job.chatId) return;
+    writePortraitRecords({
         ...portraitRecords(),
-        [job.key]: { name: job.name, path, prompt: payload.prompt, seed: payload.seed, at: Date.now() },
-    };
-    ctx.saveMetadataDebounced?.();
+        [existing?.key || job.key]: { name: entity?.name || job.name, path, tags, seed: usedSeed, at: Date.now() },
+    });
 }
 
 /** The portrait files on the server (names only); an empty list when the folder was never made. */
@@ -2508,16 +3189,14 @@ function adoptPortraits() {
     if (!chatId) return Promise.resolve();
     if (runtime.portraitAdoption?.chatId === chatId) return runtime.portraitAdoption.promise;
     const promise = (async () => {
-        const ctx = context();
         for (const [key, record] of foreignPortraitRecords(portraitRecords(), chatId)) {
             if (currentChatId() !== chatId) return;
             const copy = await copyPortraitFile(record.path, chatId, key, record.seed);
-            if (currentChatId() !== chatId || !ctx.chatMetadata) return;
+            if (currentChatId() !== chatId || !getChatStore()) return;
             const records = { ...portraitRecords() };
             if (copy) records[key] = { ...record, path: copy };
             else delete records[key];
-            ctx.chatMetadata[PORTRAIT_METADATA_KEY] = records;
-            ctx.saveMetadataDebounced?.();
+            writePortraitRecords(records);
             // The chat's own file under the old naming has no other owner now.
             if (copy && isLegacyPortraitFileOf(chatId, record.path)) await deletePortraitFiles([portraitFileName(record.path)]);
             refreshPortraitViews();
@@ -2587,7 +3266,7 @@ function fillEntityPortrait(popup) {
     if (!slot) return;
     slot.classList.toggle('displayNone', !portraitsOn());
     if (!portraitsOn()) return;
-    const drawing = runtime.portraitQueue?.isDrawing(canonicalNameKey(name)) || false;
+    const drawing = portraitDrawing(canonicalNameKey(name));
     const described = Boolean(getChatStore() && portraitSource(getChatStore(), name));
     if (portrait) {
         slot.innerHTML = `<figure class="il-entity-portrait"><img src="${escapeHtml(portrait.path)}" alt="Portrait of ${escapeHtml(name)}">${drawing ? '<figcaption>Drawing a new portrait…</figcaption>' : ''}</figure>`;
@@ -2600,7 +3279,8 @@ function fillEntityPortrait(popup) {
     redraw.type = 'button';
     redraw.className = 'il-entity-redraw';
     redraw.textContent = portrait ? 'Draw a new portrait' : 'Draw a portrait';
-    redraw.addEventListener('click', () => wantPortraits([name], { force: true }));
+    // A first portrait keeps any look the person already has (from a picture they sent); a new one starts afresh.
+    redraw.addEventListener('click', () => wantPortraits([name], { force: true, newLook: Boolean(portrait) }));
     slot.append(redraw);
 }
 
@@ -2804,9 +3484,106 @@ function renderPlayerChoices() {
     block.append(box);
 }
 
+/**
+ * Exchanges the story told without the game tools wait under the latest
+ * reply for the player's word: Yes applies them to the purse and the bag
+ * exactly as a tool call would have; No drops them. Nothing the ledger reads
+ * from prose moves the player's coin or belongings on its own.
+ */
+function pendingTrades() {
+    const store = getChatStore();
+    const pending = store ? normalizeGameState(store.game).pending : [];
+    return Array.isArray(pending) ? pending.filter(entry => entry && entry.id && (entry.op || (Array.isArray(entry.ops) && entry.ops.length))) : [];
+}
+
+function renderTradeConfirmations() {
+    if (typeof document === 'undefined' || typeof document.querySelector !== 'function') return;
+    const pending = getSettings().enabled && getSettings().gameEnabled !== false ? pendingTrades() : [];
+    const chat = context().chat || [];
+    const index = chat.length - 1;
+    const block = pending.length ? document.querySelector(`#chat .mes[mesid="${index}"] .mes_block`) : null;
+    const signature = block ? `${index}|${pending.map(entry => entry.id).join(',')}` : '';
+    const existing = document.querySelectorAll('.il-confirms');
+    if (signature && signature === runtime.confirmSignature && existing.length === 1 && block.contains(existing[0])) return;
+    existing.forEach(node => node.remove());
+    runtime.confirmSignature = signature;
+    if (!block) return;
+    const box = document.createElement('div');
+    box.className = 'il-confirms';
+    for (const entry of pending) {
+        const row = document.createElement('div');
+        row.className = 'il-confirm';
+        row.dataset.pending = entry.id;
+        const text = document.createElement('span');
+        const strong = document.createElement('b');
+        strong.textContent = `Did this happen? ${entry.text}`;
+        text.append(strong);
+        if (entry.evidence) {
+            const small = document.createElement('small');
+            small.textContent = entry.evidence;
+            text.append(small);
+        }
+        const yes = document.createElement('button');
+        yes.type = 'button';
+        yes.textContent = 'Yes';
+        yes.title = 'Apply it to the purse and the bag';
+        yes.addEventListener('click', () => { yes.disabled = true; void confirmPendingTrade(entry.id, true); });
+        const no = document.createElement('button');
+        no.type = 'button';
+        no.className = 'is-quiet';
+        no.textContent = 'No';
+        no.title = 'It did not happen; forget it';
+        no.addEventListener('click', () => { no.disabled = true; void confirmPendingTrade(entry.id, false); });
+        row.append(text, yes, no);
+        box.append(row);
+    }
+    block.append(box);
+}
+
+async function confirmPendingTrade(id, accept) {
+    const store = getChatStore();
+    if (!store) return false;
+    store.game = normalizeGameState(store.game);
+    const pending = Array.isArray(store.game.pending) ? store.game.pending : [];
+    const index = pending.findIndex(entry => entry?.id === id);
+    if (index < 0) return false;
+    const [entry] = pending.splice(index, 1);
+    store.game.pending = pending;
+    const ops = pendingOps([entry]);
+    const declined = Array.isArray(store.game.declined) ? store.game.declined : [];
+    if (accept) {
+        // Journaled as the player's own act, so a later read of the same
+        // passage (a rebuild) recognises it instead of asking again.
+        const applied = applyGameOperations(store.game, ops, { messageIndex: Math.max(0, Number(entry.at) || 0), source: ACTION_SOURCE });
+        store.game = applied.state;
+        if (applied.rejected.length) toastr.warning(`Could not apply all of it: ${applied.rejected.map(item => item.reason).join('; ')}`, DISPLAY_NAME);
+        else toastr.success(`Recorded: ${entry.text}`, DISPLAY_NAME, { timeOut: 2_500 });
+    } else {
+        // Remembered, so a rebuild's re-read does not ask about it again.
+        declined.push({ id: entry.id, at: entry.at, ops, text: entry.text });
+    }
+    store.game.pending = pending;
+    store.game.declined = declined.slice(-50);
+    log(`Pending exchange ${accept ? 'confirmed' : 'dismissed'}: ${entry.text}`);
+    try {
+        await saveChatStore({ reason: 'confirm' });
+    } catch (error) {
+        console.warn(`${LOG_PREFIX} Could not save the confirmed exchange:`, error);
+    }
+    updateInjection();
+    try {
+        const ctx = context();
+        const playerLabel = cleanString(ctx.name1, 100) || 'You';
+        if (runtime.gamePanel?.isOpen()) runtime.gamePanel.refresh(store, displayScene(store), playerLabel);
+        if (runtime.tradePanel?.isOpen()) runtime.tradePanel.refresh(store, displayScene(store), playerLabel);
+    } catch { /* panels refresh on their next open */ }
+    return true;
+}
+
 function updateCastCards() {
     if (typeof document === 'undefined' || typeof document.createElement !== 'function') return;
     renderPlayerChoices();
+    renderTradeConfirmations();
     ensureDockStyles();
     renderMenuBar();
     const bar = castBarElement();
@@ -2978,10 +3755,10 @@ function buildCastRow(participants, store) {
             || (person.recent ? 'Seen recently' : 'Here');
         const card = document.createElement('button');
         card.type = 'button';
-        card.className = 'il-cast-card' + (person.recent ? ' is-recent' : '')
-            + (runtime.portraitQueue?.isDrawing(key) ? ' is-drawing' : '');
+        const drawing = portraitDrawing(key);
+        card.className = 'il-cast-card' + (person.recent ? ' is-recent' : '') + (drawing ? ' is-drawing' : '');
         card.setAttribute('role', 'listitem');
-        card.title = `${person.name}${person.recent ? ' - seen recently' : ''}${runtime.portraitQueue?.isDrawing(key) ? ' - drawing a portrait' : ''}`;
+        card.title = `${person.name}${person.recent ? ' - seen recently' : ''}${drawing ? ' - drawing a portrait' : ''}`;
         const text = document.createElement('span');
         text.className = 'il-cast-text';
         const name = document.createElement('b');
@@ -3249,7 +4026,7 @@ function watchKeyboard() {
 }
 
 function openGamePanel(tab = 'bag') {
-    if (!runtime.gamePanel) runtime.gamePanel = createGamePanel({ onPerson: name => showEntityCard(name, 'details') });
+    if (!runtime.gamePanel) runtime.gamePanel = createGamePanel({ onPerson: name => showEntityCard(name, 'details'), onConfirm: (id, accept) => { void confirmPendingTrade(id, accept); } });
     const store = getChatStore();
     runtime.gamePanel.refresh(store, displayScene(store), cleanString(context().name1, 100) || 'You');
     runtime.gamePanel.open(tab);
@@ -3320,7 +4097,7 @@ function personPresent(name) {
 
 /** Which channels reach this person now: in person, by the world's device, or mind to mind. */
 function privateAvailability(name) {
-    return channelAvailability(gameStateNow(), name, { present: personPresent(name) });
+    return channelAvailability(gameStateNow(), name, { present: personPresent(name), world: worldCommunication() });
 }
 
 function knownPeopleNames() {
@@ -3343,6 +4120,9 @@ function phonePanel() {
     if (!state.panel) {
         state.panel = createPhonePanel({
             faceFor: (name, className) => personFace(name, className),
+            fillPictures: root => fillPictureSlots(root),
+            onPictureRetry: id => retryPicture(id),
+            onMoment: key => void requestMomentPicture(key),
             onSend: (key, text) => void sendPrivateMessage(key, text),
             onOpenThread: key => showPhone({ view: 'thread', key }),
             onStart: (name, channel) => void openPrivateChat(name, channel),
@@ -3360,11 +4140,12 @@ function phoneModel() {
     const store = getChatStore();
     const device = deviceOf(state);
     const present = new Set(presentPeopleNow().map(canonicalNameKey));
-    const mind = channelAvailability(state, '', { present: false, personKnown: false }).mind;
+    const world = worldCommunication();
+    const mind = channelAvailability(state, '', { present: false, personKnown: false, world }).mind;
     const reachable = knownPeopleNames().map(name => {
-        const availability = channelAvailability(state, name, { present: present.has(canonicalNameKey(name)) });
+        const availability = channelAvailability(state, name, { present: present.has(canonicalNameKey(name)), world });
         const channels = CHANNEL_KEYS
-            .filter(channel => availability[channel].ok || availability[channel].judge)
+            .filter(channel => !availability[channel].off && (availability[channel].ok || availability[channel].judge))
             .map(channel => ({ channel, unknown: !availability[channel].ok }));
         const record = Object.values(store?.entities || {}).find(entity => canonicalNameKey(entity?.name) === canonicalNameKey(name));
         return { name, channels, present: present.has(canonicalNameKey(name)), location: record ? curatedLocationOf(store.entities, record)?.name || '' : '' };
@@ -3404,6 +4185,7 @@ function threadViewData(key) {
         present: personPresent(thread.person),
         placeName: resolveSceneLocation(store, scene).name || scene?.location?.name || '',
         status,
+        moments: thread.channel === 'aside' && momentPicturesOn(),
         canSend: !busy && writable.ok && (availability.ok || availability.judge === true),
         blockedReason: !writable.ok ? writable.reason : (!availability.ok && !availability.judge ? availability.reason : ''),
     };
@@ -3477,6 +4259,18 @@ async function openPrivateChat(name, channel) {
     return true;
 }
 
+/**
+ * Whether the person may send a picture over this channel: in a text or a
+ * mind-speech, with the server there to draw it (pictures are drawn there,
+ * so a phone that sleeps still gets them).
+ */
+function picturesOn(channel) {
+    const settings = getSettings();
+    if (channel === 'aside' || settings.privateChatPictures === false || !serverJobsAvailable()) return false;
+    if (shellTestMode() && !privateChatState().allowLive) return false;
+    return true;
+}
+
 /** What the person is briefed with and how they are asked, for one reply. */
 function buildPrivateReplyRequest(thread, availability) {
     const ctx = context();
@@ -3502,13 +4296,17 @@ function buildPrivateReplyRequest(thread, availability) {
         recentStory: recent,
         device: deviceOf(state),
         canReject: availability?.canReject === true,
+        access: thread.channel === 'mind' ? availability?.access || null : null,
+        worldRules: communicationRules(worldCommunication()),
         clockLabel: clock?.currentTimeLabel || clock?.lastExactAnchor || '',
         customInstructions: settings.privateChatCustomInstructions,
+        pictures: picturesOn(thread.channel),
     };
     return {
         chatId: currentChatId(),
         thread,
         person: thread.person,
+        pictures: common.pictures,
         messages: buildPrivateReplyMessages(common),
         text: buildPrivateReplyTextPrompt(common),
     };
@@ -3523,10 +4321,12 @@ async function preemptBackgroundForPrivate(key) {
     const state = privateChatState();
     const provider = storyProvider();
     if (!isLimitedProvider(provider) || providerHasRoom(provider, storyCost()) || backgroundInFlightCount() <= 0) return;
-    if (state.preemptedFor === key || !runtime.controller || runtime.controller.signal.aborted) return;
+    const localPass = Boolean(runtime.controller && !runtime.controller.signal.aborted);
+    if (state.preemptedFor === key || (!localPass && !runtime.serverPassJobId)) return;
     state.preemptedFor = key;
     log(`A private conversation preempts the background pass on ${provider}; the pass re-runs after.`);
-    runtime.controller.abort();
+    if (localPass) runtime.controller.abort();
+    if (runtime.serverPassJobId) void storageClient.cancelJob(runtime.serverPassJobId, 'story_preempt').catch(() => {});
     const started = Date.now();
     while (!providerHasRoom(provider, storyCost()) && Date.now() - started < 5_000) {
         await new Promise(resolve => setTimeout(resolve, 100));
@@ -3550,15 +4350,41 @@ async function requestPrivateReply(build) {
     state.controller?.abort();
     const controller = new AbortController();
     state.controller = controller;
-    if (storyIsTextCompletion()) {
+    const privateRole = shell()?.roleConnection?.('private') || null;
+    const privateHasOwnRole = Boolean(shellRoles().private) && privateRole?.mode === 'cc';
+    if (storyIsTextCompletion() && !privateHasOwnRole) {
         if (typeof ctx.generateRaw !== 'function') throw new Error('SillyTavern generateRaw() is unavailable.');
         const { prompt, prefill } = build.text;
         // NovelAI refuses more than 250 tokens in one request.
         const raw = await ctx.generateRaw({ prompt: [{ role: 'system', content: prompt }], prefill, responseLength: Math.min(tokens, 200), trimNames: false });
         return typeof raw === 'string' ? raw : extractResponseText(raw);
     }
-    const connection = shell()?.activeConnection?.();
-    const profileId = connection?.mode === 'cc' && listConnectionProfiles().some(profile => profile.id === connection.id) ? connection.id : '';
+    // The private-conversations role (Settings → API) when it names its own
+    // chat-completion connection; otherwise whoever narrates.
+    const connection = privateHasOwnRole ? privateRole : shell()?.activeConnection?.();
+    const profileId = connection?.mode === 'cc' && (privateHasOwnRole || listConnectionProfiles().some(profile => profile.id === connection.id)) ? connection.id : '';
+    if (profileId && serverJobsAvailable()) {
+        // The server sends it and keeps the answer: a tab that sleeps while
+        // the person composes still gets the reply on waking.
+        const record = connectionRecordForJob(profileId);
+        if (record) {
+            await preemptBackgroundForPrivate(build.thread.key);
+            const submitted = await submitServerJob('private-reply', {
+                key: `${build.thread.key}:${Date.now().toString(36)}`,
+                input: { messages: build.messages, connection: record, maxTokens: tokens, temperature, person: build.thread.person, names: { characterName: ctx.name2, playerName: ctx.name1 } },
+            });
+            if (submitted?.jobId) {
+                const onAbort = () => { void storageClient.cancelJob(submitted.jobId, 'cancelled by the player').catch(() => {}); };
+                controller.signal.addEventListener('abort', onAbort, { once: true });
+                try {
+                    const job = await awaitServerJob(submitted.jobId, { timeoutMs: 160_000 });
+                    return String(job.result?.text || '');
+                } finally {
+                    controller.signal.removeEventListener('abort', onAbort);
+                }
+            }
+        }
+    }
     if (profileId) {
         await preemptBackgroundForPrivate(build.thread.key);
         return await sendInnerLoreRequest({
@@ -3614,8 +4440,19 @@ async function sendPrivateMessage(key, text) {
         const build = buildPrivateReplyRequest(thread, availability);
         const raw = await requestPrivateReply(build);
         if (currentChatId() !== build.chatId) return false;
-        const parsed = parsePersonReply(raw, { personName: thread.person, playerName: ctx.name1, channel: thread.channel });
-        for (const line of parsed.bubbles) appendBubble(thread, 'person', line);
+        const parsed = parsePersonReply(raw, { personName: thread.person, playerName: ctx.name1, channel: thread.channel, pictures: build.pictures });
+        const pictures = [];
+        for (const item of parsed.items) {
+            if (item.kind !== 'picture') {
+                appendBubble(thread, 'person', item.text);
+                continue;
+            }
+            const id = newPictureId();
+            if (appendBubble(thread, 'person', item.text, { picture: { id } })) pictures.push({ id, description: item.text });
+        }
+        if (thread.channel === 'mind' && (parsed.consented || parsed.rejected)) {
+            recordPrivateOps([{ type: 'mind.link', name: thread.person, consent: parsed.consented ? 'granted' : 'refused', note: parsed.consented ? 'agreed to be reached mind to mind' : 'shut the contact out' }]);
+        }
         if (parsed.rejected) {
             thread.status = 'rejected';
             thread.outcome = 'rejected';
@@ -3624,7 +4461,7 @@ async function sendPrivateMessage(key, text) {
             thread.status = 'ended';
             thread.outcome = 'ended';
         }
-        if (!parsed.bubbles.length && !parsed.rejected) {
+        if (!parsed.items.length && !parsed.rejected) {
             state.lastError = `${thread.person} gave no answer this time.`;
             log(`Private reply from ${thread.person} held no usable line: ${JSON.stringify(String(raw).slice(0, 200))}`);
         }
@@ -3638,7 +4475,8 @@ async function sendPrivateMessage(key, text) {
         }
         thread.updated = Date.now();
         saveThreads();
-        recordTelemetryEntry({ kind: 'private', phase: 'reply', durationMs: Date.now() - started, channel: thread.channel, lines: parsed.bubbles.length, rejected: parsed.rejected });
+        for (const picture of pictures) void requestPicture(thread, picture);
+        recordTelemetryEntry({ kind: 'private', phase: 'reply', durationMs: Date.now() - started, channel: thread.channel, lines: parsed.bubbles.length, pictures: pictures.length, rejected: parsed.rejected });
         return true;
     } catch (error) {
         if (error?.name === 'AbortError') return false;
@@ -3649,6 +4487,198 @@ async function sendPrivateMessage(key, text) {
     } finally {
         if (state.inFlight === key) state.inFlight = '';
         paintPhone();
+    }
+}
+
+// --- pictures sent in a conversation ------------------------------------------------
+
+// A picture with no record and no job this long after it was sent never arrived (the server restarted mid-way).
+const PICTURE_STALE_MS = 6 * 60_000;
+
+/** The pictures people have sent, in the store by id (the server commits them). */
+function pictureRecords() {
+    const records = getChatStore()?.pictures;
+    return records && typeof records === 'object' ? records : {};
+}
+
+/** The conversation and bubble a picture belongs to. */
+function pictureBubble(id) {
+    if (!isPictureId(id)) return null;
+    for (const thread of Object.values(threadsRecords())) {
+        const bubble = (thread.bubbles || []).find(candidate => candidate.picture?.id === id);
+        if (bubble) return { thread, bubble };
+    }
+    return null;
+}
+
+/**
+ * Ask the server to draw a picture the person sent. The game role's model
+ * reads who it shows and the shot; the person in it is drawn from their
+ * portrait's look and seed; the result lands in the store under `pictures`.
+ */
+async function requestPicture(thread, { id, description, location = '', others = null }) {
+    const settings = getSettings();
+    const store = getChatStore();
+    const ctx = context();
+    if (!store || !isPictureId(id)) return false;
+    runtime.pictureLocalFailures ||= new Map();
+    const brief = personBrief(store, thread.person, gameStateNow(), { playerName: ctx.name1 });
+    const where = location || brief.location;
+    const place = where
+        ? Object.values(store.entities || {}).find(record => record?.type === 'location' && canonicalNameKey(record.name) === canonicalNameKey(where))
+        : null;
+    const connection = connectionRecordForJob(settings.gameConnectionProfileId || settings.connectionProfileId);
+    const submitted = connection ? await submitServerJob('picture', {
+        key: id,
+        input: {
+            id,
+            person: thread.person,
+            channel: thread.channel,
+            description,
+            senderLocation: where || '',
+            placeSummary: cleanString(place?.summary, 300),
+            ...(Array.isArray(others) ? { others } : {}),
+            settings: {
+                portraitStyle: settings.portraitStyle, portraitNegative: settings.portraitNegative,
+                portraitSteps: settings.portraitSteps, portraitCfg: settings.portraitCfg,
+                requestTimeoutSeconds: settings.requestTimeoutSeconds,
+            },
+            connection,
+            fallback: connectionRecordForJob(settings.fallbackConnectionProfileId),
+            service: portraitServer(),
+            names: { characterName: ctx.name2, playerName: ctx.name1 },
+        },
+    }) : null;
+    if (submitted?.jobId) runtime.pictureLocalFailures.delete(id);
+    else runtime.pictureLocalFailures.set(id, connection ? 'the server could not take it' : 'no connection to describe it');
+    refreshPictureViews();
+    return Boolean(submitted?.jobId);
+}
+
+function retryPicture(id) {
+    const found = pictureBubble(id);
+    if (!found) return;
+    runtime.pictureRetries ||= new Map();
+    runtime.pictureRetries.set(id, Date.now());
+    runtime.pictureLocalFailures?.delete(id);
+    refreshPictureViews();
+    void requestPicture(found.thread, { id, description: found.bubble.picture?.about || found.bubble.text, ...momentSetting(found.thread) });
+}
+
+/** In a quiet word, the person can be seen there and then, on request: the server is needed to draw it. */
+function momentPicturesOn() {
+    const settings = getSettings();
+    if (settings.privateChatMomentPictures === false || !serverJobsAvailable()) return false;
+    if (shellTestMode() && !privateChatState().allowLive) return false;
+    return true;
+}
+
+/** Where a quiet word takes place and who else is about: the player's own place, since they are together. */
+function momentSetting(thread) {
+    if (thread?.channel !== 'aside') return {};
+    const store = getChatStore();
+    const scene = store ? displayScene(store) : null;
+    const location = (store && resolveSceneLocation(store, scene).name) || scene?.location?.name || '';
+    const others = presentPeopleNow().filter(name => canonicalNameKey(name) !== canonicalNameKey(thread.person));
+    return { location, others };
+}
+
+/**
+ * "See this moment": the person as the player sees them now in a quiet word,
+ * drawn from the latest exchange (what they said and did, the place, whether
+ * anyone else is about). Only when the player asks; one at a time.
+ */
+async function requestMomentPicture(key) {
+    const thread = threadsRecords()[key];
+    if (!thread || thread.channel !== 'aside' || !momentPicturesOn()) return false;
+    const drawing = (thread.bubbles || []).some(bubble => bubble.picture?.moment && !pictureRecords()[bubble.picture.id]);
+    if (drawing) {
+        toastr.info(`Still drawing the last picture of ${thread.person}.`, DISPLAY_NAME, { timeOut: 2_500 });
+        return false;
+    }
+    const ctx = context();
+    const player = cleanString(ctx.name1, 80) || 'You';
+    const lastFrom = from => [...(thread.bubbles || [])].reverse().find(bubble => bubble.from === from && !bubble.picture)?.text || '';
+    const said = lastFrom('person');
+    const asked = lastFrom('player');
+    const { location, others } = momentSetting(thread);
+    const about = [
+        `${thread.person}, face to face with ${player}${location ? ` at ${location}` : ''}, right now.`,
+        said ? `${thread.person} just said and did: ${clipAtBoundary(said, 400)}` : `${thread.person} is listening.`,
+        asked ? `${player} had said: ${clipAtBoundary(asked, 200)}` : '',
+    ].filter(Boolean).join(' ');
+    const id = newPictureId();
+    const caption = location ? `${thread.person} at ${location}, as you see them now` : `${thread.person}, as you see them now`;
+    appendBubble(thread, 'person', caption, { picture: { id, moment: true, about } });
+    saveThreads();
+    paintPhone();
+    return requestPicture(thread, { id, description: about, location, others });
+}
+
+/** Fill every picture slot under `root`: the image, the work in progress, or a way to try again. */
+function fillPictureSlots(root) {
+    if (!root || typeof root.querySelectorAll !== 'function') return;
+    const records = pictureRecords();
+    const jobs = [...(runtime.serverJobs?.values?.() || [])];
+    for (const figure of root.querySelectorAll('.il-sms-picture[data-picture]')) {
+        const id = figure.dataset.picture;
+        const frame = figure.querySelector('.il-sms-picture-frame');
+        if (!frame) continue;
+        const record = records[id];
+        const retryAt = runtime.pictureRetries?.get(id) || 0;
+        const job = jobs.find(entry => entry.kind === 'picture' && entry.key === id);
+        let state = 'drawing';
+        if (record?.path) state = 'ready';
+        else if (runtime.pictureLocalFailures?.has(id)) state = 'failed';
+        else if (record?.failed && !job && !(retryAt > (Number(record.at) || 0))) state = 'failed';
+        else if (!job && !record && !retryAt && Date.now() - (Number(pictureBubble(id)?.bubble.at) || Date.now()) > PICTURE_STALE_MS) state = 'lost';
+        const caption = figure.querySelector('figcaption')?.textContent || '';
+        figure.classList.toggle('is-drawing', state === 'drawing');
+        figure.classList.toggle('is-failed', state === 'failed' || state === 'lost');
+        if (state === 'ready') {
+            if (frame.querySelector('img')?.getAttribute('src') !== record.path) {
+                frame.innerHTML = `<img src="${escapeHtml(record.path)}" alt="${escapeHtml(caption)}" decoding="async">`;
+            }
+            continue;
+        }
+        if (state === 'failed' || state === 'lost') {
+            const reason = state === 'lost' ? 'The picture never arrived.' : 'The picture did not come through.';
+            frame.innerHTML = `<span class="il-sms-picture-wait">${reason}<br><button type="button" class="il-sms-picture-retry" data-picture-retry="${escapeHtml(id)}">Try again</button></span>`;
+            continue;
+        }
+        const detail = cleanString(job?.detail, 80);
+        const text = detail === 'drawing' ? 'Drawing the picture…' : detail ? `${detail.charAt(0).toUpperCase()}${detail.slice(1)}…` : 'Picture on its way…';
+        frame.innerHTML = `<span class="il-sms-picture-wait">${escapeHtml(text)}</span>`;
+    }
+}
+
+/** Pictures in the open phone and in the story log, after a job moved or the store changed. */
+function refreshPictureViews() {
+    if (typeof document === 'undefined' || typeof document.getElementById !== 'function') return;
+    fillPictureSlots(document.getElementById('il_phone_overlay'));
+    fillPictureSlots(document.getElementById('chat'));
+}
+
+/** In the story log: a tapped picture opens large; a failed one can be asked for again. */
+function handlePictureClick(event) {
+    const target = event.target;
+    if (!target?.closest || target.closest('#il_phone_overlay')) return;
+    const retry = target.closest('#chat [data-picture-retry]');
+    if (retry) {
+        event.preventDefault();
+        retryPicture(retry.dataset.pictureRetry);
+        return;
+    }
+    const image = target.closest('#chat .il-sms-picture img');
+    if (image) {
+        event.preventDefault();
+        const caption = image.closest('.il-sms-picture')?.querySelector('figcaption')?.textContent || '';
+        const box = document.createElement('div');
+        box.className = 'il-picture-lightbox';
+        box.setAttribute('role', 'dialog');
+        box.innerHTML = `<img src="${escapeHtml(image.getAttribute('src') || '')}" alt="${escapeHtml(caption)}"><p>${escapeHtml(caption)}</p>`;
+        box.addEventListener('click', () => box.remove());
+        document.body.appendChild(box);
     }
 }
 
@@ -3711,6 +4741,7 @@ async function runAbilityJudge(name, { reason = '' } = {}) {
             characterCard: getCardContext(),
             persona: ctx.personaDescription,
             transcript: formatTranscript(chat, { startIndex: Math.max(0, chat.length - 10), userName: ctx.name1, characterName: ctx.name2, maximumCharacters: 12_000 }),
+            settings: { communication: worldCommunication() },
         });
         let payload;
         if (typeof state.judgeStub === 'function') payload = await state.judgeStub(messages, name);
@@ -3718,7 +4749,7 @@ async function runAbilityJudge(name, { reason = '' } = {}) {
         else payload = (await requestGamePatch(settings, messages, undefined, 'abilities')).payload;
         if (currentChatId() !== chatId) return false;
         const gameState = normalizeGameState(store.game);
-        const normalized = normalizeGameRecords(payload, gameContext(gameState, { playerName: ctx.name1, entities: store.entities }), { source: 'judge' });
+        const normalized = normalizeGameRecords(payload, gameContext(gameState, { playerName: ctx.name1, entities: store.entities }), { source: 'judge', communication: worldCommunication() });
         ensureJudgedRecords(normalized.ops, name);
         const at = Math.max(0, chat.length - 1);
         store.game = applyGameOperations(store.game, normalized.ops, { messageIndex: at, source: 'judge', rejected: normalized.rejected }).state;
@@ -3768,7 +4799,10 @@ async function flushPrivateThreads() {
             send_date: timestamp,
             mes: text,
             extra: {
-                [PRIVATE_EXTRA_KEY]: { person: thread.person, channel: thread.channel, key: thread.key, lines: pending.length, outcome: thread.outcome },
+                [PRIVATE_EXTRA_KEY]: {
+                    person: thread.person, channel: thread.channel, key: thread.key, lines: pending.length, outcome: thread.outcome,
+                    ...(pending.some(bubble => bubble.picture) ? { pictures: pending.filter(bubble => bubble.picture).map(bubble => ({ id: bubble.picture.id })) } : {}),
+                },
                 api: 'innerlore',
                 model: 'private-chat',
             },
@@ -3813,9 +4847,10 @@ function decoratePrivateMessages() {
         const info = chat[index]?.extra?.[PRIVATE_EXTRA_KEY];
         const textNode = element.querySelector('.mes_text');
         if (!info || !textNode || textNode.querySelector('.il-private-card')) continue;
-        textNode.innerHTML = renderPrivateCard(chat[index].mes, { playerName: ctx.name1, channel: info.channel });
+        textNode.innerHTML = renderPrivateCard(chat[index].mes, { playerName: ctx.name1, channel: info.channel, pictures: info.pictures });
         element.classList.add('il-private-message');
     }
+    fillPictureSlots(document.getElementById('chat'));
 }
 
 /** The person's page: the ways to talk to them, and their gifts. */
@@ -3834,6 +4869,7 @@ function fillEntityTalk(popup) {
     const hints = [];
     for (const channel of CHANNEL_KEYS) {
         const way = availability[channel];
+        if (way.off) continue;
         const button = document.createElement('button');
         button.type = 'button';
         button.className = `il-entity-talk-btn is-${channel}${way.ok ? '' : way.judge ? ' is-unknown' : ' is-off'}`;
@@ -3843,6 +4879,14 @@ function fillEntityTalk(popup) {
         button.addEventListener('click', () => void openPrivateChat(name, channel));
         buttons.append(button);
         if (!way.ok) hints.push(way.judge ? `${CHANNELS[channel].label}: ${way.reason}.` : `${CHANNELS[channel].label}: ${way.reason}.`);
+        // How a mind contact stands: agreed, guarded, or beyond their guard.
+        else if (channel === 'mind' && way.access) {
+            const access = way.access;
+            hints.push(access.consented ? `Mind: ${name} welcomes your contact.`
+                : access.overwhelming ? `Mind: your reach is beyond anything ${name} could shut out.`
+                    : access.canBlock ? `Mind: ${name}'s mind is guarded; they can shut you out.`
+                        : `Mind: ${name} cannot shut you out, but may not answer.`);
+        }
     }
     const giftText = gifts.length ? `Gifts: ${gifts.map(gift => `${gift.name} (${gift.tier})`).join(', ')}.` : judged ? 'No notable gifts.' : '';
     section.querySelector('.il-entity-talk-hint').textContent = [giftText, ...hints].filter(Boolean).join(' ');
@@ -3870,9 +4914,12 @@ function refreshEntityTalk() {
 
 /** `window.InnerLore.test`: the hooks the UI harness drives private conversations with. */
 function publishExtensionApi() {
-    if (typeof window === 'undefined') return;
-    const api = window.InnerLore && typeof window.InnerLore === 'object' ? window.InnerLore : {};
+    // The page publishes on window; under Node (the tests) on globalThis.
+    const host = typeof window !== 'undefined' ? window : globalThis;
+    const api = host.InnerLore && typeof host.InnerLore === 'object' ? host.InnerLore : {};
     api.version = EXTENSION_VERSION;
+    // A world's rules for messages and mind-speech: the shell's World tab and New World flow use these.
+    api.communication = Object.freeze({ defaults: COMMUNICATION_DEFAULTS, normalize: normalizeCommunication, defaultRules: defaultCommunicationRules, current: () => worldCommunication() });
     api.test = Object.freeze({
         openEntity: name => { showEntityCard(name, 'details'); return true; },
         people: () => knownPeopleNames(),
@@ -3921,6 +4968,20 @@ function publishExtensionApi() {
             const store = getChatStore();
             return store ? { needsRebuild: Boolean(store.needsRebuild), lastProcessedIndex: store.lastProcessedIndex, journal: normalizeGameState(store.game).journal.length, rebuilding: Boolean(runtime.rebuilding), queued: Boolean(runtime.historyRebuildQueued) } : null;
         },
+        /** The server-side jobs of the open world as the page knows them, and the push channel's state. */
+        serverJobs: () => [...runtime.serverJobs.values()],
+        /** A manual rebuild (what the Rebuild button does after its confirmation). */
+        rebuild: () => rebuildFromChat({ automatic: false }),
+        /** Exchanges told in prose that await the player's word, and the way to answer them. */
+        pendingTrades: () => structuredClone(pendingTrades()),
+        confirmTrade: (id, accept = true) => confirmPendingTrade(id, accept),
+        serverEvents: () => ({ status: runtime.serverEvents?.status || 'none', connected: Boolean(runtime.serverEvents?.connected), clientId: runtime.clientId, available: serverJobsAvailable() }),
+        submitJob: (kind, options) => submitServerJob(kind, options),
+        revision: () => runtime.storageRevision,
+        /** Whether a story is being told: the last generation's id, the request in flight, and whether that claim is fresh. */
+        storyState: () => ({ last: runtime.activeStoryGenerationId, inFlight: Boolean(runtime.storyRequestInFlight), fresh: storyClaimFresh() }),
+        portraits: () => structuredClone(portraitRecords()),
+        pictures: () => structuredClone(pictureRecords()),
         /** Test clean-up: lift the rebuild quarantine a deleted test message provoked (nothing processed was touched). */
         clearRebuild: async () => {
             const store = getChatStore();
@@ -3935,7 +4996,7 @@ function publishExtensionApi() {
             return true;
         },
     });
-    window.InnerLore = api;
+    host.InnerLore = api;
 }
 
 // --- Voice narration -------------------------------------------------------------
@@ -5054,13 +6115,46 @@ function beginTurnActions(generationType) {
     }
 }
 
-/** Whether the story model is offered the game tools on this connection. */
-function gameToolsOffered() {
+/**
+ * What exchanges the player's newest message makes, read from their own
+ * words (game-actions.js playerExchangeIntent). The game tools are offered
+ * only on a turn that makes one, and a tool call must match it: the narrator
+ * never moves the player's coin or belongings on its own initiative.
+ */
+function turnExchangeIntent() {
+    const chat = context().chat || [];
+    const playerIndex = lastPlayerMessageIndex(chat);
+    const text = playerIndex >= 0 ? String(chat[playerIndex]?.mes || '') : '';
+    const cached = runtime.turnIntent;
+    if (cached && cached.index === playerIndex && cached.text === text) return cached.intent;
+    let previousText = '';
+    for (let index = playerIndex - 1; index >= 0; index--) {
+        const message = chat[index];
+        if (message && !message.is_user && !message.is_system && cleanString(message.mes)) {
+            previousText = String(message.mes);
+            break;
+        }
+    }
+    const store = getChatStore();
+    const units = store ? (normalizeGameState(store.game).currency?.units || []) : [];
+    const currencyWords = units.flatMap(unit => [unit?.name, unit?.plural, unit?.abbreviation]).filter(Boolean);
+    const intent = playerExchangeIntent(text, { previousText, currencyWords });
+    runtime.turnIntent = { index: playerIndex, text, intent };
+    return intent;
+}
+
+/** Whether the story model can be offered the game tools on this connection at all. */
+function gameToolsAvailable() {
     const settings = getSettings();
     if (!settings.enabled || settings.gameEnabled === false || settings.gameToolsEnabled === false) return false;
     if (storyIsTextCompletion()) return false;
     const ctx = context();
     return ctx.mainApi === 'openai' && Boolean(ctx.chatCompletionSettings?.function_calling);
+}
+
+/** Whether the story model is offered the game tools this turn: available, and the player's words make an exchange. */
+function gameToolsOffered() {
+    return gameToolsAvailable() && turnExchangeIntent().any;
 }
 
 /** What the packet tells the narrator about this turn's actions and the tools. */
@@ -5100,10 +6194,31 @@ async function applyGameActionsNow(actions, { via = 'tool' } = {}) {
     const at = Math.max(0, turn.playerIndex);
     const replyIndex = turn.reply >= 0 ? turn.reply : ctx.chat.length;
     const outcomes = [];
+    // The narrator's calls (function tools or text calls) must match what the
+    // player's own message does; the trade screen is the player acting.
+    const intent = via === 'tool' || via === 'text' ? turnExchangeIntent() : null;
     for (const action of actions) {
+        if (intent && !actionConsented(action?.kind, intent)) {
+            const outcome = {
+                ok: false,
+                kind: action?.kind,
+                action,
+                text: '',
+                refused: 'consent',
+                reason: `${describeAction(action)}: the player has not chosen to do this. Do not narrate it as done; let the other party ask or offer, and leave the choice to the player.`,
+            };
+            outcomes.push(outcome);
+            turn.outcomes.push(outcome);
+            log(`Game action (${via}) refused, not the player's choice: ${describeAction(action)}`);
+            continue;
+        }
         const result = resolveGameAction(store.game, action, gameActionContext(store));
         const outcome = result.outcome;
         if (outcome.ok && result.ops.length) {
+            // A question still waiting about this same exchange is answered by doing it.
+            const pending = Array.isArray(store.game.pending) ? store.game.pending : [];
+            const answered = pending.filter(entry => pendingOps([entry]).some(op => result.ops.some(done => sameExchangeOp(op, done, store.game))));
+            if (answered.length) store.game.pending = pending.filter(entry => !answered.includes(entry));
             if (actionAlreadyApplied(store.game, result.ops, at)) {
                 outcome.text = `${outcome.text} (already applied this turn)`;
                 outcome.repeated = true;
@@ -5254,11 +6369,6 @@ function resolvePanelActions() {
     void applyGameActionsNow(matched.map(item => item.action), { via: 'panel' });
 }
 
-/** What the game system applied while the passage was written, for the ledger to skip. */
-function alreadyRecordedLines(store, start, end, playerName) {
-    const game = normalizeGameState(store.game);
-    return actionEntriesInRange(game, start, end).map(entry => entryText(entry, game, playerName)).filter(Boolean);
-}
 
 /**
  * Tool calls need SillyTavern's function calling on, and prompt
@@ -5373,91 +6483,11 @@ function registerContextMacros() {
     }
 }
 
-function lastCompletedStoryIndex(messages, endIndex = messages.length - 1) {
-    let index = Math.min(messages.length - 1, endIndex);
-    while (index >= 0) {
-        const message = messages[index];
-        if (message
-            && !message.is_user
-            && (!message.is_system || message.extra?.sc_ghosted === true)
-            && cleanString(message.mes)) return index;
-        index--;
-    }
-    return -1;
-}
 
-function lastPlayerMessageIndex(messages, endIndex = messages.length - 1) {
-    for (let index = Math.min(messages.length - 1, endIndex); index >= 0; index--) {
-        const message = messages[index];
-        if (message?.is_user && !message.is_system && cleanString(message.mes)) return index;
-    }
-    return -1;
-}
 
-function firstCompletedStoryIndex(messages, startIndex = 0, endIndex = messages.length - 1) {
-    const finalIndex = Math.min(messages.length - 1, endIndex);
-    for (let index = Math.max(0, startIndex); index <= finalIndex; index++) {
-        const message = messages[index];
-        if (message
-            && !message.is_user
-            && (!message.is_system || message.extra?.sc_ghosted === true)
-            && cleanString(message.mes)) return index;
-    }
-    return -1;
-}
 
-function completedAssistantTurnCount(messages, startIndex = 0, endIndex = messages.length - 1) {
-    const finalIndex = Math.min(messages.length - 1, endIndex);
-    let count = 0;
-    for (let index = Math.max(0, startIndex); index <= finalIndex; index++) {
-        const message = messages[index];
-        if (message
-            && !message.is_user
-            && (!message.is_system || message.extra?.sc_ghosted === true)
-            && cleanString(message.mes)) count++;
-    }
-    return count;
-}
 
-/**
- * End a rebuild batch on a completed story reply. This keeps a player action
- * and the reply that resolves it in the same curator range even when the raw
- * numeric lookback boundary falls between them.
- */
-function completedRebuildBatchEnd(messages, startIndex, targetIndex, maximumMessages) {
-    const candidateEnd = Math.min(
-        targetIndex,
-        startIndex + Math.max(1, Number(maximumMessages) || 1) - 1,
-    );
-    const completedAtOrBeforeBoundary = lastCompletedStoryIndex(messages, candidateEnd);
-    if (completedAtOrBeforeBoundary >= startIndex) return completedAtOrBeforeBoundary;
-    return firstCompletedStoryIndex(messages, startIndex, targetIndex);
-}
 
-function boundedProgressionEnd(messages, startIndex, candidateEnd, maximumMessages, maximumCharacters = 85_000) {
-    if (candidateEnd < startIndex) return -1;
-    let characters = 0;
-    let lastCompleted = -1;
-    let relevantMessages = 0;
-    const messageLimit = Math.max(2, maximumMessages);
-    for (let index = startIndex; index <= candidateEnd; index++) {
-        const message = messages[index];
-        const relevant = message
-            && (!message.is_system || message.extra?.sc_ghosted === true)
-            && cleanString(message.mes);
-        if (!relevant) continue;
-        if (lastCompleted >= startIndex && relevantMessages >= messageLimit) break;
-        const messageCharacters = cleanString(message?.mes, 30_000).length + 160;
-        if (lastCompleted >= startIndex && characters + messageCharacters > maximumCharacters) break;
-        relevantMessages++;
-        characters += messageCharacters;
-        if (message
-            && !message.is_user
-            && (!message.is_system || message.extra?.sc_ghosted === true)
-            && cleanString(message.mes)) lastCompleted = index;
-    }
-    return lastCompleted;
-}
 
 function updateInjection({ isContinue = false } = {}) {
     const settings = getSettings();
@@ -5988,6 +7018,8 @@ function applySettingsToUI() {
         il_assisted_background: settings.assistedBackground || 'auto',
         il_cast_cards: settings.castCardsEnabled !== false,
         il_private_chat_enabled: settings.privateChatEnabled !== false,
+        il_private_chat_pictures: settings.privateChatPictures !== false,
+        il_private_chat_moments: settings.privateChatMomentPictures !== false,
         il_private_chat_temperature: settings.privateChatTemperature ?? 0.8,
         il_private_chat_tokens: settings.privateChatMaximumTokens ?? 220,
         il_private_chat_custom_instructions: settings.privateChatCustomInstructions || '',
@@ -6017,6 +7049,7 @@ function applySettingsToUI() {
         il_portrait_url: settings.portraitServerUrl,
         il_portrait_style: settings.portraitStyle,
         il_portrait_negative: settings.portraitNegative,
+        il_portrait_background: settings.portraitBackground ?? PORTRAIT_DEFAULTS.background,
         il_portrait_steps: settings.portraitSteps,
         il_portrait_cfg: settings.portraitCfg,
     };
@@ -6793,647 +7826,11 @@ function seedNewStoreFromCard(store) {
     return seeded;
 }
 
-async function analyzeRange(targetStore, startIndex, endIndex, options = {}) {
-    const settings = getSettings();
-    const ctx = context();
-    targetStore.progression = normalizeProgressionState(targetStore.progression);
-    const curatorEnabled = (settings.innerSelfEnabled || settings.autoLoreEnabled)
-        && options.curatorEnabled !== false;
-    const curatorStart = Math.max(startIndex, targetStore.lastProcessedIndex + 1);
-    // Never curate a dangling player action or an empty swipe placeholder as a
-    // completed exchange. The next assistant reply will include it again from
-    // the unchanged watermark.
-    const curatorEnd = lastCompletedStoryIndex(ctx.chat, endIndex);
-    const progressionStart = Math.max(0, targetStore.progression.lastProcessedIndex + 1);
-    const progressionCandidateEnd = lastCompletedStoryIndex(ctx.chat, endIndex);
-    const progressionPending = progressionCandidateEnd >= progressionStart
-        ? progressionCandidateEnd - progressionStart + 1
-        : 0;
-    const progressionAssistantTurns = completedAssistantTurnCount(
-        ctx.chat,
-        progressionStart,
-        progressionCandidateEnd,
-    );
-    const progressionThreshold = options.progressionMode === 'rebuild'
-        ? Math.max(1, Number(settings.progressionRebuildBatchMessages) || 30)
-        : Math.max(1, Number(settings.progressionEveryAssistantTurns) || 2);
-    const progressionBatchLimit = options.progressionMode === 'rebuild'
-        ? Math.max(progressionThreshold, Number(settings.lookbackMessages) || 10)
-        : Math.max(2, Number(settings.lookbackMessages) || 10);
-    let progressionEnd = boundedProgressionEnd(
-        ctx.chat,
-        progressionStart,
-        progressionCandidateEnd,
-        progressionBatchLimit,
-    );
-    const pendingCreationBoundary = Object.values(targetStore.progression.eventDefinitions || {})
-        .filter(definition => targetStore.progression.eventRuntime?.[definition.id]?.creationAnchorPending)
-        .map(definition => definition.createdAtMessage)
-        .filter(index => Number.isInteger(index) && index >= progressionStart && index <= progressionEnd)
-        .sort((a, b) => a - b)[0];
-    const progressionAnchorFlush = Number.isInteger(pendingCreationBoundary);
-    if (progressionAnchorFlush) progressionEnd = pendingCreationBoundary;
-    const runProgression = settings.worldProgressionEnabled
-        && options.progressionEnabled !== false
-        && progressionPending > 0
-        && progressionEnd >= progressionStart
-        && (
-            (options.progressionMode === 'rebuild'
-                ? progressionPending >= progressionThreshold
-                : progressionAssistantTurns >= progressionThreshold)
-            || options.progressionFlush === true
-            || progressionAnchorFlush
-        );
-    const actualStart = Math.min(
-        curatorEnabled && curatorStart <= curatorEnd ? curatorStart : Number.POSITIVE_INFINITY,
-        runProgression ? progressionStart : Number.POSITIVE_INFINITY,
-    );
-    const actualEnd = Math.max(
-        curatorEnabled ? curatorEnd : -1,
-        runProgression ? progressionEnd : -1,
-    );
-    const sourceSnapshot = Number.isFinite(actualStart) && actualEnd >= actualStart
-        ? snapshotMessageRange(ctx.chat, actualStart, actualEnd)
-        : {};
-    const transcript = curatorEnabled && curatorStart <= curatorEnd
-        ? formatTranscript(ctx.chat, {
-            startIndex: curatorStart,
-            endIndex: curatorEnd,
-            userName: ctx.name1,
-            characterName: ctx.name2,
-            maximumCharacters: 55_000,
-        })
-        : '';
-    const progressionTranscript = runProgression
-        ? formatTranscript(ctx.chat, {
-            startIndex: progressionStart,
-            endIndex: progressionEnd,
-            userName: ctx.name1,
-            characterName: ctx.name2,
-            maximumCharacters: 90_000,
-        })
-        : '';
 
-    // Game ledger: the same completed range as the curator, from its own
-    // watermark. The scene planner prepares where the player is and can go.
-    targetStore.game = normalizeGameState(targetStore.game);
-    const gameEnabled = settings.gameEnabled !== false && settings.gameLedgerEnabled !== false
-        && options.gameEnabled !== false;
-    const gameStart = Math.max(startIndex, targetStore.game.lastProcessedIndex + 1);
-    const gameEnd = lastCompletedStoryIndex(ctx.chat, endIndex);
-    const gameTranscript = gameEnabled && gameStart <= gameEnd
-        ? formatTranscript(ctx.chat, {
-            startIndex: gameStart,
-            endIndex: gameEnd,
-            userName: ctx.name1,
-            characterName: ctx.name2,
-            maximumCharacters: 40_000,
-        })
-        : '';
-    // The ledger may read from before the curator's range; a swipe or edit
-    // there during the pass discards its result too.
-    const gameSnapshot = gameTranscript ? snapshotMessageRange(ctx.chat, gameStart, gameEnd) : {};
-    const gameScene = settings.gameEnabled !== false && gameEnd >= 0
-        ? deriveSceneState(ctx.chat, targetStore, {
-            currentIndex: gameEnd,
-            playerName: ctx.name1,
-            lookbackMessages: settings.sceneLookbackMessages ?? 4,
-        })
-        : null;
-    const plannerWanted = options.plannerEnabled === true && settings.gameEnabled !== false
-        && settings.scenePlannerEnabled !== false && gameEnd >= 0;
-    // A brand-new world has no places until the curator reads the opening,
-    // so the planner waits for those first records instead of guessing.
-    const deferPlanner = plannerWanted && Boolean(transcript)
-        && !Object.values(targetStore.entities || {}).some(record => record?.type === 'location' && record.enabled !== false);
-    const plannerPlan = plannerWanted && !deferPlanner && gameScene
-        ? plannerPlanFor(targetStore, gameScene, gameEnd, settings, ctx.name1)
-        : null;
 
-    // The passes commonly share one connection profile, so by default they
-    // run one after another and a provider with tight concurrency limits never
-    // sees two at once. With parallel passes on they all leave together (the
-    // Claude bridge's agent pool runs them inside one request slot). Each
-    // result is committed independently below, so a successful subsystem
-    // advances even when another fails.
-    const signal = runtime.controller?.signal;
-    const tasks = [];
-    // With a minds profile the curator is two narrower requests: people,
-    // places and whereabouts on the curator profile, NPC minds on the minds
-    // profile, side by side (on two providers, truly at once).
-    const splitMinds = Boolean(transcript) && Boolean(settings.mindsConnectionProfileId)
-        && settings.innerSelfEnabled && settings.autoLoreEnabled;
-    const curatorRequest = passSettings => requestJsonPatch(passSettings, buildAnalysisMessages({
-        transcript,
-        store: targetStore,
-        currentIndex: curatorEnd,
-        characterCard: getCardContext(),
-        playerName: ctx.name1,
-        recentExpressionText: collectRecentStoryExpressions(ctx.chat, {
-            endIndex: curatorEnd,
-            maximumReplies: 3,
-            maximumCharacters: 1_600,
-        }),
-        assisted: assistedFor(passSettings.connectionProfileId || settings.connectionProfileId),
-        settings: passSettings,
-    }), signal);
-    if (transcript && splitMinds) {
-        tasks.push(['curator', () => curatorRequest({ ...settings, innerSelfEnabled: false, telemetryKind: 'curator' })]);
-        tasks.push(['minds', () => curatorRequest({
-            ...settings,
-            autoLoreEnabled: false,
-            connectionProfileId: settings.mindsConnectionProfileId,
-            telemetryKind: 'minds',
-        })]);
-    } else if (transcript) {
-        tasks.push(['curator', () => curatorRequest(settings)]);
-    }
-    if (progressionTranscript) {
-        tasks.push(['progression', () => {
-            const eventEvaluationDefinitions = triggerEventAgentSnapshot(targetStore.progression, {
-                currentIndex: progressionEnd,
-            });
-            const eventEvaluationKeys = eventEvaluationDefinitions.map(definition => definition.key);
-            const progressionMessages = buildProgressionMessages({
-                transcript: progressionTranscript,
-                store: targetStore,
-                progression: targetStore.progression,
-                currentIndex: progressionEnd,
-                characterCard: getCardContext(),
-                playerName: ctx.name1,
-                assisted: assistedFor(settings.progressionConnectionProfileId || settings.connectionProfileId),
-                settings,
-            });
-            targetStore.progression.lastTriggerEvaluatorRequest = {
-                startIndex: progressionStart,
-                endIndex: progressionEnd,
-                eventKeys: eventEvaluationKeys,
-                eventPayloads: eventEvaluationDefinitions.map(definition => ({
-                    definitionId: definition.id,
-                    key: definition.key,
-                    payload: JSON.stringify(definition, null, 2),
-                })),
-                promptCharacters: progressionMessages.reduce((sum, message) => sum + message.content.length, 0),
-                requestedAt: Date.now(),
-            };
-            return requestProgressionPatch(
-                settings,
-                progressionMessages,
-                signal,
-                {
-                    expectedEventKeys: eventEvaluationKeys,
-                    expectedEventContracts: Object.fromEntries(eventEvaluationDefinitions.map(definition => [
-                        definition.key,
-                        {
-                            createdAtMessage: definition.created_at_message,
-                            actionCondition: definition.action_condition,
-                            actorScope: definition.actor_scope,
-                            actorName: definition.actor_name,
-                            cancellationCondition: definition.cancellation_condition,
-                            revealCondition: definition.reveal_condition,
-                            resolutionCondition: definition.resolution_condition,
-                        },
-                    ])),
-                    passageStartIndex: progressionStart,
-                    passageEndIndex: progressionEnd,
-                    playerName: ctx.name1,
-                    assisted: assistedFor(settings.progressionConnectionProfileId || settings.connectionProfileId),
-                },
-            );
-        }]);
-    }
-    const ledgerAssisted = Boolean(gameTranscript) && assistedFor(settings.gameConnectionProfileId || settings.connectionProfileId);
-    if (gameTranscript) {
-        tasks.push(['game', () => requestGamePatch(settings, buildLedgerMessages({
-            game: targetStore.game,
-            store: targetStore,
-            scene: gameScene,
-            playerName: ctx.name1,
-            transcript: gameTranscript,
-            characterCard: getCardContext(),
-            settings,
-            assisted: ledgerAssisted,
-            alreadyRecorded: alreadyRecordedLines(targetStore, gameStart, gameEnd, ctx.name1),
-        }), signal, 'game')]);
-    }
-    if (plannerPlan) {
-        tasks.push(['planner', () => requestGamePatch(settings, plannerMessagesFor(targetStore, plannerPlan), signal, 'planner')]);
-    }
-    const outcomes = await runBackgroundTasks(tasks, settings.parallelBackgroundPasses === true, signal);
-    for (const outcome of Object.values(outcomes)) {
-        if (outcome.error?.name === 'AbortError') throw outcome.error;
-    }
-    if (signal?.aborted) throw new DOMException('InnerLore pass stopped', 'AbortError');
-    const response = outcomes.curator?.value ?? null;
-    const curatorError = outcomes.curator?.error ?? null;
-    const mindsResponse = splitMinds ? outcomes.minds?.value ?? null : response;
-    const mindsError = splitMinds ? outcomes.minds?.error ?? null : null;
-    const progressionResponse = outcomes.progression?.value ?? null;
-    const progressionError = outcomes.progression?.error ?? null;
-    const gameResponse = outcomes.game?.value ?? null;
-    const gameError = outcomes.game?.error ?? null;
-    const plannerResponse = outcomes.planner?.value ?? null;
-    const plannerError = outcomes.planner?.error ?? null;
-    if (!messageRangeMatchesSnapshot(ctx.chat, sourceSnapshot) || !messageRangeMatchesSnapshot(ctx.chat, gameSnapshot)) {
-        targetStore.needsRebuild = true;
-        const error = new Error('Chat history changed while InnerLore was analyzing it; the stale result was discarded.');
-        error.name = 'InnerLoreHistoryChangedError';
-        throw error;
-    }
-    const payload = response?.payload && typeof response.payload === 'object' ? response.payload : {};
-    const entityOperations = payload.entities || payload.entity_operations || [];
-    const alignedEntityOperations = alignExplicitLocationOperations(targetStore, entityOperations, transcript);
-    // The player's record anchors the scene and must survive every cap; a
-    // provider that never writes one still gets it, and a mind written for
-    // the player under any of their names is dropped.
-    if (settings.autoLoreEnabled) ensurePlayerEntity(targetStore, { name: ctx.name1, persona: ctx.personaDescription, messageIndex: curatorEnd });
-    const playerKeys = playerEntityKeys(targetStore, ctx.name1);
-    const mindPayload = mindsResponse?.payload && typeof mindsResponse.payload === 'object' ? mindsResponse.payload : {};
-    const mindOperations = (mindPayload.minds || mindPayload.mind_operations || [])
-        .filter(operation => !playerKeys.has(canonicalNameKey(operation?.character)));
 
-    const entityResult = response && settings.autoLoreEnabled
-        ? mergeEntityOperations(targetStore, alignedEntityOperations, {
-            enabledTypes: settings.enabledEntityTypes,
-            minimumImportance: settings.minimumImportance,
-            maximumOperations: settings.maximumEntitiesPerPass,
-            messageIndex: curatorEnd,
-        })
-        : { created: 0, updated: 0, skipped: alignedEntityOperations.length, changedIds: [] };
-    const mindResult = mindsResponse && settings.innerSelfEnabled
-        ? mergeMindOperations(targetStore, mindOperations, {
-            maximumOperations: settings.maximumMindOperationsPerPass,
-            maximumThoughts: settings.maximumThoughtsPerBrain,
-            maximumThoughtChanges: settings.maximumThoughtChangesPerBrain,
-            minimumStoryFacetObservations: settings.minimumStoryFacetObservations,
-            consolidationSimilarity: settings.brainConsolidationSimilarity,
-            maximumSceneThoughts: settings.maximumSceneThoughtsPerBrain,
-            messageIndex: curatorEnd,
-        })
-        : { created: 0, updated: 0, skipped: mindOperations.length, changedIds: [] };
-    if (mindsResponse && settings.innerSelfEnabled && structuredFoundationBrains(targetStore).length) {
-        // Readiness requires all four real card-backed capabilities; any JSON
-        // response by itself is not enough to bless the narration path.
-        targetStore.expressionFoundationVersion = EXPRESSION_FOUNDATION_VERSION;
-    }
-    const mentionResult = transcript ? refreshMentionRecency(targetStore, transcript, curatorEnd, {
-        entities: settings.autoLoreEnabled,
-        brains: settings.innerSelfEnabled,
-    }) : { entities: 0, brains: 0 };
 
-    let progressionResult = null;
-    if (progressionResponse) {
-        progressionResult = applyProgressionPatch(targetStore.progression, progressionResponse.payload, {
-            messageIndex: progressionEnd,
-            passageStartIndex: progressionStart,
-            passageText: progressionTranscript,
-            playerName: ctx.name1,
-            autonomy: settings.progressionAutonomy,
-            maximumGoals: settings.progressionMaximumGoals,
-            maximumProcesses: settings.progressionMaximumProcesses,
-            maximumEvents: settings.progressionMaximumEvents,
-            evaluationCoverageRequired: true,
-            deliveryMaximumAttempts: settings.triggerDeliveryMaximumAttempts,
-        });
-        targetStore.progression = progressionResult.state;
-        const progressionSnapshot = snapshotMessageRange(ctx.chat, progressionStart, progressionEnd);
-        for (const [index, fingerprint] of Object.entries(progressionSnapshot)) {
-            if (fingerprint) targetStore.progression.processedFingerprints[index] = fingerprint;
-        }
-        targetStore.progression.lastProcessedIndex = Math.max(
-            targetStore.progression.lastProcessedIndex,
-            progressionEnd,
-        );
-        targetStore.progression.lastRunStats = {
-            ...targetStore.progression.lastRunStats,
-            startIndex: progressionStart,
-            endIndex: progressionEnd,
-            repaired: progressionResponse.repaired,
-            codec: codecStatsFromResponse(progressionResponse),
-        };
-        targetStore.progression.lastError = '';
-    } else if (progressionError) {
-        targetStore.progression.lastError = cleanString(progressionError.message || String(progressionError), 1_000);
-    } else if (settings.worldProgressionEnabled
-        && progressionStart <= endIndex
-        && ctx.chat.slice(progressionStart, endIndex + 1).every(message => (
-            !message
-            || !cleanString(message.mes)
-            || (message.is_system && message.extra?.sc_ghosted !== true)
-        ))) {
-        const ignoredSnapshot = snapshotMessageRange(ctx.chat, progressionStart, endIndex);
-        for (const [index, fingerprint] of Object.entries(ignoredSnapshot)) {
-            if (fingerprint) targetStore.progression.processedFingerprints[index] = fingerprint;
-        }
-        targetStore.progression.lastProcessedIndex = endIndex;
-    }
 
-    const gameCommit = commitGamePasses(targetStore, {
-        ctx,
-        settings,
-        gameEnabled,
-        gameStart,
-        gameEnd,
-        gameTranscript,
-        gameScene,
-        gameResponse,
-        gameError,
-        ledgerAssisted,
-        plannerPlan,
-        plannerResponse,
-        plannerError,
-    });
-
-    const curatorSucceeded = !curatorEnabled || !transcript || Boolean(response);
-    if (curatorEnabled && curatorStart <= curatorEnd && curatorSucceeded) {
-        const curatorSnapshot = snapshotMessageRange(ctx.chat, curatorStart, curatorEnd);
-        for (const [index, fingerprint] of Object.entries(curatorSnapshot)) {
-            if (fingerprint) targetStore.processedFingerprints[index] = fingerprint;
-        }
-        targetStore.lastProcessedIndex = Math.max(targetStore.lastProcessedIndex, curatorEnd);
-    }
-    // After the curator's watermark moves, so the scene trusts its new record
-    // of where the player is rather than reading the opening's prose.
-    if (deferPlanner && response) {
-        const scene = deriveSceneState(ctx.chat, targetStore, {
-            currentIndex: gameEnd,
-            playerName: ctx.name1,
-            lookbackMessages: settings.sceneLookbackMessages ?? 4,
-        });
-        const plan = plannerPlanFor(targetStore, scene, gameEnd, settings, ctx.name1);
-        if (plan) {
-            try {
-                const reply = await requestGamePatch(settings, plannerMessagesFor(targetStore, plan), signal, 'planner');
-                gameCommit.plannerResult = commitPlannerResponse(targetStore, plan, reply, ctx.name1);
-            } catch (error) {
-                if (error?.name === 'AbortError' || signal?.aborted) throw error;
-                targetStore.game.planner = { ...targetStore.game.planner, lastError: cleanString(error?.message || String(error), 1_000) };
-            }
-        }
-    }
-    targetStore.lastRunAt = Date.now();
-    const curatorCodecStats = codecStatsFromResponse(response);
-    targetStore.lastRunStats = {
-        startIndex: Number.isFinite(actualStart) ? actualStart : -1,
-        endIndex: actualEnd,
-        entityResult,
-        mindResult,
-        mentionResult,
-        repaired: Boolean(response?.repaired),
-        codec: curatorCodecStats,
-        curatorError: curatorError ? cleanString(curatorError.message || String(curatorError), 1_000) : '',
-        mindsError: mindsError ? cleanString(mindsError.message || String(mindsError), 1_000) : '',
-        progressionResult: progressionResult?.state?.lastRunStats || null,
-        progressionError: progressionError ? cleanString(progressionError.message || String(progressionError), 1_000) : '',
-        gameResult: gameCommit.gameResult,
-        gameError: gameError ? cleanString(gameError.message || String(gameError), 1_000) : '',
-        plannerResult: gameCommit.plannerResult,
-        plannerError: plannerError ? cleanString(plannerError.message || String(plannerError), 1_000) : '',
-    };
-    targetStore.updatedAt = Date.now();
-
-    if (options.sync !== false && settings.autoLoreEnabled && entityResult.changedIds.length) {
-        await syncLorebook(targetStore, {
-            chatId: targetStore.chatId,
-            characterName: ctx.name2,
-            // Canonical reconciliation can collapse an automatically-created
-            // item into its authoritative location record. Remove only those
-            // now-missing extension-owned entries so the native lorebook does
-            // not keep injecting a ghost duplicate.
-            removeMissing: Boolean(entityResult.removedIds?.length),
-        });
-    }
-    if (options.persist !== false) await saveChatStore();
-    return {
-        entityResult,
-        mindResult,
-        mentionResult,
-        repaired: Boolean(response?.repaired),
-        codec: curatorCodecStats,
-        progressionResult,
-        curatorError,
-        progressionError,
-        gameResult: gameCommit.gameResult,
-        gameError,
-        plannerResult: gameCommit.plannerResult,
-        plannerError,
-        skipped: !response && !progressionResponse && !gameResponse && !plannerResponse,
-    };
-}
-
-/**
- * Run the background passes of one analysis, one after another or all at
- * once. Returns { name: { value } | { error } } for every pass that ran.
- */
-async function runBackgroundTasks(tasks, parallel, signal) {
-    const outcomes = {};
-    if (parallel && tasks.length > 1) {
-        const settled = await Promise.allSettled(tasks.map(([, run]) => run()));
-        tasks.forEach(([name], index) => {
-            outcomes[name] = settled[index].status === 'fulfilled'
-                ? { value: settled[index].value }
-                : { error: settled[index].reason };
-        });
-        return outcomes;
-    }
-    for (const [name, run] of tasks) {
-        try {
-            outcomes[name] = { value: await run() };
-        } catch (error) {
-            outcomes[name] = { error };
-            if (error?.name === 'AbortError' || signal?.aborted) break;
-        }
-    }
-    return outcomes;
-}
-
-function gamePlaceOf(scene, store) {
-    const name = cleanString(scene?.location?.name, 240);
-    if (!name) return null;
-    const entities = store?.entities || {};
-    return placeRefOf((scene.location.id && entities[scene.location.id]) || resolveLocationReference(entities, name), name);
-}
-
-/**
- * Commit the game ledger and scene planner results of one analysis. People
- * and objects the planner prepared earlier that the newest replies now show
- * are marked as introduced first, so a stage prepared in this same pass is
- * never mistaken for one the narrator has already used.
- */
-function commitGamePasses(targetStore, pass) {
-    const { ctx, settings } = pass;
-    let gameResult = null;
-    let plannerResult = null;
-    if (settings.gameEnabled === false || pass.gameEnd < 0) return { gameResult, plannerResult };
-    const place = gamePlaceOf(pass.gameScene, targetStore);
-
-    const introducedFrom = Math.max(0, (Number.isInteger(targetStore.game.introducedThrough) ? targetStore.game.introducedThrough : -1) + 1);
-    const storyText = ctx.chat.slice(introducedFrom, pass.gameEnd + 1)
-        .filter(message => message && !message.is_user && !message.is_system)
-        .map(message => message.mes)
-        .join('\n\n');
-    const introductions = introductionOperations(targetStore.game, storyText, place);
-    if (introductions.length) {
-        targetStore.game = applyGameOperations(targetStore.game, introductions, { messageIndex: pass.gameEnd, source: 'scene' }).state;
-    }
-    targetStore.game.introducedThrough = Math.max(introducedFrom - 1, pass.gameEnd);
-    // A person the lore has folded into another name keeps one standing.
-    const identityFolds = reconcileGameIdentities(targetStore.game, targetStore.entities);
-    if (identityFolds.length) {
-        targetStore.game = applyGameOperations(targetStore.game, identityFolds, { messageIndex: pass.gameEnd, source: 'lore' }).state;
-    }
-
-    const advanceLedger = () => {
-        for (const [index, fingerprint] of Object.entries(snapshotMessageRange(ctx.chat, pass.gameStart, pass.gameEnd))) {
-            if (fingerprint) targetStore.game.processedFingerprints[index] = fingerprint;
-        }
-        targetStore.game.lastProcessedIndex = Math.max(targetStore.game.lastProcessedIndex, pass.gameEnd);
-    };
-    if (pass.gameResponse) {
-        const context = gameContext(targetStore.game, { playerName: ctx.name1, entities: targetStore.entities, scenePlace: place });
-        // A smaller model's records must quote PASSAGE; the rest are dropped.
-        const grounded = pass.ledgerAssisted
-            ? groundedRecords(pass.gameResponse.payload, pass.gameTranscript)
-            : { payload: pass.gameResponse.payload, dropped: [] };
-        const normalized = normalizeGameRecords(grounded.payload, context, { source: 'ledger' });
-        // What the game system applied while the passage was written is not recorded twice.
-        const deduped = dropDuplicateLedgerOps(normalized.ops, actionEntriesInRange(targetStore.game, pass.gameStart, pass.gameEnd));
-        const applied = applyGameOperations(targetStore.game, deduped.ops, { messageIndex: pass.gameEnd, source: 'ledger', rejected: normalized.rejected });
-        targetStore.game = applied.state;
-        // The story's stated prices replace what the planner had guessed for the same kind of thing here.
-        const retired = supersededPlannerPrices(targetStore.game, applied.applied.map(entry => entry.op));
-        if (retired.length) targetStore.game = applyGameOperations(targetStore.game, retired, { messageIndex: pass.gameEnd, source: 'lore' }).state;
-        advanceLedger();
-        gameResult = {
-            startIndex: pass.gameStart,
-            endIndex: pass.gameEnd,
-            applied: applied.applied.length,
-            introduced: introductions.length,
-            ungrounded: grounded.dropped.length,
-            duplicates: deduped.dropped.length,
-            rejected: applied.rejected.slice(0, 12),
-            shortfall: applied.applied.reduce((sum, entry) => sum + (entry.shortfall || 0), 0),
-            retiredPrices: retired.length,
-            repaired: Boolean(pass.gameResponse.repaired),
-            codec: codecStatsFromResponse(pass.gameResponse),
-        };
-        targetStore.game.lastRunStats = { ...gameResult, at: Date.now() };
-        targetStore.game.lastError = '';
-    } else if (pass.gameError) {
-        targetStore.game.lastError = cleanString(pass.gameError.message || String(pass.gameError), 1_000);
-    } else if (pass.gameEnabled && pass.gameStart <= pass.gameEnd && !pass.gameTranscript) {
-        // Nothing readable in the range (hidden or empty messages): skip it.
-        advanceLedger();
-    }
-
-    if (pass.plannerResponse && pass.plannerPlan) {
-        plannerResult = commitPlannerResponse(targetStore, pass.plannerPlan, pass.plannerResponse, ctx.name1);
-    } else if (pass.plannerError) {
-        targetStore.game.planner = {
-            ...targetStore.game.planner,
-            lastError: cleanString(pass.plannerError.message || String(pass.plannerError), 1_000),
-        };
-    }
-    return { gameResult, plannerResult };
-}
-
-function codecStatsFromResponse(response) {
-    if (!response) return null;
-    const diagnostics = Array.isArray(response.parseDiagnostics) ? response.parseDiagnostics : [];
-    const normalizations = {};
-    for (const item of diagnostics) {
-        if (!item?.code) continue;
-        normalizations[item.code] = (normalizations[item.code] || 0) + 1;
-    }
-    return {
-        format: response.outputFormat === 'dsl' ? 'dsl' : 'json',
-        repaired: Boolean(response.repaired),
-        salvaged: diagnostics.some(item => (
-            item.code === 'truncated_tail_dropped' || item.code === 'missing_done_salvaged'
-        )),
-        crossFormat: diagnostics.some(item => item.code === 'cross_format_json_accepted'),
-        normalizations,
-        firstError: cleanString(response.firstError, 500),
-    };
-}
-
-function mergeCodecSignals(accumulator, codec) {
-    if (!codec || typeof codec !== 'object') return accumulator;
-    return {
-        seen: true,
-        format: codec.format === 'dsl' || accumulator.format === 'dsl' ? 'dsl' : 'json',
-        salvaged: accumulator.salvaged || Boolean(codec.salvaged),
-        crossFormat: accumulator.crossFormat || Boolean(codec.crossFormat),
-        repaired: accumulator.repaired || Boolean(codec.repaired),
-        normalizations: accumulator.normalizations
-            + Object.values(codec.normalizations || {}).reduce((sum, value) => sum + value, 0),
-    };
-}
-
-function summarizeRun(result) {
-    if (!result) return 'No narrative text required analysis.';
-    if (result.skipped && result.progressionError) {
-        return `World progression deferred (${result.progressionError.message || result.progressionError}).`;
-    }
-    if (result.skipped && result.gameError) return `Game ledger deferred (${result.gameError.message || result.gameError}).`;
-    if (result.skipped) return 'No narrative text required analysis.';
-    const entities = result.entityResult || {};
-    const minds = result.mindResult || {};
-    const progression = result.progressionResult;
-    const curatorText = result.curatorError
-        ? `; curator deferred (${result.curatorError.message || result.curatorError})`
-        : '';
-    const progressionText = progression
-        ? `; story clock +${formatClockRange({
-            minimumSeconds: progression.timeResult?.duration?.minimumSeconds || 0,
-            estimatedSeconds: progression.timeResult?.duration?.estimatedSeconds || 0,
-            maximumSeconds: progression.timeResult?.duration?.maximumSeconds || 0,
-        })}${progression.triggerEventResult?.transitions?.length
-            ? `; ${progression.triggerEventResult.transitions.length} editor event transition${progression.triggerEventResult.transitions.length === 1 ? '' : 's'}`
-            : ''}${progression.triggerEventResult?.deliveryConfirmed?.length
-            ? `; ${progression.triggerEventResult.deliveryConfirmed.length} event delivery confirmed`
-            : ''}${progression.triggerEventResult?.deliveryRetries?.length
-            ? `; ${progression.triggerEventResult.deliveryRetries.length} event delivery retry queued`
-            : ''}${progression.triggerEventResult?.deliveryFailures?.length
-            ? `; ${progression.triggerEventResult.deliveryFailures.length} event delivery needs manual review`
-            : ''}`
-        : result.progressionError
-            ? `; progression deferred (${result.progressionError.message || result.progressionError})`
-            : '';
-    const game = result.gameResult;
-    const gameText = game
-        ? `; game ledger ${game.applied} change${game.applied === 1 ? '' : 's'}${game.introduced ? `, ${game.introduced} prepared ${game.introduced === 1 ? 'thing' : 'things'} now in the story` : ''}${game.shortfall ? '; a payment was larger than the purse' : ''}`
-        : result.gameError
-            ? `; game ledger deferred (${result.gameError.message || result.gameError})`
-            : '';
-    const planner = result.plannerResult;
-    const plannerText = planner
-        ? `; planner prepared ${planner.places.length ? planner.places.join(', ') : 'nothing new'}${planner.startingKit ? ' and a starting kit' : ''}`
-        : result.plannerError
-            ? `; planner deferred (${result.plannerError.message || result.plannerError})`
-            : '';
-    const director = result.eventDirectorResult;
-    const directorText = director?.generated
-        ? `; Event Director ${director.definition ? 'armed' : 'proposed'} “${director.proposal?.title || 'event'}”`
-        : director?.error
-            ? `; Event Director deferred (${director.error.message || director.error})`
-            : '';
-    const codecTotals = [result.codec, progression?.state?.lastRunStats?.codec, director?.codec]
-        .reduce(mergeCodecSignals, {
-            seen: false, format: 'json', salvaged: false, crossFormat: false, repaired: false, normalizations: 0,
-        });
-    const codecParts = [];
-    if (codecTotals.salvaged) codecParts.push('salvaged a truncated response');
-    if (codecTotals.crossFormat) codecParts.push('accepted a JSON fallback');
-    if (codecTotals.normalizations) {
-        codecParts.push(`${codecTotals.normalizations} local normalization${codecTotals.normalizations === 1 ? '' : 's'}`);
-    }
-    if (codecTotals.repaired) codecParts.push('one repair round');
-    const codecText = codecParts.length
-        ? `; ${codecTotals.format === 'dsl' ? 'DSL' : 'JSON'}: ${codecParts.join(', ')}`
-        : '';
-    return `${entities.created || 0} lore entries created, ${entities.updated || 0} updated; ${minds.created || 0} minds created, ${minds.updated || 0} updated${curatorText}${progressionText}${gameText}${plannerText}${directorText}${codecText}.`;
-}
 
 function pendingAnalysisState(store = getChatStore()) {
     const settings = getSettings();
@@ -7456,25 +7853,7 @@ function pendingAnalysisState(store = getChatStore()) {
     };
 }
 
-/** The ledger runs after every completed reply it has not yet read. */
-function gameLedgerDue(store, settings, targetIndex) {
-    if (settings.gameEnabled === false || settings.gameLedgerEnabled === false || targetIndex < 0) return false;
-    const game = normalizeGameState(store?.game);
-    return game.lastProcessedIndex < targetIndex;
-}
 
-/**
- * A chat that existed before the game system was switched on is not read
- * from its first message: the ledger starts from the recent window, and the
- * planner gives the player a starting kit consistent with where things stand.
- */
-function adoptGameLedger(store, settings, targetIndex) {
-    if (settings.gameEnabled === false || !store) return;
-    store.game = normalizeGameState(store.game);
-    if (store.game.lastProcessedIndex >= 0 || store.game.journal.length) return;
-    const window = Math.max(2, Number(settings.lookbackMessages) || 10);
-    if (targetIndex >= window) store.game.lastProcessedIndex = targetIndex - window;
-}
 
 function clearAnalysisRetry() {
     clearTimeout(runtime.retryTimer);
@@ -7503,18 +7882,6 @@ function scheduleAnalysisRetry(store) {
     }, delay);
 }
 
-function throwForSubsystemFailure(result) {
-    const failures = [];
-    if (result?.curatorError) failures.push(`continuity curator: ${result.curatorError.message || result.curatorError}`);
-    if (result?.progressionError) failures.push(`world progression: ${result.progressionError.message || result.progressionError}`);
-    // A failed ledger keeps its watermark, so the retry re-reads the same
-    // replies. The scene planner is preparation only and simply runs again.
-    if (result?.gameError) failures.push(`game ledger: ${result.gameError.message || result.gameError}`);
-    if (!failures.length) return;
-    const error = new Error(failures.join('; '));
-    error.name = 'InnerLoreSubsystemError';
-    throw error;
-}
 
 // The story's claim on its request slot, with an expiry so a generation that
 // never reports back (typically a quiet one) cannot hold it forever.
@@ -7552,11 +7919,180 @@ function deferWhileStoryWrites(key, start) {
     return true;
 }
 
+/** What the pipeline needs from this page: the chat, the names, the card, and the way a request is sent. */
+function browserPassDeps(settings, signal) {
+    const ctx = context();
+    return {
+        chat: ctx.chat,
+        playerName: ctx.name1,
+        characterName: ctx.name2,
+        persona: ctx.personaDescription,
+        cardContext: getCardContext(),
+        settings: withWorldRules(settings),
+        signal,
+        requests: {
+            curator: (passSettings, messages, passSignal) => requestJsonPatch(passSettings, messages, passSignal),
+            progression: (passSettings, messages, passSignal, options) => requestProgressionPatch(passSettings, messages, passSignal, options),
+            game: (passSettings, messages, passSignal, task, options) => requestGamePatch(passSettings, messages, passSignal, task, options),
+        },
+        assisted: assistedFor,
+        schedule: scheduleBackgroundTasks,
+        hasFoundationBrains: store => structuredFoundationBrains(store).length > 0,
+        log: (...args) => console.warn(LOG_PREFIX, ...args),
+    };
+}
+
+/** One analysis range in this page: the pipeline, then the lorebook mirror and the save. */
+async function analyzeRange(targetStore, startIndex, endIndex, options = {}) {
+    const settings = getSettings();
+    const ctx = context();
+    const result = await analyzePassRange(targetStore, startIndex, endIndex, options, browserPassDeps(settings, runtime.controller?.signal));
+    if (options.sync !== false && settings.autoLoreEnabled && result.entityResult.changedIds.length) {
+        await syncLorebook(targetStore, {
+            chatId: targetStore.chatId,
+            characterName: ctx.name2,
+            // Canonical reconciliation can collapse an automatically-created
+            // item into its authoritative location record. Remove only those
+            // now-missing extension-owned entries so the native lorebook does
+            // not keep injecting a ghost duplicate.
+            removeMissing: Boolean(result.entityResult.removedIds?.length),
+        });
+    }
+    if (options.persist !== false) await saveChatStore();
+    return result;
+}
+
+function serverPassesAvailable() {
+    return serverJobsAvailable() && getSettings().serverPasses !== false;
+}
+
+/** The settings a server job carries: the pass settings without the page's registries. */
+function jobSettings(settings) {
+    const copy = { ...settings };
+    for (const key of ['storageRegistry', 'pendingStorageCleanups', 'pendingChatCleanups', 'narratorPromptTemplate', 'customCss']) delete copy[key];
+    // The open world's rules for messages and mind-speech: the planner and the ledger settle people's gifts by them.
+    copy.communication = worldCommunication();
+    return clone(copy);
+}
+
+/**
+ * The open world's rules for messages from afar and mind-speech: what the
+ * world switched on, what the player starts with, how well known mind-speech
+ * is, and the rules text. Outside the fork's worlds, the defaults (both on,
+ * the story decides).
+ */
+function worldCommunication() {
+    const world = typeof window !== 'undefined' && typeof window.InnerLoreShell?.activeWorld === 'function' ? window.InnerLoreShell.activeWorld() : null;
+    return normalizeCommunication(world?.communication);
+}
+
+/** Settings for a pass or a planner run in the page, with the world's rules. */
+function withWorldRules(settings) {
+    return { ...settings, communication: worldCommunication() };
+}
+
+/**
+ * A save of a world that fixes the player's device or gift starts with them:
+ * applied once, when the game has not settled them yet, at the opening.
+ */
+async function applyWorldStart(store = getChatStore()) {
+    if (!store) return false;
+    const state = normalizeGameState(store.game);
+    const ops = startingCommunicationOps(worldCommunication(), { deviceKnown: deviceOf(state).known, mindKnown: abilitiesKnown(state, 'player') });
+    if (!ops.length) return false;
+    store.game = applyGameOperations(store.game, ops, { messageIndex: 0, source: 'world' }).state;
+    log(`The world's rules start this save with: ${ops.map(op => op.note).join('; ')}.`);
+    try {
+        await saveChatStore({ reason: 'world-start' });
+    } catch (error) {
+        console.warn(`${LOG_PREFIX} Could not save the world's starting gifts:`, error);
+    }
+    updateInjection();
+    return true;
+}
+
+/**
+ * Hands a planned pass to the server: the chat, the settings, the connection
+ * records (ids and endpoints; keys stay in the secret store) and the names.
+ * The server reads the store itself, runs the same pipeline, commits onto the
+ * latest revision and pushes it back. Returns false when the job could not be
+ * handed over, so the page runs the pass itself.
+ */
+async function submitPassJob(plan, { silent = false } = {}) {
+    const settings = getSettings();
+    const ctx = context();
+    const ids = [...new Set([
+        settings.connectionProfileId, settings.mindsConnectionProfileId, settings.progressionConnectionProfileId,
+        settings.gameConnectionProfileId, settings.plannerConnectionProfileId, settings.fallbackConnectionProfileId,
+        settings.progressionFallbackConnectionProfileId,
+    ].filter(Boolean))];
+    const connections = {};
+    for (const id of ids) {
+        const record = connectionRecordForJob(id);
+        if (record) connections[id] = record;
+    }
+    if (!connections[settings.connectionProfileId]) return false;
+    const input = {
+        chat: trimChatForJob(ctx.chat),
+        settings: jobSettings(settings),
+        playerName: ctx.name1,
+        characterName: ctx.name2,
+        persona: ctx.personaDescription || '',
+        cardContext: getCardContext(),
+        connections,
+        force: Boolean(plan.force),
+        silent,
+    };
+    const submitted = await submitServerJob('pass', { key: '', input, replace: true });
+    if (!submitted?.jobId) return false;
+    runtime.serverPassJobId = submitted.jobId;
+    runtime.serverPassRange = { start: plan.startIndex, end: plan.finalIndex };
+    setStatus('working', 'Analyzing', `Messages ${plan.startIndex}–${plan.finalIndex} are being read on the server…`);
+    updateUI();
+    return true;
+}
+
+/** A server pass finished: the store arrived (or will) through the push channel; the page settles the rest. */
+async function afterServerPass(job) {
+    if (job.status === 'done') {
+        const summary = job.result?.summary || 'Up to date';
+        if (job.result?.discarded) {
+            setStatus('working', 'Rebuild queued', 'The history changed while the server analysed it; the result was discarded.');
+        } else {
+            setStatus('success', 'Up to date', summary);
+            if (!job.input?.silent && !job.result?.skipped) toastr.success(summary, DISPLAY_NAME, { timeOut: 3_000 });
+        }
+        try {
+            await maybeRunAutomaticEventDirector();
+        } catch (error) {
+            console.warn(`${LOG_PREFIX} Event Director after a server pass failed:`, error);
+        }
+        updateInjection();
+        updateUI();
+        return;
+    }
+    if (job.status === 'failed') {
+        const store = getChatStore();
+        setStatus('error', 'Update failed', job.error || 'The server pass failed.');
+        if (store) scheduleAnalysisRetry(store);
+        updateUI();
+        return;
+    }
+    // Cancelled: a story preempted it, or the history it was reading changed;
+    // the next pass is planned from the chat as it is now.
+    const history = String(job.error || '').includes('history_changed') || runtime.serverPassCancelledForHistory;
+    runtime.serverPassCancelledForHistory = false;
+    setStatus('idle', 'Stopped', history
+        ? 'The messages being read changed; the update runs again on the new text.'
+        : 'The server pass was stopped; it runs again after the reply.');
+    updateUI();
+}
+
 async function processPending({ force = false, silent = false } = {}) {
     if (shellTestMode() && !force) return { skipped: true, reason: 'test_mode' };
     const settings = getSettings();
     if (!settings.enabled || (!settings.innerSelfEnabled && !settings.autoLoreEnabled && !settings.worldProgressionEnabled)) return;
-    if (runtime.processing || runtime.rebuilding || runtime.preparingFoundation) {
+    if (runtime.processing || runtime.rebuilding || runtime.preparingFoundation || runtime.serverRebuildJobId) {
         runtime.queued = true;
         return;
     }
@@ -7579,101 +8115,26 @@ async function processPending({ force = false, silent = false } = {}) {
     }
     const targetIndex = lastCompletedStoryIndex(ctx.chat);
     if (targetIndex < 0) return;
-    const decision = decideInnerLoreMaintenance({
-        messages: ctx.chat,
-        store,
-        settings,
-        targetIndex,
-    });
-    const runCurator = (settings.innerSelfEnabled || settings.autoLoreEnabled)
-        && (force || decision.curatorDue);
-    const runProgression = settings.worldProgressionEnabled
-        && (force || decision.progressionDue);
-    adoptGameLedger(store, settings, targetIndex);
-    const runGame = gameLedgerDue(store, settings, targetIndex);
-    if (!force && (!settings.autoUpdate || (!runCurator && !runProgression && !runGame))) return;
-
-    // Capture the completed-turn queue that this pass is responsible for. A
-    // newer story reply may arrive while the model request is in flight; its
-    // queue increment must survive this pass rather than being erased by a
-    // blanket reset on success.
-    const assistantTurnsCoveredAtStart = Math.max(0, Number(store.assistantTurnsSincePass) || 0);
+    const plan = planPass({ chat: ctx.chat, store, settings, targetIndex, force });
+    if (!plan.run) return;
+    if (serverPassesAvailable() && await submitPassJob(plan, { silent })) return;
 
     const runChatId = currentChatId();
-    const progressionStart = runProgression
-        ? normalizeProgressionState(store.progression).lastProcessedIndex + 1
-        : Number.POSITIVE_INFINITY;
-    const curatorStart = runCurator
-        ? store.lastProcessedIndex + 1
-        : Number.POSITIVE_INFINITY;
-    const gameStart = runGame
-        ? normalizeGameState(store.game).lastProcessedIndex + 1
-        : Number.POSITIVE_INFINITY;
-    let startIndex = Math.max(0, Math.min(curatorStart, progressionStart, gameStart));
-    const finalIndex = targetIndex;
-    if (startIndex > finalIndex) {
-        if (!force) return;
-        startIndex = Math.max(0, finalIndex - settings.lookbackMessages + 1);
-    }
-
     runtime.processing = true;
     runtime.controller = new AbortController();
-    setStatus('working', 'Analyzing', `Processing messages ${startIndex}–${finalIndex}…`);
+    setStatus('working', 'Analyzing', `Processing messages ${plan.startIndex}–${plan.finalIndex}…`);
     let latestResult = null;
     try {
-        while (startIndex <= finalIndex) {
-            const batchEnd = completedRebuildBatchEnd(
-                ctx.chat,
-                startIndex,
-                finalIndex,
-                settings.lookbackMessages,
-            );
-            if (batchEnd < startIndex) break;
-            setStatus('working', 'Analyzing', `Processing messages ${startIndex}–${batchEnd}…`);
-            latestResult = await analyzeRange(store, startIndex, batchEnd, {
-                curatorEnabled: runCurator,
-                progressionEnabled: runProgression,
-                progressionFlush: runProgression,
-                gameEnabled: runGame,
-                // Prepare places once, against the newest reply.
-                plannerEnabled: batchEnd >= finalIndex,
-            });
-            throwForSubsystemFailure(latestResult);
-            if (currentChatId() !== runChatId) throw new DOMException('Chat changed', 'AbortError');
-            startIndex = batchEnd + 1;
-        }
-        const expectedProgressionIndex = lastCompletedStoryIndex(ctx.chat, finalIndex);
-        while (runProgression
-            && !latestResult?.progressionError
-            && store.progression.lastProcessedIndex < expectedProgressionIndex) {
-            const before = store.progression.lastProcessedIndex;
-            latestResult = await analyzeRange(store, before + 1, expectedProgressionIndex, {
-                progressionFlush: true,
-                curatorEnabled: false,
-                progressionEnabled: true,
-                gameEnabled: false,
-            });
-            throwForSubsystemFailure(latestResult);
-            if (store.progression.lastProcessedIndex <= before) break;
-        }
-        if (runCurator) {
-            store.assistantTurnsSincePass = Math.max(
-                0,
-                (Number(store.assistantTurnsSincePass) || 0) - assistantTurnsCoveredAtStart,
-            );
-        }
-        store.lastMaintenanceDecision = {
-            ...decision,
-            runCurator,
-            runProgression,
-            forced: force,
-            completedAt: Date.now(),
-        };
-        store.lastError = '';
-        store.lastFailureAt = 0;
-        store.consecutiveFailures = 0;
-        store.nextRetryAt = 0;
-        maybeRecordCheckpoint(store, settings);
+        latestResult = await runPassBatches(store, plan, {
+            chat: ctx.chat,
+            settings,
+            analyze: async (targetStore, start, end, options) => {
+                const result = await analyzeRange(targetStore, start, end, options);
+                if (currentChatId() !== runChatId) throw new DOMException('Chat changed', 'AbortError');
+                return result;
+            },
+            onBatch: (start, end) => setStatus('working', 'Analyzing', `Processing messages ${start}–${end}…`),
+        });
         await saveChatStore();
         const eventDirectorResult = await maybeRunAutomaticEventDirector();
         if (latestResult) latestResult.eventDirectorResult = eventDirectorResult;
@@ -7717,99 +8178,11 @@ async function processPending({ force = false, silent = false } = {}) {
     }
 }
 
-/**
- * What the planner should prepare for this scene: where the player is when it
- * has no stage (or a stale one), places reachable from it, and the starting
- * kit while the purse was never counted. Null when nothing is needed.
- */
-function plannerPlanFor(store, scene, index, settings, playerName, { heading = false, prefetch = settings.scenePlannerPrefetch !== false } = {}) {
-    if (!scene?.location?.name) return null;
-    store.game = normalizeGameState(store.game);
-    const targets = plannerTargets(store.game, {
-        store,
-        scene,
-        heading,
-        camera: prefetch ? deriveCameraFrame(scene, store, { playerName }) : null,
-        clockSeconds: Number(store.progression?.clock?.estimatedSeconds),
-        staleSeconds: Math.max(1, Number(settings.scenePlannerStaleHours) || 8) * 3_600,
-        prefetch,
-        maximum: prefetch ? Math.max(1, Math.min(3, Number(settings.scenePlannerMaximumPlaces) || 2)) : 1,
-    });
-    const startingKit = needsStartingKit(store.game) && !store.game.planner?.kitOffered;
-    return targets.length || startingKit ? { targets, startingKit, index } : null;
-}
 
-/** The profile the scene planner runs on: its own, else the progression profile, else the curator's. */
-function plannerProfileId(settings) {
-    return settings.plannerConnectionProfileId || settings.progressionConnectionProfileId || settings.connectionProfileId;
-}
 
-function plannerMessagesFor(store, plan) {
-    const ctx = context();
-    const end = plan.atSend ? ctx.chat.length - 1 : plan.index;
-    return buildPlannerMessages({
-        game: store.game,
-        store,
-        targets: plan.targets,
-        startingKit: plan.startingKit,
-        assisted: assistedFor(plannerProfileId(getSettings())),
-        playerName: ctx.name1,
-        persona: ctx.personaDescription,
-        characterCard: getCardContext(),
-        clockLabel: store.progression?.clock?.currentTimeLabel,
-        recentTranscript: formatTranscript(ctx.chat, {
-            startIndex: Math.max(0, end - 3),
-            endIndex: end,
-            userName: ctx.name1,
-            characterName: ctx.name2,
-            maximumCharacters: 12_000,
-        }),
-        settings: getSettings(),
-    });
-}
 
-/** Apply a scene planner answer to the store's game state. */
-function commitPlannerResponse(targetStore, plan, response, playerName) {
-    targetStore.game = normalizeGameState(targetStore.game);
-    const context = gameContext(targetStore.game, { playerName, entities: targetStore.entities });
-    const assisted = assistedFor(plannerProfileId(getSettings()));
-    const { ops, rejected, adjusted } = normalizeGameRecords(response.payload, context, {
-        source: 'planner',
-        // The ledger may have just counted the purse from this same passage.
-        allowStartingKit: plan.startingKit && needsStartingKit(targetStore.game),
-        clockSeconds: Number(targetStore.progression?.clock?.estimatedSeconds),
-        // A smaller planner prepares a smaller cast.
-        ...(assisted ? { maximumPeoplePerStage: 2 } : {}),
-    });
-    const applied = applyGameOperations(targetStore.game, ops, { messageIndex: plan.index, source: 'planner', rejected });
-    targetStore.game = applied.state;
-    // The place the player is at comes first; a planner that prepared only
-    // somewhere else is noted, and the next pass targets the place again.
-    const placeKeyOf = value => canonicalNameKey(value).replace(/^(?:the|a|an)\s+/u, '');
-    const firstTarget = plan.targets[0];
-    const missedPlayerPlace = firstTarget && !ops.some(op => op.type === 'stage.set' && placeKeyOf(op.place) === placeKeyOf(firstTarget.name))
-        ? firstTarget.name
-        : '';
-    if (missedPlayerPlace) console.warn(`${LOG_PREFIX} Scene planner prepared nothing for ${missedPlayerPlace}; it is targeted again next pass.`);
-    const result = {
-        places: plan.targets.map(target => target.name),
-        startingKit: plan.startingKit,
-        applied: applied.applied.length,
-        rejected: applied.rejected.slice(0, 12),
-        ...(adjusted?.length ? { adjusted } : {}),
-        ...(missedPlayerPlace ? { missedPlayerPlace } : {}),
-        repaired: Boolean(response.repaired),
-        ...(plan.atSend ? { atSend: true } : {}),
-    };
-    targetStore.game.planner = {
-        ...targetStore.game.planner,
-        lastRunIndex: plan.index,
-        kitOffered: Boolean(targetStore.game.planner?.kitOffered || plan.startingKit),
-        lastRunStats: { ...result, at: Date.now() },
-        lastError: '',
-    };
-    return result;
-}
+
+
 
 /**
  * When the player's newest turn heads for a place with nothing prepared, or
@@ -7855,9 +8228,9 @@ async function runDestinationPlanner(store, plan) {
     const chatId = currentChatId();
     setStatus('working', 'Preparing', `Preparing ${plan.targets[0].name} before the story arrives there…`);
     try {
-        const response = await requestGamePatch(settings, plannerMessagesFor(store, plan), undefined, 'planner');
+        const response = await requestGamePatch(settings, plannerMessagesFor(store, plan, browserPassDeps(settings)), undefined, 'planner', { places: plannerPlaces(plan) });
         if (currentChatId() !== chatId || getChatStore() !== store) return;
-        const result = commitPlannerResponse(store, plan, response, ctx.name1);
+        const result = commitPlannerResponse(store, plan, response, ctx.name1, assistedFor(plannerProfileId(settings)), (...args) => console.warn(LOG_PREFIX, ...args), { communication: worldCommunication() });
         await saveChatStore();
         updateInjection();
         setStatus('success', 'Prepared', `Planner prepared ${result.places.join(', ')} before the story arrives.`);
@@ -7888,7 +8261,8 @@ async function departStory(settings, refresh) {
     // narrates, so the packet carries the freshest world state.
     const scheduledBackground = () => Boolean(
         runtime.queued || runtime.historyRebuildQueued || runtime.foundationPromise
-        || runtime.historyTimer || runtime.preparingFoundation);
+        || runtime.historyTimer || runtime.preparingFoundation
+        || (runtime.serverBackground?.queued || 0) > 0);
     const waitStart = Date.now();
     if (runtime.destinationPlanner) {
         const place = runtime.destinationPlannerPlace || 'the destination';
@@ -7902,21 +8276,29 @@ async function departStory(settings, refresh) {
         showNarratorPill('Narrating');
     }
     const sharedProvider = storyProvider();
+    // The server runs background work too: one authoritative read before
+    // deciding (the page's mirror may be stale after a sleep), then a refresh
+    // every two seconds while the gate waits.
+    const remote = await refreshServerBackground(sharedProvider, storyCost());
+    const remoteRefresh = remote ? setInterval(() => { void refreshServerBackground(sharedProvider, storyCost()); }, 2_000) : null;
     // A story on a provider that serves one request at a time (NovelAI) would
     // otherwise wait for the pass using it: the pass is stopped (its state is
     // kept; it re-runs after the reply), once per watermark so fast typing
     // cannot starve the world state. NovelAI frees the slot on an abort.
     let preempted = false;
+    const localPassRunning = Boolean(runtime.controller && !runtime.controller.signal.aborted);
+    const serverPass = remote?.activeJob && remote.activeJob.kind !== 'portrait' ? remote.activeJob : null;
     if (settings.storyPreemptsBackground !== false && isLimitedProvider(sharedProvider)
         && !providerHasRoom(sharedProvider, storyCost()) && backgroundInFlightCount() > 0
-        && runtime.controller && !runtime.controller.signal.aborted) {
+        && (localPassRunning || serverPass)) {
         const watermark = `${currentChatId()}:${getChatStore()?.lastProcessedIndex ?? -1}`;
         if (runtime.preemptedWatermark !== watermark) {
             runtime.preemptedWatermark = watermark;
             preempted = true;
             console.debug(`[InnerLore] The story preempts the background pass on ${sharedProvider}; the pass re-runs after the reply.`);
             showNarratorPill('Narrating');
-            runtime.controller.abort();
+            if (localPassRunning) runtime.controller.abort();
+            if (serverPass) void storageClient.cancelJob(serverPass.id, 'story_preempt').catch(() => {});
             while (!providerHasRoom(sharedProvider, storyCost()) && Date.now() - waitStart < 5_000) {
                 await new Promise(resolve => setTimeout(resolve, 100));
             }
@@ -7950,6 +8332,7 @@ async function departStory(settings, refresh) {
     } else {
         console.debug('[InnerLore] Background-first: no pending background work; the story request leaves immediately.');
     }
+    clearInterval(remoteRefresh);
     if (Date.now() - waitStart > 250) refresh(packetBefore);
     recordTelemetryEntry({
         kind: 'story', phase: 'departed',
@@ -8007,43 +8390,77 @@ function historyPrefixStore(store, boundary) {
     return prefix;
 }
 
-function carryManualState(oldStore, newStore) {
-    for (const [id, oldRecord] of Object.entries(oldStore.entities || {})) {
-        const current = newStore.entities[id];
-        if (current) {
-            current.pinned = oldRecord.pinned;
-            current.enabled = oldRecord.enabled;
-            if (oldRecord.manualOverride) {
-                current.manualOverride = true;
-                current.manualContent = oldRecord.manualContent;
-            }
-        } else if (oldRecord.manualOverride) {
-            newStore.entities[id] = clone(oldRecord);
-            newStore.entities[id].entryUid = null;
-            newStore.entities[id].renderedHash = '';
-        }
-    }
-    for (const [id, oldBrain] of Object.entries(oldStore.brains || {})) {
-        const current = newStore.brains[id];
-        if (current) {
-            current.pinned = oldBrain.pinned;
-            current.enabled = oldBrain.enabled;
-        }
-    }
-}
 
 // Capture a curator-fold checkpoint during normal play, but only once the head
 // has advanced at least one lookback window past the newest checkpoint, so a
 // long chat accumulates a bounded ladder rather than a checkpoint per turn.
-function maybeRecordCheckpoint(store, settings = getSettings()) {
-    if (!store || !Number.isInteger(store.lastProcessedIndex) || store.lastProcessedIndex < 0) return;
-    const interval = Math.max(4, Number(settings?.lookbackMessages) || 10);
-    const newest = (store.checkpoints || []).reduce(
-        (max, checkpoint) => Math.max(max, Number.isInteger(checkpoint?.index) ? checkpoint.index : -1),
-        -1,
-    );
-    if (store.lastProcessedIndex - newest < interval) return;
-    store.checkpoints = recordCheckpoint(store.checkpoints, createStoreCheckpoint(store));
+
+/** Hands a rebuild to the server; false when it could not be handed over, so the page runs it itself. */
+async function submitRebuildJob({ automatic = false } = {}) {
+    const settings = getSettings();
+    const ctx = context();
+    const ids = [...new Set([
+        settings.connectionProfileId, settings.mindsConnectionProfileId, settings.progressionConnectionProfileId,
+        settings.gameConnectionProfileId, settings.plannerConnectionProfileId, settings.fallbackConnectionProfileId,
+    ].filter(Boolean))];
+    const connections = {};
+    for (const id of ids) {
+        const record = connectionRecordForJob(id);
+        if (record) connections[id] = record;
+    }
+    if (!connections[settings.connectionProfileId]) return false;
+    const submitted = await submitServerJob('rebuild', {
+        key: 'rebuild',
+        replace: true,
+        input: {
+            chat: trimChatForJob(ctx.chat),
+            settings: jobSettings(settings),
+            playerName: ctx.name1,
+            characterName: ctx.name2,
+            persona: ctx.personaDescription || '',
+            cardContext: getCardContext(),
+            cardSeeds: getCardSeedEntities(),
+            connections,
+            automatic,
+        },
+    });
+    if (!submitted?.jobId) return false;
+    runtime.serverRebuildJobId = submitted.jobId;
+    runtime.serverRebuildHistoryRevision = runtime.historyRevision;
+    runtime.historyRebuildQueued = false;
+    setStatus('working', 'Rebuilding', `The server is rebuilding ${ctx.chat.length} messages…`);
+    updateUI();
+    return true;
+}
+
+/** A server rebuild finished: the rebuilt store arrived through the push channel; the page settles the rest. */
+async function afterServerRebuild(job) {
+    const store = getChatStore();
+    if (job.status === 'done') {
+        clearHistoryFallback();
+        const detail = job.result?.summary || 'Rebuilt.';
+        setStatus('success', job.result?.nothingToRebuild ? 'Up to date' : 'Rebuilt', detail);
+        if (!job.result?.automatic && !job.result?.nothingToRebuild) toastr.success(detail, DISPLAY_NAME, { timeOut: 4_000 });
+        updateInjection();
+        if (job.result?.nothingToRebuild) setTimeout(() => { void processPending({ silent: true }); }, 250);
+    } else if (job.status === 'failed') {
+        setStatus('error', 'Rebuild failed', job.error || 'The server rebuild failed.');
+        if (store && isTransientRequestError(new Error(job.error || ''))) {
+            runtime.historyRebuildQueued = true;
+            scheduleQueuedHistoryRebuild(15_000);
+        }
+    } else {
+        setStatus('idle', 'Stopped', 'The server rebuild was stopped; the previous state is intact.');
+    }
+    updateUI();
+    // History that changed while the server rebuilt is rebuilt again.
+    if (job.status === 'done' && runtime.historyRevision > (runtime.serverRebuildHistoryRevision || 0)) {
+        runtime.historyRebuildQueued = true;
+        scheduleQueuedHistoryRebuild(250);
+    } else if (runtime.queued) {
+        runtime.queued = false;
+        setTimeout(() => processPending({ silent: true }), 250);
+    }
 }
 
 async function rebuildFromChat({ automatic = false } = {}) {
@@ -8055,7 +8472,7 @@ async function rebuildFromChat({ automatic = false } = {}) {
         setStatus('idle', 'Rebuild deferred', 'Test mode: the history rebuild waits for a normal session.');
         return;
     }
-    if (runtime.processing || runtime.rebuilding || runtime.preparingFoundation) {
+    if (runtime.processing || runtime.rebuilding || runtime.preparingFoundation || runtime.serverRebuildJobId) {
         if (automatic) runtime.historyRebuildQueued = true;
         else toastr.warning('Stop or wait for the current InnerLore pass first.', DISPLAY_NAME);
         return;
@@ -8080,131 +8497,40 @@ async function rebuildFromChat({ automatic = false } = {}) {
 
     const runChatId = currentChatId();
     const startingHistoryRevision = runtime.historyRevision;
-    const completedHistoryIndex = lastCompletedStoryIndex(ctx.chat);
+    // On the server when it is there: the tab may sleep, the rebuild still
+    // lands, and every page on the world receives it.
+    if (serverPassesAvailable() && await submitRebuildJob({ automatic })) return;
 
-    // Phase 2 incremental resume: when an edit/swipe/delete only changed a
-    // suffix of the chat, restore the newest checkpoint whose recorded history
-    // still matches the chat and re-derive the curator fold (entities/brains)
-    // from just after it, instead of replaying the whole conversation from an
-    // empty store. Manual "Rebuild From Chat" always starts fresh. Only the
-    // expensive per-batch curator fold is resumed; World Progression is rebuilt
-    // fully in both paths (its runtime is not resumed mid-history yet).
-    const divergenceIndex = firstDivergenceIndex(ctx.chat, oldStore.processedFingerprints || {});
-    const resumeCheckpoint = automatic && Number.isFinite(divergenceIndex)
-        ? selectResumeCheckpoint(oldStore.checkpoints, ctx.chat, divergenceIndex)
-        : null;
-    const temporary = createEmptyStore(runChatId);
-    let rebuildStartIndex = 0;
-    // A full replay starts from the same card-declared canon a new chat gets.
-    // Checkpoints already carry the seeds they were captured with.
-    if (!resumeCheckpoint) seedNewStoreFromCard(temporary);
-    if (resumeCheckpoint) {
-        applyStoreCheckpoint(temporary, resumeCheckpoint);
-        temporary.checkpoints = (oldStore.checkpoints || [])
-            .filter(checkpoint => Number.isInteger(checkpoint?.index) && checkpoint.index <= resumeCheckpoint.index);
-        rebuildStartIndex = resumeCheckpoint.index + 1;
-        setStatus('working', 'Rebuilding', `Resuming from message ${resumeCheckpoint.index}; re-deriving ${completedHistoryIndex - resumeCheckpoint.index} of ${ctx.chat.length} messages…`);
-    }
-    temporary.expressionFoundationVersion = 0;
-    temporary.progression = createProgressionState();
-    temporary.progression.eventDefinitions = Object.fromEntries(Object.entries(
-        clone(normalizeProgressionState(oldStore.progression).eventDefinitions),
-    ).filter(([, definition]) => definition.origin !== 'automatic_director'));
-    // User-authored definitions are chat configuration, while generated
-    // proposals and runtime are derived. If a deletion moved the end of history before an event's old
-    // creation point, preserve it but re-arm it at the new end of history.
-    for (const definition of Object.values(temporary.progression.eventDefinitions)) {
-        if (definition.createdAtMessage > completedHistoryIndex) {
-            definition.createdAtMessage = completedHistoryIndex;
-            definition.createdAtElapsedSeconds = 0;
-        }
-    }
-    temporary.progression = resetTriggerEventRuntime(temporary.progression, { replayCreationAnchors: true });
-    temporary.lorebookName = oldStore.lorebookName;
-    // The game journal rewinds exactly: everything recorded before the first
-    // changed message stays, and the ledger re-reads only what follows. A
-    // manual rebuild re-reads every reply but keeps the planner's prepared
-    // places and the starting kit, which no reply produced.
-    const oldGame = normalizeGameState(oldStore.game);
-    temporary.game = automatic
-        ? gameStateBefore(oldGame, Math.min(
-            firstDivergenceIndex(ctx.chat, oldGame.processedFingerprints),
-            completedHistoryIndex + 1,
-        ))
-        : gameStateBefore(oldGame, completedHistoryIndex + 1, { keepSources: ['planner', 'scene'] });
-    const eventCreationBoundaries = new Set(Object.values(temporary.progression.eventDefinitions)
-        .map(definition => definition.createdAtMessage)
-        .filter(index => Number.isInteger(index) && index >= 0 && index <= completedHistoryIndex));
     runtime.rebuilding = true;
     runtime.historyRebuildQueued = false;
     runtime.controller = new AbortController();
     setStatus('working', 'Rebuilding', `Rebuilding ${ctx.chat.length} messages…`);
     try {
-        let start = rebuildStartIndex;
-        while (start <= completedHistoryIndex) {
-            let end = completedRebuildBatchEnd(
-                ctx.chat,
-                start,
-                completedHistoryIndex,
-                settings.lookbackMessages,
-            );
-            if (end < start) break;
-            const creationBoundary = [...eventCreationBoundaries]
-                .filter(index => index >= start && index <= end)
-                .sort((a, b) => a - b)[0];
-            if (Number.isInteger(creationBoundary)) end = creationBoundary;
-            setStatus('working', 'Rebuilding', `Rebuilding messages ${start}–${end} of ${ctx.chat.length - 1}…`);
-            const result = await analyzeRange(temporary, start, end, {
-                persist: false,
-                sync: false,
-                progressionMode: 'rebuild',
-                progressionFlush: end === completedHistoryIndex || eventCreationBoundaries.has(end),
-            });
-            // A rebuild is one replacement transaction. Never publish a
-            // partially reconstructed store when either background subsystem
-            // failed; the quarantined prior store remains available for retry.
-            throwForSubsystemFailure(result);
-            if (currentChatId() !== runChatId) throw new DOMException('Chat changed', 'AbortError');
-            start = end + 1;
-            // Capture a checkpoint of the curator fold after each completed
-            // batch so a later edit/swipe can resume from here instead of
-            // replaying the whole chat.
-            temporary.checkpoints = recordCheckpoint(temporary.checkpoints, createStoreCheckpoint(temporary));
+        const rebuilt = await rebuildStore({
+            chat: ctx.chat,
+            oldStore,
+            settings,
+            automatic,
+            cardSeeds: getCardSeedEntities(),
+            chatId: runChatId,
+            analyze: async (target, start, end, options) => {
+                const result = await analyzeRange(target, start, end, options);
+                if (currentChatId() !== runChatId) throw new DOMException('Chat changed', 'AbortError');
+                return result;
+            },
+            onBatch: (start, end, total) => setStatus('working', 'Rebuilding', `Rebuilding messages ${start}–${end} of ${total}…`),
+        });
+        if (rebuilt.nothingToRebuild) {
+            // Every message InnerLore read still says the same: the quarantine lifts, nothing is replayed.
+            oldStore.needsRebuild = false;
+            clearHistoryFallback();
+            await saveChatStore();
+            updateInjection();
+            setStatus('success', 'Up to date', 'Nothing InnerLore had read changed; no rebuild was needed.');
+            setTimeout(() => { void processPending({ silent: true }); }, 250);
+            return;
         }
-
-        const expectedProgressionIndex = completedHistoryIndex;
-        while (settings.worldProgressionEnabled
-            && !temporary.progression.lastError
-            && temporary.progression.lastProcessedIndex < expectedProgressionIndex) {
-            const before = temporary.progression.lastProcessedIndex;
-            const result = await analyzeRange(temporary, before + 1, expectedProgressionIndex, {
-                persist: false,
-                sync: false,
-                progressionMode: 'rebuild',
-                progressionFlush: true,
-                gameEnabled: false,
-            });
-            throwForSubsystemFailure(result);
-            if (temporary.progression.lastProcessedIndex <= before) break;
-        }
-        const curatorEnabled = settings.innerSelfEnabled || settings.autoLoreEnabled;
-        if (curatorEnabled && temporary.lastProcessedIndex < completedHistoryIndex) {
-            throw new Error(`Continuity rebuild stopped at message ${temporary.lastProcessedIndex}; expected ${completedHistoryIndex}. The previous complete state was preserved.`);
-        }
-        if (settings.worldProgressionEnabled
-            && normalizeProgressionState(temporary.progression).lastProcessedIndex < expectedProgressionIndex) {
-            throw new Error(`World Progression rebuild stopped at message ${temporary.progression.lastProcessedIndex}; expected ${expectedProgressionIndex}. The previous complete state was preserved. ${temporary.progression.lastError || ''}`.trim());
-        }
-
-        carryManualState(oldStore, temporary);
-        copyCardExpressionFoundation(temporary, oldStore, { copyCurrentMind: false });
-        temporary.lorebookName = oldStore.lorebookName;
-        temporary.lastProcessedIndex = completedHistoryIndex;
-        temporary.assistantTurnsSincePass = 0;
-        temporary.needsRebuild = false;
-        // Record a final checkpoint at the completed head so the next edit can
-        // resume from the very end of this rebuild.
-        temporary.checkpoints = recordCheckpoint(temporary.checkpoints, createStoreCheckpoint(temporary));
+        const temporary = rebuilt.store;
         runtime.store = temporary;
         runtime.storeChatId = runChatId;
         const pointer = ctx.chatMetadata?.[MODULE_KEY];
@@ -8245,7 +8571,7 @@ async function rebuildFromChat({ automatic = false } = {}) {
             // A resumed rebuild that failed for a non-transient reason may be
             // sitting on an unusable checkpoint. Drop the ladder so the retry
             // degrades to a clean full rebuild instead of looping on it.
-            if (resumeCheckpoint && !isTransientRequestError(error)) oldStore.checkpoints = [];
+            if (error?.resumedFromCheckpoint && !isTransientRequestError(error)) oldStore.checkpoints = [];
             const retryDelays = [5_000, 15_000, 45_000];
             const retryDelay = isTransientRequestError(error)
                 ? retryDelays[oldStore.consecutiveFailures - 1] || 0
@@ -8315,6 +8641,66 @@ async function runQueuedHistoryRebuild() {
     await rebuildFromChat({ automatic: true });
 }
 
+/** Whether every message any subsystem has read still says what it said then. */
+function historyStillMatches(store, chat) {
+    if (!store || !Array.isArray(chat)) return true;
+    return [
+        store.processedFingerprints,
+        store.progression?.processedFingerprints,
+        normalizeGameState(store.game).processedFingerprints,
+    ].every(snapshot => messageRangeMatchesSnapshot(chat, snapshot || {}));
+}
+
+/**
+ * A message was edited, swiped or deleted. When nothing InnerLore derived
+ * came from it (an unanswered player message, a reply not yet read, or the
+ * empty placeholder SillyTavern deletes when the narrator answers with only
+ * a game tool call), the world stands: only game actions and questions that
+ * belonged to deleted replies go. Otherwise the stale state is quarantined
+ * and rebuilt. A server pass that is reading the changed messages is
+ * stopped either way; it is planned again from the new text.
+ */
+function historyChanged(kind, value) {
+    const store = getChatStore();
+    const chat = context().chat || [];
+    const changedFrom = Number.isFinite(Number(value)) ? Number(value) : 0;
+    cancelServerPassTouching(changedFrom);
+    if (store && !store.needsRebuild && historyStillMatches(store, chat)) {
+        if (kind === 'deleted') pruneGameStateAfterDeletion(store, chat.length);
+        log(`A ${kind} message at ${changedFrom} touched nothing InnerLore has read; no rebuild.`);
+        return false;
+    }
+    scheduleHistoryRebuild(kind === 'swiped' ? { promptFallbackIndex: changedFrom } : {});
+    return true;
+}
+
+/** Game actions and pending questions of replies that no longer exist. */
+function pruneGameStateAfterDeletion(store, newLength) {
+    const game = normalizeGameState(store.game);
+    const before = game.journal.length;
+    const pendingBefore = (game.pending || []).length;
+    let next = gameStateWithout(store.game, entry => entry.source === ACTION_SOURCE && Number.isInteger(entry.reply) && entry.reply >= newLength);
+    next.pending = (Array.isArray(next.pending) ? next.pending : []).filter(entry => Number(entry?.at) < newLength);
+    if (next.journal.length === before && next.pending.length === pendingBefore) return false;
+    store.game = next;
+    void saveChatStore({ reason: 'deleted-reply' }).catch(error => console.warn(`${LOG_PREFIX} Could not save after a deleted reply:`, error));
+    updateInjection();
+    return true;
+}
+
+/** A server pass still reading messages from `index` on is stopped; the next pass reads the new text. */
+function cancelServerPassTouching(index) {
+    const range = runtime.serverPassRange;
+    if (!runtime.serverPassJobId || !range || index > range.end) return false;
+    const jobId = runtime.serverPassJobId;
+    runtime.serverPassJobId = '';
+    runtime.serverPassRange = null;
+    runtime.serverPassCancelledForHistory = true;
+    void storageClient.cancelJob(jobId, 'history_changed').catch(() => {});
+    setTimeout(() => { void processPending({ silent: true }); }, 1_500);
+    return true;
+}
+
 function scheduleHistoryRebuild(options = {}) {
     const settings = getSettings();
     const store = getChatStore();
@@ -8346,110 +8732,10 @@ function scheduleHistoryRebuild(options = {}) {
     updateUI();
 }
 
-const FOUNDATION_OUTER_VOICE_KINDS = new Set([
-    'cadence',
-    'hesitation',
-    'emotional_openness',
-    'pressure_shift',
-]);
-
-function cardBackedEntries(entries) {
-    return Object.fromEntries(Object.entries(entries || {}).filter(([, entry]) => (
-        entry?.basis === 'character_card'
-    )));
-}
-
-function hasStructuredExpressionFoundation(brain) {
-    const facets = Object.values(brain?.persistentSelf?.facets || {})
-        .filter(entry => entry?.basis === 'character_card');
-    const voice = Object.values(brain?.persistentSelf?.voice || {})
-        .filter(entry => entry?.basis === 'character_card');
-    return facets.some(entry => entry.kind === 'personal_anchor')
-        && voice.some(entry => entry.kind === 'thought_style')
-        && voice.some(entry => entry.kind === 'emphasis')
-        && voice.some(entry => FOUNDATION_OUTER_VOICE_KINDS.has(entry.kind));
-}
-
-function structuredFoundationBrains(store) {
-    return Object.values(store?.brains || {}).filter(brain => (
-        brain?.active !== false && hasStructuredExpressionFoundation(brain)
-    ));
-}
-
 function expressionFoundationReady(store) {
     return Number(store?.expressionFoundationVersion) >= EXPRESSION_FOUNDATION_VERSION;
 }
 
-/**
- * Persist only character-card-backed psychology from the preflight.  These
- * fields are safe across swipes; transient mind state and story-derived
- * beliefs remain in the branch-local staging view until the full rebuild.
- */
-function copyCardExpressionFoundation(destination, source, options = {}) {
-    if (!destination || !source) return 0;
-    const copyCurrentMind = options.copyCurrentMind ?? !destination.needsRebuild;
-    let copied = 0;
-    destination.brains = destination.brains && typeof destination.brains === 'object'
-        ? destination.brains
-        : {};
-    for (const sourceBrain of structuredFoundationBrains(source)) {
-        const id = sourceBrain.id || canonicalNameKey(sourceBrain.name);
-        if (!id) continue;
-        const sourceFacets = cardBackedEntries(sourceBrain.persistentSelf?.facets);
-        const sourceVoice = cardBackedEntries(sourceBrain.persistentSelf?.voice);
-        const sourceRelationships = Object.fromEntries(
-            Object.entries(sourceBrain.persistentSelf?.relationships || {}).flatMap(([relationshipId, relationship]) => {
-                const aspects = cardBackedEntries(relationship?.aspects);
-                return Object.keys(aspects).length
-                    ? [[relationshipId, { ...clone(relationship), aspects }]]
-                    : [];
-            }),
-        );
-        let target = destination.brains[id];
-        if (!target) {
-            target = clone(sourceBrain);
-            target.currentMind = copyCurrentMind ? clone(sourceBrain.currentMind) : null;
-            target.persistentSelf = {
-                facets: sourceFacets,
-                voice: sourceVoice,
-                relationships: sourceRelationships,
-            };
-            destination.brains[id] = target;
-        } else {
-            target.persistentSelf = target.persistentSelf && typeof target.persistentSelf === 'object'
-                ? target.persistentSelf
-                : { facets: {}, voice: {}, relationships: {} };
-            target.persistentSelf.facets = {
-                ...(target.persistentSelf.facets || {}),
-                ...clone(sourceFacets),
-            };
-            target.persistentSelf.voice = {
-                ...(target.persistentSelf.voice || {}),
-                ...clone(sourceVoice),
-            };
-            target.persistentSelf.relationships = target.persistentSelf.relationships || {};
-            for (const [relationshipId, relationship] of Object.entries(sourceRelationships)) {
-                const current = target.persistentSelf.relationships[relationshipId];
-                target.persistentSelf.relationships[relationshipId] = current
-                    ? {
-                        ...current,
-                        aspects: { ...(current.aspects || {}), ...clone(relationship.aspects) },
-                    }
-                    : clone(relationship);
-            }
-            if (copyCurrentMind && sourceBrain.currentMind) {
-                target.currentMind = clone(sourceBrain.currentMind);
-            }
-            target.updatedAt = Date.now();
-        }
-        copied++;
-    }
-    if (copied) {
-        destination.expressionFoundationVersion = EXPRESSION_FOUNDATION_VERSION;
-        destination.updatedAt = Date.now();
-    }
-    return copied;
-}
 
 async function waitForInnerLorePassToStop(maximumMilliseconds = 5_000) {
     const deadline = Date.now() + Math.max(250, maximumMilliseconds);
@@ -8607,6 +8893,12 @@ function blockStoryGeneration(error) {
 }
 
 function stopCurrentPass() {
+    for (const field of ['serverPassJobId', 'serverRebuildJobId']) {
+        if (!runtime[field]) continue;
+        const jobId = runtime[field];
+        runtime[field] = '';
+        void storageClient.cancelJob(jobId, 'stopped by the player').catch(() => {});
+    }
     runtime.controller?.abort();
 }
 
@@ -9245,6 +9537,8 @@ function bindUIEvents() {
         if (!getSettings().privateChatEnabled) privateChatState().panel?.close();
         renderMenuBar();
     });
+    bindCheckbox('il_private_chat_pictures', 'privateChatPictures');
+    bindCheckbox('il_private_chat_moments', 'privateChatMomentPictures', () => paintPhone());
     bindNumber('il_private_chat_temperature', 'privateChatTemperature', 0, 1.5);
     bindNumber('il_private_chat_tokens', 'privateChatMaximumTokens', 60, 600);
     document.getElementById('il_private_chat_custom_instructions')?.addEventListener('change', event => {
@@ -9254,7 +9548,7 @@ function bindUIEvents() {
     bindCheckbox('il_portraits_enabled', 'portraitsEnabled', () => updateCastCards());
     bindNumber('il_portrait_steps', 'portraitSteps', 1, 60);
     bindNumber('il_portrait_cfg', 'portraitCfg', 1, 20);
-    for (const [id, key, limit] of [['il_portrait_url', 'portraitServerUrl', 300], ['il_portrait_style', 'portraitStyle', 400], ['il_portrait_negative', 'portraitNegative', 1_000]]) {
+    for (const [id, key, limit] of [['il_portrait_url', 'portraitServerUrl', 300], ['il_portrait_style', 'portraitStyle', 400], ['il_portrait_negative', 'portraitNegative', 1_000], ['il_portrait_background', 'portraitBackground', 160]]) {
         document.getElementById(id)?.addEventListener('change', event => {
             getSettings()[key] = cleanString(event.target.value, limit);
             saveSettings();
@@ -10022,7 +10316,9 @@ function registerEvents() {
         // prompt entries and the live player turn always stay.
         eventSource.on(events.CHAT_COMPLETION_PROMPT_READY, async prompt => {
             const settings = getSettings();
-            if (!settings.enabled || !runtime.activeStoryGenerationId) return;
+            // A dry run (SillyTavern's prompt manager sizing the context) is
+            // not a story leaving: it must never claim the story slot.
+            if (!settings.enabled || !runtime.activeStoryGenerationId || prompt?.dryRun) return;
             await departStory(settings, packetBefore => refreshPacketInPrompt(prompt, packetBefore));
             if (!runtime.derivedContext) return;
             // SillyTavern 1.18 passes { chat }; older builds passed { messages }.
@@ -10080,6 +10376,14 @@ function registerEvents() {
                 runtime.storyRequestInFlight = false;
                 runtime.announceStoryState?.(false);
             }
+            // The story is told. A generation that ended without showing any
+            // text (an error, an empty reply) must not leave "Narrating" up;
+            // one that leads straight into another (a tool call) shows it again.
+            const ended = runtime.activeStoryGenerationId;
+            setTimeout(() => {
+                if (runtime.activeStoryGenerationId === ended && !storyClaimFresh()) hideNarratorPill();
+                else renderActivityPill();
+            }, 0);
         });
     }
     if (events.GENERATION_STOPPED) {
@@ -10166,16 +10470,20 @@ function registerEvents() {
             scheduleExpressionFoundationWarmup(250);
         }
     });
-    const scheduleExternalHistoryRebuild = () => {
-        // Regenerate removes the empty placeholder and Continue may update its
-        // swipe internally. Those are part of one recovery transaction, not a
-        // user-selected branch change.
-        if (!runtime.cutoffRecovery) scheduleHistoryRebuild();
+    // Regenerate removes the empty placeholder and Continue may update its
+    // swipe internally. Those are part of one recovery transaction, not a
+    // user-selected branch change. Otherwise a change matters only when it
+    // reaches a message InnerLore has already read (see historyChanged).
+    const scheduleEditedHistoryRebuild = messageIndex => {
+        if (!runtime.cutoffRecovery) historyChanged('edited', messageIndex);
+    };
+    const scheduleDeletedHistoryRebuild = newLength => {
+        if (!runtime.cutoffRecovery) historyChanged('deleted', newLength);
     };
     const scheduleSwipeHistoryRebuild = messageIndex => {
-        if (!runtime.cutoffRecovery) scheduleHistoryRebuild({ promptFallbackIndex: messageIndex });
+        if (!runtime.cutoffRecovery) historyChanged('swiped', messageIndex);
     };
-    eventSource.on(events.MESSAGE_EDITED, scheduleExternalHistoryRebuild);
+    eventSource.on(events.MESSAGE_EDITED, scheduleEditedHistoryRebuild);
     eventSource.on(events.MESSAGE_SWIPED, scheduleSwipeHistoryRebuild);
     eventSource.on(events.MESSAGE_SWIPED, messageIndex => {
         captureReplyChoices(messageIndex);
@@ -10191,6 +10499,8 @@ function registerEvents() {
     for (const event of [events.CHARACTER_MESSAGE_RENDERED, events.CHAT_CHANGED, events.MORE_MESSAGES_LOADED, events.MESSAGE_EDITED, events.MESSAGE_UPDATED]) {
         if (event) eventSource.on(event, () => setTimeout(decoratePrivateMessages, 0));
     }
+    // Their pictures open large on a tap, and a failed one can be asked for again.
+    if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') document.addEventListener('click', handlePictureClick);
     if (events.CHAT_CHANGED) eventSource.on(events.CHAT_CHANGED, () => {
         const state = privateChatState();
         state.panel?.close();
@@ -10214,7 +10524,17 @@ function registerEvents() {
             renderPlayerChoices();
         });
     }
-    eventSource.on(events.MESSAGE_DELETED, scheduleExternalHistoryRebuild);
+    eventSource.on(events.MESSAGE_DELETED, scheduleDeletedHistoryRebuild);
+    if (events.TOOL_CALLS_RENDERED) {
+        eventSource.on(events.TOOL_CALLS_RENDERED, () => {
+            // The narration the tool call leads to is still to come.
+            if (runtime.activeStoryGenerationId) showNarratorPill('Narrating');
+            setTimeout(decorateToolMessages, 0);
+        });
+    }
+    for (const event of [events.CHAT_CHANGED, events.MORE_MESSAGES_LOADED, events.MESSAGE_DELETED, events.MESSAGE_SWIPED, events.CHARACTER_MESSAGE_RENDERED]) {
+        if (event) eventSource.on(event, () => setTimeout(decorateToolMessages, 0));
+    }
     if (events.CHAT_DELETED) {
         eventSource.on(events.CHAT_DELETED, async chatId => {
             await cleanupDeletedChat(chatId);
@@ -10352,10 +10672,15 @@ function initializeServerStateAfterAppReady(ctx) {
         const announce = payload => {
             try { runtime.providerLockChannel?.postMessage(payload); } catch { /* channel closed */ }
         };
-        runtime.announceStoryState = active => announce({ kind: 'story', active });
+        runtime.announceStoryState = active => {
+            announce({ kind: 'story', active });
+            notifyServerStory(active);
+        };
         setSlotListener((scope, count) => {
             if (scope === 'own') announce({ kind: 'background', count });
         });
+    } else if (!runtime.announceStoryState) {
+        runtime.announceStoryState = active => notifyServerStory(active);
     }
 }
 

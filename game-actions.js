@@ -32,7 +32,7 @@ import {
     rootHolder,
     standingTier,
     wordsContained,
-} from './game.js?v=4';
+} from './game.js?v=6';
 
 export const ACTION_SOURCE = 'action';
 const MAX_ACTIONS_PER_TURN = 8;
@@ -47,12 +47,158 @@ const ACTION_BY_TOOL = Object.freeze({
     game_consume: { actions: ['consume'] },
 });
 
+// --- the player's own exchanges ---------------------------------------------------
+
+const MONEY_WORDS = ['coin', 'coins', 'copper', 'coppers', 'silver', 'silvers', 'gold', 'golds', 'crown', 'crowns', 'shilling', 'shillings',
+    'penny', 'pennies', 'pence', 'money', 'payment', 'fee', 'fare', 'toll', 'cash', 'credit', 'credits', 'dollar', 'dollars', 'bucks',
+    'mark', 'marks', 'sovereign', 'sovereigns', 'ducat', 'ducats', 'florin', 'florins', 'denarius', 'denarii', 'bit', 'bits'];
+const NUMBER_WORDS = ['a', 'an', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve',
+    'twenty', 'thirty', 'forty', 'fifty', 'hundred', 'few', 'several', 'some', 'half'];
+const OBJECT = '(?:her|him|them|it|this|that|these|those|the|a|an|my|our|his|their|one|two|three|some|\\d+)';
+const NEGATED = /\b(?:don'?t|do not|doesn'?t|didn'?t|won'?t|will not|wouldn'?t|can'?t|cannot|couldn'?t|unable to|refuse[sd]? to|refusing to|decline[sd]? to|declining to|instead of|rather than|without|no longer|not|never|no)\s+(?:\w+\s+){0,2}$/u;
+const ASKED_OF_OTHERS = /\b(?:do|does|did|can|could|will|would|are|is)\s+(?:you|he|she|they|it|someone|anyone)\s+(?:\w+\s+){0,1}$/u;
+// Someone is asked, told or expected to do it ("she asks me to pay", "I ask
+// her to sell"), or it is demanded of the player ("the guard demands I pay").
+const DIRECTED = /\b(?:ask|asks|asked|asking|tell|tells|told|telling|want|wants|wanted|wanting|expect|expects|expected|expecting|order|orders|ordered|ordering|urge|urges|urged|urging|beg|begs|begged|begging|remind|reminds|reminded|reminding|invite|invites|invited|inviting|need|needs|needed|needing|wait for|waits for|waited for|waiting for)\s+(?:\w+\s+){1,3}to\s+$|\b(?:demand|demands|demanded|demanding|insist|insists|insisted|insisting|suggest|suggests|suggested|suggesting|require|requires|required|requiring)\s+(?:that\s+)?(?:i|we|you|he|she|they)\s+$/u;
+// Weighing, wondering or supposing is not doing ("should I buy it?", "I could
+// pay her", "I think about selling it"); "I'd like to buy" is a decision.
+const TENTATIVE = /\b(?:should|shall|can|could|would|might|may)\s+(?:i|we)\s+(?:\w+\s+){0,1}$|\b(?:i|we)(?:'d|\s+(?:could|would|might|may|should))\s+(?:\w+\s+){0,1}$|\b(?:think|thinks|thinking|thought|consider|considers|considering|considered|wonder|wonders|wondering|wondered|debate|debates|debating|debated|weigh|weighs|weighing|weighed)\s+(?:(?:about|of|over|whether|if)\s+)?(?:(?:i|we)\s+(?:should\s+|could\s+|might\s+)?|to\s+)?(?:\w+\s+){0,1}$|\b(?:if|whether)\s+(?:to\s+|(?:i|we)\s+(?:should\s+|could\s+)?)?(?:\w+\s+){0,1}$/u;
+// Someone else is the one doing it: the subject right before the verb.
+const THIRD_PERSON = /\b(?:she|he|they|it|someone|somebody|everyone|nobody|the\s+(?!and\b|then\b|or\b)\w+|a\s+(?!and\b|then\b|or\b)\w+)\s+(?:\w+ly\s+)?$/u;
+const TAKE_IDIOMS = /^\s+(?:a\s+|an\s+|the\s+|my\s+|it\s+|some\s+|her\s+|his\s+|their\s+|your\s+)?(?:look|looks|seat|breath|step|steps|moment|minute|second|glance|peek|chance|walk|stroll|turn|nap|rest|break|bite|aim|cover|care|heart|notice|note|place|part|offen[cs]e|time|easy|leave|stairs|road|lead|hint|bait|while|deep|closer|stock|stand|sides|side|charge|pity|pride|comfort|advantage|interest|hand|hands|arm|word|advice|point)\b/u;
+// "give her a nod", "give up", "hand over the reins of the talk": no thing changes hands.
+const GIVE_IDIOMS = /^\s*(?:(?:her|him|them|it|you|me)\s+)?(?:a\s+|an\s+|the\s+|my\s+|his\s+|her\s+|their\s+|some\s+)?(?:nod|nods|shrug|shrugs|look|looks|smile|smiles|glance|wave|sigh|laugh|grin|wink|bow|salute|hug|kiss|push|shove|chance|try|shot|thought|break|moment|second|minute|warning|answer|reply|name|word|piece|ear|hand|thanks|way|chase|up|in|look-over|once-over|lift|ride|hint|clue|signal|sign|shoulder)\b/u;
+// "accept her apology", "accept the challenge": nothing is handed over.
+const RECEIVE_IDIOMS = /^\s+(?:her|his|their|the|my|your|an?)?\s*(?:apology|apologies|invitation|challenge|fate|thanks|compliment|help|advice|explanation|answer|excuse|terms of|point|truth|situation|fact)\b/u;
+const MONEY_ALTERNATION = MONEY_WORDS.join('|');
+
+/**
+ * Each pattern's verb occurrences that are the player's own act: not negated
+ * or refused, not asked of someone else, not someone else's request, not a
+ * question or a second thought, and not done by someone else. Patterns
+ * marked `asked` are requests by the player ("can you sell me a candle?") and
+ * keep only the negation check.
+ */
+function verbHits(text, pattern, { asked = false } = {}) {
+    const hits = [];
+    const global = new RegExp(pattern.source, pattern.flags.includes('g') ? pattern.flags : `${pattern.flags}g`);
+    for (const match of text.matchAll(global)) {
+        const before = text.slice(Math.max(0, match.index - 60), match.index);
+        if (NEGATED.test(before)) continue;
+        if (!asked && (ASKED_OF_OTHERS.test(before) || DIRECTED.test(before) || TENTATIVE.test(before) || THIRD_PERSON.test(before))) continue;
+        hits.push(match);
+    }
+    return hits;
+}
+
+const INTENT_PATTERNS = Object.freeze([
+    ['buy', /\b(?:buy|buys|buying|bought|purchase[sd]?|purchasing|rent(?:s|ed|ing)?|hire[sd]?|hiring)\b/u],
+    ['buy', new RegExp(`\\b(?:i'?ll|i will|let me|i'?d like to|i want to)\\s+(?:take|have|get)\\s+(?:it|that|this|them|those|these|one|two|three|a room|the room|a bed|the bed)\\b`, 'u')],
+    ['buy', /\b(?:i'?d like|i would like|i want|i'?ll have|give me|get me|i'?ll take)\s+(?:a|an|one|two|three|some|the|another)\s+(?:room|bed|drink|meal|bowl|cup|pint|mug|plate|loaf|ale|beer|wine|stew|bread|round|bath|night)\b/u, { asked: true }],
+    // Asking to be sold something is buying: "can you sell me a candle?", "could I get a room?"
+    ['buy', /\b(?:sell|sells)\s+me\b/u, { asked: true }],
+    ['buy', /\b(?:can|could|may)\s+i\s+(?:get|have|buy|take|rent)\s+(?:a|an|one|two|three|the|some|another)\b/u, { asked: true }],
+    ['pay', /\b(?:pay|pays|paying|paid|tip(?:s|ped|ping)?|bribe[sd]?|bribing|settle[sd]?\s+(?:up|the|my|our)|settling\s+(?:up|the|my|our)|cover(?:s|ed)?\s+(?:the|my|our)\s+(?:bill|tab|cost|fee|fare|meal|room|drinks?))\b/u],
+    ['sell', /\b(?:sell|sells|selling|sold|pawn(?:s|ed|ing)?|barter(?:s|ed|ing)?)\b/u],
+    ['trade', /\b(?:trade|trades|traded|trading|swap|swaps|swapped|swapping|exchange[sd]?|exchanging)\b/u],
+    ['give', new RegExp(`\\b(?:give|gives|giving|gave|offer(?:s|ed|ing)?|lend(?:s|ing)?|lent|hand|hands|handed|handing)\\s+(?:over\\s+)?(?:\\w+\\s+)?${OBJECT}\\b`, 'u')],
+    // Softer verbs count only with coin in hand, or a recipient and a thing:
+    // "slide two coppers across", "toss him a coin", not "pass the guard",
+    // "push him away" or "put the coins in my pocket".
+    ['give', new RegExp(`\\b(?:pass|passes|passed|passing|slide|slides|slid|sliding|toss|tosses|tossed|tossing|flip|flips|flipped|flipping)\\s+(?:over\\s+)?(?:her|him|them)\\s+(?:${OBJECT}|${MONEY_ALTERNATION})\\b`, 'u')],
+    ['give', new RegExp(`\\b(?:pass|passes|passed|passing|slide|slides|slid|sliding|toss|tosses|tossed|tossing|flip|flips|flipped|flipping|press|presses|pressed|pressing|push|pushes|pushed|pushing|count(?:s|ed|ing)?\\s+out)\\s+(?:over\\s+)?(?:\\w+\\s+){0,3}(?:${MONEY_ALTERNATION})\\b`, 'u')],
+    ['receive', /\b(?:accept(?:s|ed|ing)?|receive[sd]?|receiving)\b/u],
+    ['take', /\b(?:take|takes|taking|took|grab|grabs|grabbed|grabbing|pocket(?:s|ed|ing)?|loot(?:s|ed|ing)?|steal|steals|stealing|stole|snatch(?:es|ed|ing)?|pilfer(?:s|ed|ing)?)\b/u],
+    ['take', /\b(?:pick|picks|picked|picking)\s+(?:\w+\s+){0,3}up\b/u],
+    ['drop', /\b(?:drop|drops|dropped|dropping|discard(?:s|ed|ing)?|abandon(?:s|ed|ing)?)\b/u],
+    ['drop', /\b(?:set|sets|setting|put|puts|putting)\s+(?:\w+\s+){0,3}down\b/u],
+    ['drop', /\b(?:throw|throws|threw|throwing|toss|tosses|tossed)\s+(?:\w+\s+){0,3}away\b/u],
+    ['drop', /\b(?:leave|leaves|leaving|left)\s+(?:it|them|the|my|this|that)\s+(?:\w+\s+){0,3}(?:behind|here|there|on|in)\b/u],
+    ['consume', /\b(?:eat|eats|eating|ate|drink|drinks|drinking|drank|sip|sips|sipped|sipping|gulp(?:s|ed|ing)?|quaff(?:s|ed|ing)?|swallow(?:s|ed|ing)?|devour(?:s|ed|ing)?|chew(?:s|ed|ing)?)\b/u],
+    ['consume', /\b(?:light|lights|lighting|lit|burn|burns|burned|burning|use|uses|used|using)\s+(?:up\s+)?(?:the|a|an|my|one|some)\s+\w+/u],
+    // "I charge him two coppers", "charge her for the stew"; not "charge at the guard".
+    ['collect', new RegExp(`\\b(?:charge[sd]?|charging)\\s+(?:her|him|them|you|the\\s+\\w+|\\w+)\\s+(?:\\d+|${NUMBER_WORDS.join('|')}|for)\\b`, 'u')],
+    ['collect', /\b(?:collect(?:s|ed|ing)?|demand(?:s|ed|ing)?|ask(?:s|ed|ing)?\s+for)\s+(?:my|the|our|his|her|their)?\s*(?:payment|pay|wages|coin|coins|money|debt|bounty|reward|share|cut|fee)\b/u],
+]);
+
+/** Whether a text names a sum of money (a number or number word before a money word, or a bare money word). */
+export function mentionsMoney(text, extraWords = []) {
+    const words = [...MONEY_WORDS, ...extraWords.map(word => String(word || '').toLocaleLowerCase()).filter(Boolean)];
+    const alternation = [...new Set(words)].map(word => word.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')).join('|');
+    const value = String(text || '').toLocaleLowerCase();
+    return new RegExp(`\\b(?:\\d+|${NUMBER_WORDS.join('|')})\\s+(?:\\w+\\s+)?(?:${alternation})\\b`, 'u').test(value)
+        || /\b(?:coin|coins|money|payment|cash)\b/u.test(value);
+}
+
+/**
+ * What exchanges the player's own message makes: buy, pay, sell, trade,
+ * give, receive, take, drop, consume, collect, and accept (a short "deal",
+ * "yes", "here you go" when the narration before it named a price). Only
+ * the player's words count: a verb that is negated ("I don't pay") or asked
+ * of someone else ("do you sell...?") is not the player doing it, and a
+ * price asked ("how much for a bed?") is not an exchange.
+ */
+export function playerExchangeIntent(text, { previousText = '', currencyWords = [] } = {}) {
+    const value = ` ${String(text || '').toLocaleLowerCase().replace(/[‘’]/gu, "'").replace(/[“”]/gu, '"')} `;
+    const kinds = new Set();
+    for (const [kind, pattern, options] of INTENT_PATTERNS) {
+        for (const match of verbHits(value, pattern, options)) {
+            if (kind === 'take' && /^tak|^took/u.test(match[0]) && TAKE_IDIOMS.test(value.slice(match.index + match[0].length))) continue;
+            // Idioms are read from just after the verb: "give her a nod", "accept her apology".
+            const afterVerb = value.slice(match.index + (match[0].match(/^\S+/u)?.[0].length || 0));
+            if (kind === 'give' && /^(?:giv|gave|hand|offer|lend|lent)/u.test(match[0]) && GIVE_IDIOMS.test(afterVerb)) continue;
+            if (kind === 'receive' && RECEIVE_IDIOMS.test(afterVerb)) continue;
+            kinds.add(kind);
+            break;
+        }
+    }
+    const money = mentionsMoney(value, currencyWords);
+    // Coin handed, slid or tossed over is a payment.
+    if (kinds.has('give') && money) kinds.add('pay');
+    if (kinds.has('trade')) {
+        kinds.add('buy');
+        kinds.add('sell');
+    }
+    const words = value.trim().split(/\s+/u).filter(Boolean);
+    const offerBefore = mentionsMoney(previousText, currencyWords) || /\b(?:price|costs?|for sale|sells?|buy|pay|charge)\b/u.test(String(previousText || '').toLocaleLowerCase());
+    const shortAgreement = words.length <= 6 && /^\s*["']?\s*(?:yes|yeah|yep|sure|ok(?:ay)?|alright|all right|fine|deal|agreed|done|very well|here(?:'s| is| you go| you are)?)\b/u.test(value);
+    const explicitAgreement = /\b(?:deal|agreed|i accept|you have a deal|it'?s a deal|here you go|here you are|keep the change|i'?ll take it|i'?ll pay)\b/u.test(value);
+    if (offerBefore && (shortAgreement || explicitAgreement)) kinds.add('accept');
+    return { kinds, any: kinds.size > 0, money };
+}
+
+/** Which of the player's exchange kinds allow a game action of this kind. */
+const CONSENTED_BY = Object.freeze({
+    buy: ['buy', 'pay', 'accept', 'trade'],
+    sell: ['sell', 'accept', 'trade'],
+    pay: ['pay', 'buy', 'accept'],
+    collect: ['collect', 'sell', 'accept'],
+    give: ['give', 'sell', 'trade', 'pay'],
+    receive: ['receive', 'accept', 'buy', 'take', 'collect', 'trade'],
+    take: ['take', 'receive'],
+    drop: ['drop', 'give'],
+    consume: ['consume'],
+});
+
+/** Whether the player's own message consents to an action of this kind. */
+export function actionConsented(kind, intent) {
+    const allowed = CONSENTED_BY[kind] || [];
+    return Boolean(intent?.kinds) && allowed.some(item => intent.kinds.has(item));
+}
+
+/** A short description of an action for a refusal. */
+export function describeAction(action) {
+    const a = action || {};
+    const what = a.item || (a.amount !== null && a.amount !== undefined ? String(a.amount) : '') || '';
+    return `${a.kind || 'action'}${what ? ` ${what}` : ''}${a.person ? ` (${a.person})` : ''}`.trim();
+}
+
 /** The tools offered to the story model, in SillyTavern's function-tool shape. */
 export const GAME_TOOLS = Object.freeze([
     {
         name: 'game_trade',
         displayName: 'Game: buy or sell',
-        description: 'The player buys one thing or service from a person here, or sells one thing they carry to a person here, for coin. The game system checks the purse, the stock and the price, moves the coin and the item, and reports the result. Call it before narrating any purchase or sale, then narrate exactly what it reports; never invent a different price or outcome.',
+        description: 'The player buys one thing or service from a person here, or sells one thing they carry to a person here, for coin, because the player\'s newest message says so. The game system checks the purse, the stock and the price, moves the coin and the item, and reports the result. Call it before narrating the purchase or sale, then narrate exactly what it reports; never invent a different price or outcome. Never call it for a price someone only names or asks, and never to report that nothing changed hands.',
         parameters: {
             type: 'object',
             properties: {
@@ -68,7 +214,7 @@ export const GAME_TOOLS = Object.freeze([
     {
         name: 'game_transfer',
         displayName: 'Game: hand over or pick up',
-        description: 'A tracked thing changes hands without payment: the player gives something they carry to a person (give), a person hands something to the player (receive), the player picks something up from the place, a container or a body (take), or sets something down here (drop). The game system moves it and reports the result. Call it before narrating the handover, then narrate what it reports.',
+        description: 'A tracked thing changes hands without payment because the player\'s newest message says so: the player gives something they carry to a person (give), accepts something a person hands them (receive), picks something up from the place, a container or a body (take), or sets something down here (drop). The game system moves it and reports the result. Call it before narrating the handover, then narrate what it reports. Never call it to report that nothing changed hands.',
         parameters: {
             type: 'object',
             properties: {
@@ -83,7 +229,7 @@ export const GAME_TOOLS = Object.freeze([
     {
         name: 'game_coin',
         displayName: 'Game: pay or be paid',
-        description: 'Coin alone changes hands: the player pays a person (pay) for a fee, a tip, a bribe, a wager, a debt, or anything that is not a listed item or service; or a person pays the player (collect). The game system checks the purse and reports the result. Call it before narrating the payment.',
+        description: 'Coin alone changes hands because the player\'s newest message says so: the player pays a person (pay) for a fee, a tip, a bribe, a wager, a debt, or anything that is not a listed item or service; or the player collects coin a person owes them (collect). The game system checks the purse and reports the result. Call it before narrating the payment. Never call it with a zero amount, for a price someone only demands, or to report that no coin moved.',
         parameters: {
             type: 'object',
             properties: {
@@ -98,7 +244,7 @@ export const GAME_TOOLS = Object.freeze([
     {
         name: 'game_consume',
         displayName: 'Game: use up',
-        description: 'The player eats, drinks, burns, breaks or otherwise uses up something they carry. The game system removes it and reports the result.',
+        description: 'The player eats, drinks, burns, breaks or otherwise uses up something they carry, because the player\'s newest message says so. The game system removes it and reports the result.',
         parameters: {
             type: 'object',
             properties: {
@@ -664,7 +810,7 @@ export function renderResolvedActions(outcomes, options = {}) {
 export function renderToolGuidance({ offered = true, resolved = false } = {}) {
     if (!offered) return '';
     if (resolved) return 'GAME TOOLS: this turn\'s exchanges are resolved above. Narrate; do not call the tools again.';
-    return 'GAME TOOLS: whenever this turn has the player buy, sell, give, receive, pick up, drop, pay, collect or use up something, call the matching game tool (game_trade, game_transfer, game_coin, game_consume) BEFORE writing any prose, one call per exchange, with the names the game state uses. The game system applies it and reports what happened; your reply then narrates that report exactly (a refused purchase is narrated as refused). Call nothing when the turn moves no coin or belongings. Never write a tool call as text inside the story.';
+    return 'GAME TOOLS: the player\'s newest message moves coin or belongings. For each exchange that message makes (buy, sell, give, accept, pick up, drop, pay, collect, use up), call the matching game tool (game_trade, game_transfer, game_coin, game_consume) BEFORE writing any prose, one call per exchange, with the names the game state uses. The game system applies it and reports what happened; narrate that report exactly (a refused purchase is narrated as refused). Call nothing for what the player did not do: an exchange someone else only offers, demands or prices is narrated as an offer, and the player decides. Never call a tool to report that nothing changed hands, and never write a tool call as text inside the story.';
 }
 
 /** A one-line summary of what the trade screen asked for, as the player's message. */

@@ -9,10 +9,10 @@ import {
     gameContext,
     itemsAtPlace,
     normalizeGameRecords,
-} from '../game.js?v=4';
-import { buildLedgerMessages, buildPlannerMessages } from '../game-prompts.js?v=4';
-import { validateGamePayload } from '../game-client.js?v=2';
-import { parseInnerLoreDsl, parseInnerLoreOutput, prepareOutputMessages } from '../output-codec.js?v=5';
+} from '../game.js?v=6';
+import { buildLedgerMessages, buildPlannerMessages } from '../game-prompts.js?v=7';
+import { validateGamePayload } from '../game-client.js?v=4';
+import { parseInnerLoreDsl, parseInnerLoreOutput, prepareOutputMessages } from '../output-codec.js?v=7';
 
 function world() {
     const store = createEmptyStore('game-prompts');
@@ -59,7 +59,7 @@ test('the planner prompt briefs each place and asks for a starting kit only when
     assert.match(without[1].content, /\{"name":"Bess","at":"Salt Lantern"\}/u);
     const dsl = prepareOutputMessages(without, { format: 'dsl', task: 'planner' });
     assert.match(dsl[0].content, /First line exactly: INNERLORE PLANNER 1/u);
-    assert.match(dsl[0].content, /Emit one STAGE for every place in PLACES_TO_PREPARE/u);
+    assert.match(dsl[0].content, /Emit a STAGE for a place in PLACES_TO_PREPARE when you have a summary or hooks/u);
 });
 
 test('a ledger answer in DSL becomes a purchase: stock to the player, money to the seller', () => {
@@ -160,11 +160,19 @@ DONE`;
 });
 
 test('validation fills empty lists and refuses people with nowhere to be', () => {
-    assert.deepEqual(validateGamePayload({}, 'game'), { objects: [], money: [], prices: [], standings: [], reputation: [], deaths: [], abilities: [], contacts: [] });
+    assert.deepEqual(validateGamePayload({}, 'game'), { objects: [], money: [], prices: [], standings: [], reputation: [], deaths: [], abilities: [], contacts: [], links: [] });
     assert.deepEqual(validateGamePayload({ device: { present: true } }, 'abilities'), { abilities: [], contacts: [], device: { present: true } });
     assert.throws(() => validateGamePayload({ device: 'phone' }, 'abilities'), /must be a record/u);
     assert.throws(() => validateGamePayload({ objects: 'none' }, 'game'), /must be a list/u);
-    assert.throws(() => validateGamePayload({ people: [{ name: 'Old Fen' }] }, 'planner'), /without a STAGE/u);
+    assert.throws(() => validateGamePayload({ people: [{ name: 'Old Fen' }] }, 'planner'), /without a place/u);
+    // The STAGE header is derived: a person who names their place gets a stage, and the only planned place fills a missing location.
+    const located = validateGamePayload({ people: [{ name: 'Old Fen', location: 'Old Quay' }] }, 'planner');
+    assert.deepEqual(located.stages.map(stage => [stage.place, stage.synthesized]), [['Old Quay', true]]);
+    const single = validateGamePayload({ people: [{ name: 'Old Fen' }] }, 'planner', { places: ['Salt Lantern'] });
+    assert.equal(single.people[0].location, 'Salt Lantern');
+    assert.equal(single.stages[0].place, 'Salt Lantern');
+    const explicit = validateGamePayload({ stages: [{ place: 'Old Quay', summary: 'Wet.' }], people: [{ name: 'Old Fen', location: 'old quay' }] }, 'planner');
+    assert.equal(explicit.stages.length, 1, 'an explicit STAGE is not duplicated by a differently cased location');
 });
 
 test('a ledger DEATH record and a planner coin field parse from the DSL', () => {
@@ -197,9 +205,9 @@ DONE`, { format: 'dsl', task: 'planner' });
 
 
 test('an assisted planner is asked for a smaller cast with one carried thing each', async () => {
-    const { buildPlannerMessages } = await import('../game-prompts.js?v=4');
+    const { buildPlannerMessages } = await import('../game-prompts.js?v=7');
     const { createEmptyStore } = await import('../core.js?v=49');
-    const { createGameState } = await import('../game.js?v=4');
+    const { createGameState } = await import('../game.js?v=6');
     const base = { game: createGameState(), store: createEmptyStore('cast'), targets: [{ name: 'Salt Lantern', reason: 'the player is here' }], startingKit: true, playerName: 'Jet', settings: {} };
     const plain = buildPlannerMessages(base).map(m => m.content).join('\n');
     const assisted = buildPlannerMessages({ ...base, assisted: true }).map(m => m.content).join('\n');

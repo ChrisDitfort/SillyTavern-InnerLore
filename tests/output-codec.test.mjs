@@ -13,7 +13,7 @@ import {
     prepareOutputMessages,
     stringifyInnerLoreDsl,
     structuredRequestOptions,
-} from '../output-codec.js';
+} from '../output-codec.js?v=7';
 
 test('curator DSL maps readable location and mind records to the canonical object', () => {
     const result = parseInnerLoreDsl(`Some harmless provider preamble.

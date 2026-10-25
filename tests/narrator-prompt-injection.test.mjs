@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { insufficientResponseCap, planNarratorPromptDelivery } from '../prompts.js';
+import { insufficientResponseCap, planNarratorPromptDelivery } from '../prompts.js?v=12';
 
 test('a delivered main prompt needs no order change', () => {
     assert.equal(planNarratorPromptDelivery(null), null);

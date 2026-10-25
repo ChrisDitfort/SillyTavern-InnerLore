@@ -1,0 +1,6 @@
+# Never committed: Python bytecode, local backups and logs.
+__pycache__/
+*.pyc
+*.bak-*
+*.log
+node_modules/

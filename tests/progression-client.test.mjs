@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { outputLooksLikeDraft, validateProgressionPayload } from '../progression-client.js';
-import { outputParseDiagnostics } from '../output-codec.js?v=5';
-import { buildProgressionRepairMessages } from '../progression-prompts.js';
+import { outputLooksLikeDraft, validateProgressionPayload } from '../progression-client.js?v=2';
+import { outputParseDiagnostics } from '../output-codec.js?v=7';
+import { buildProgressionRepairMessages } from '../progression-prompts.js?v=2';
 
 function payload(eventEvaluations = []) {
     return {

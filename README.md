@@ -109,6 +109,38 @@ The plugin exposes authenticated routes under `/api/plugins/innerlore-storage/v1
 
 The story model and background model are independent. The current configuration uses OpenRouter DeepSeek V4 Pro 0813 Thinking for prose, InnerLore, and World Progression. SummarySception may retain its separate MiMo 2.5 Pro Thinking summarizer profile.
 
+## Background work runs on the server
+
+Every model call InnerLore makes outside the story itself runs inside the
+`innerlore-storage` plugin, not in the page: the curator, NPC minds, world
+progression, the game ledger and scene planner (one `pass` job per analysis),
+portraits (`portrait`), the other person's answer in a private conversation
+(`private-reply`) and the history rebuild (`rebuild`). The page plans the work,
+hands the server what it needs (the chat, the settings, the connection records
+by id; keys never leave the secret store) and goes back to the story. A phone
+browser that freezes the tab changes nothing: the job finishes, commits to the
+store and is pushed to every open page over a WebSocket
+(`/api/plugins/innerlore-storage/v1/ws`); a page that wakes up re-subscribes and
+receives the world's current state at once.
+
+Saves no longer carry the whole store either. The page sends the changes it
+made since the last revision it adopted (path-level operations, append-aware
+for journals and logs) and the server applies them onto its current snapshot,
+so two pages, or a page and a server job, never produce a revision conflict.
+A server job commits the same way: onto the latest revision, with the turn
+counter settled against what landed meanwhile.
+
+The server keeps each provider's request budget (NanoGPT ten at once,
+Featherless its units, NovelAI one) and the story's share of it: the page
+reports when a story request is out, the server holds new passes until the
+reply is written and keeps the story's slot free, and on a one-request
+provider the story cancels the running pass (it re-runs after the reply).
+
+Settings → InnerLore keeps two switches for the old behaviour: `serverJobs`
+(all of it) and `serverPasses` (the analysis passes only); the page runs the
+same code itself when they are off or when the plugin has not been restarted
+on the new routes.
+
 ## Generated lorebook
 
 Each chat receives a book named like:
@@ -452,7 +484,7 @@ A branched chat inherits the useful state present at the branch point but receiv
 
 ## Chat deletion cleanup
 
-InnerLore story state is owned by its SillyTavern chat. Deleting an individual or group chat permanently removes its complete server world directory, including SQLite snapshots and revision history plus the LadybugDB/SQLite graph projection. InnerLore also cancels any in-flight work for that chat, clears its runtime prompt injection, deletes every separate generated World Info book associated with the deleted chat, and deletes the portrait files the chat drew. When SillyTavern starts, InnerLore also removes the worlds, books and portrait files of chats that no longer exist (deleted with their character, removed by hand, or deleted before this cleanup existed).
+InnerLore story state is owned by its SillyTavern chat. Deleting an individual or group chat permanently removes its world from the server's SQLite database: the store snapshot, its revision history, its context profiles and every server job the chat ran (a job keeps what it was given and what it answered, so it holds the chat's messages). Deleted rows are overwritten with zeros (SQLite `secure_delete`) and the write-ahead log is folded in and emptied right after, so the text does not linger in the database files. InnerLore also cancels any in-flight work for that chat (a portrait or picture that finishes drawing after the deletion is thrown away with its file), clears its runtime prompt injection, deletes every separate generated World Info book associated with the deleted chat, and deletes the portrait and picture files the chat drew. Deleting a character with its chats does all of this for each chat. When SillyTavern starts, InnerLore also removes the worlds, books and image files of chats that no longer exist (deleted with their character, removed by hand, or deleted before this cleanup existed).
 
 Generated books carry an ownership marker in addition to their chat-id hash. A small settings registry preserves the association across chat renames, and deletion failures enter a persistent retry queue that is processed when InnerLore next loads. Ordinary SillyTavern chat backups remain subject to SillyTavern's own backup-retention and Data Maid controls; they are not active InnerLore state and are never injected after the live chat is deleted.
 

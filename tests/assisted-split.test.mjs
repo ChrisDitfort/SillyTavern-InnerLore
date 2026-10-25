@@ -2,10 +2,10 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { createEmptyStore, mergeEntityOperations } from '../core.js?v=49';
-import { amountMentions, groundedRecords, normalizeCurrency, objectsNamedIn, createGameState, applyGameOperations } from '../game.js?v=4';
-import { buildLedgerMessages } from '../game-prompts.js?v=4';
-import { parseInnerLoreOutput } from '../output-codec.js?v=5';
-import { modelSizeBillions } from '../llm-client.js?v=19';
+import { amountMentions, groundedRecords, normalizeCurrency, objectsNamedIn, createGameState, applyGameOperations } from '../game.js?v=6';
+import { buildLedgerMessages } from '../game-prompts.js?v=7';
+import { parseInnerLoreOutput } from '../output-codec.js?v=7';
+import { modelSizeBillions } from '../llm-client.js?v=21';
 import { installMockInnerLoreStorage } from './mock-storage-server.mjs';
 
 const storage = installMockInnerLoreStorage();
@@ -95,7 +95,10 @@ test('a minds profile splits the curator into two requests side by side; the ass
         SlashCommandParser: null, SlashCommand: null,
         ConnectionManagerRequestService: {
             getSupportedProfiles: () => profiles,
-            sendRequest: (profileId, messages) => new Promise(resolve => pending.push({ profileId, kind: kindOf(messages), prompt: messages.map(m => m.content).join('\n'), answer: content => resolve({ content }) })),
+            // Newcomers' gifts are settled in the background: answered at once (nobody gifted), outside the passes this test holds.
+            sendRequest: (profileId, messages) => new Promise(resolve => (/Ability Judge/u.test(messages.map(m => m.content).join('\n'))
+                ? resolve({ content: 'INNERLORE ABILITIES 1\nDONE' })
+                : pending.push({ profileId, kind: kindOf(messages), prompt: messages.map(m => m.content).join('\n'), answer: content => resolve({ content }) }))),
         },
         loadWorldInfo: async () => null, saveWorldInfo: async () => {}, updateWorldInfoList: async () => {},
     };
@@ -131,9 +134,16 @@ test('a minds profile splits the curator into two requests side by side; the ass
     }
     const committed = () => storage.worlds.get(worldId)?.innerLore?.store;
     await waitFor(() => committed()?.game?.lastProcessedIndex === 2 && committed()?.lastProcessedIndex === 2, 8_000, 'the reply commit');
-    const saved = committed();
+    let saved = committed();
     assert.ok(Object.values(saved.entities).some(entity => entity.name === 'tallow candle'), 'the entities half merged');
     assert.match(Object.values(saved.brains).find(brain => brain.name === 'Mara Quell')?.currentMind?.immediateGoal || '', /Close up/u, 'the minds half merged');
+    // The candle and its payment were told in prose: they wait for the player's word, then apply.
+    assert.equal(saved.game.pending.length, 1, 'one question for the candle and its payment');
+    assert.deepEqual(saved.game.pending[0].ops.map(op => op.type).sort(), ['item.add', 'money']);
+    assert.ok(!Object.values(saved.game.items).some(item => item.name === 'tallow candle' && item.holder.kind === 'player'), 'nothing in the bag yet');
+    for (const entry of saved.game.pending) await globalThis.InnerLore.test.confirmTrade(entry.id, true);
+    await waitFor(() => committed()?.game?.pending?.length === 0, 8_000, 'the confirmations saved');
+    saved = committed();
     assert.ok(Object.values(saved.game.items).some(item => item.name === 'tallow candle' && item.holder.kind === 'player'));
     assert.equal(saved.game.standings?.['mara quell'], undefined, 'the regard change with invented evidence was dropped');
     assert.equal(saved.lastRunStats.gameResult.ungrounded, 1);

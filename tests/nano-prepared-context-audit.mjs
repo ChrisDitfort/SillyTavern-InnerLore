@@ -19,7 +19,7 @@ import {
     mergeMindOperations,
 } from '../core.js';
 import { compileTriggerEventDeliveryPreview } from '../event-delivery.js';
-import { buildAnalysisMessages } from '../prompts.js';
+import { buildAnalysisMessages } from '../prompts.js?v=12';
 import { upsertTriggerEventDefinition } from '../trigger-events.js';
 
 const MODEL = process.env.INNERLORE_AUDIT_MODEL || 'deepseek/deepseek-v4-pro-0813:thinking';

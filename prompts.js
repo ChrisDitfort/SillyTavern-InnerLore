@@ -170,6 +170,28 @@ function buildEntitySnapshot(store, transcript, currentIndex, maximumEntities) {
     }));
 }
 
+/**
+ * The curator's system prompt without the half a request does not want: the
+ * minds split sends people and places to one connection and minds to
+ * another, and a world with inner self or automatic lore switched off never
+ * needed the other half's rules either.
+ */
+function trimSystemRules(system, { wantEntities, wantMinds }) {
+    if (wantEntities && wantMinds) return system;
+    const entityAt = system.indexOf('\nENTITY PATCH RULES\n');
+    const mindAt = system.indexOf('\nPRIVATE MIND RULES\n');
+    const schemaAt = system.indexOf('\nOUTPUT SCHEMA\n');
+    if (entityAt < 0 || mindAt < 0 || schemaAt < 0) return system;
+    const head = system.slice(0, entityAt);
+    const entityRules = system.slice(entityAt, mindAt);
+    const mindRules = system.slice(mindAt, schemaAt);
+    const schema = system.slice(schemaAt);
+    const note = !wantEntities
+        ? '\nENTITY PATCH RULES\n- Entities are not patched in this request: return "entities": [] and spend the response on minds.\n'
+        : '\nPRIVATE MIND RULES\n- Private minds are not patched in this request: return "minds": [] and spend the response on entities.\n';
+    return `${head}${wantEntities ? entityRules : ''}${wantMinds ? mindRules : ''}${note}${schema}`;
+}
+
 export function buildAnalysisMessages(options) {
     const settings = options.settings || {};
     const foundationOnly = options.foundationOnly === true;
@@ -466,17 +488,16 @@ OUTPUT SCHEMA
   ]
 }`;
 
-    const user = `<CHARACTER_CARD>
-${cardContext || '(No character-card fields supplied.)'}
-</CHARACTER_CARD>
-
-<EXISTING_ENTITY_KEYRING>
+    // A request that wants only one half (the minds split, inner self or
+    // automatic lore switched off) carries only that half's rules and state:
+    // the other half's rules, keyrings and audits would be thousands of
+    // characters the model is told to ignore.
+    const wantEntities = settings.autoLoreEnabled !== false;
+    const wantMinds = settings.innerSelfEnabled !== false;
+    const systemText = trimSystemRules(system, { wantEntities, wantMinds });
+    const entityState = wantEntities ? `<EXISTING_ENTITY_KEYRING>
 ${JSON.stringify(entityKeyring)}
 </EXISTING_ENTITY_KEYRING>
-
-<EXISTING_PRIVATE_MIND_KEYRING>
-${JSON.stringify(brainKeyring)}
-</EXISTING_PRIVATE_MIND_KEYRING>
 
 <EXISTING_RELEVANT_ENTITIES>
 ${JSON.stringify(existingEntities)}
@@ -487,7 +508,21 @@ ${JSON.stringify(declaredLocationNames)}
 These are exact place identities explicitly established in PASSAGE. When a listed place receives a patch, its name must remain the exact listed string unless EXISTING_ENTITY_KEYRING already identifies that exact place by a canonical name or alias. Do not shorten it to a gate, barracks, district, building, or other container. Use parent_location for containment.
 </EXPLICIT_NAMED_LOCATION_ANCHORS>
 
-<EXISTING_RELEVANT_PRIVATE_MINDS>
+` : `<EXISTING_ENTITY_KEYRING>
+${JSON.stringify(entityKeyring)}
+(Entities are not patched in this request: return "entities": []. The keyring is for naming minds consistently.)
+</EXISTING_ENTITY_KEYRING>
+
+`;
+    const user = `<CHARACTER_CARD>
+${cardContext || '(No character-card fields supplied.)'}
+</CHARACTER_CARD>
+
+${entityState}<EXISTING_PRIVATE_MIND_KEYRING>
+${JSON.stringify(brainKeyring)}
+</EXISTING_PRIVATE_MIND_KEYRING>
+
+${wantMinds ? `<EXISTING_RELEVANT_PRIVATE_MINDS>
 ${JSON.stringify(existingBrains)}
 </EXISTING_RELEVANT_PRIVATE_MINDS>
 
@@ -506,7 +541,9 @@ ${recentExpressionText || '(No prior story expression is available for cooldown.
 These excerpts are supplied only to prevent repeated surface realization. Do not quote, paraphrase, or continue their gestures and phrasing in Current Mind. Preserve any still-relevant underlying psychology without replaying its visible form.
 </RECENT_EXPRESSION_COOLDOWN>
 
-<RUN_CONFIGURATION>
+` : `(Private minds are not patched in this request: return "minds": [].)
+
+`}<RUN_CONFIGURATION>
 Inner-self updates enabled: ${settings.innerSelfEnabled !== false}
 Automatic lore updates enabled: ${settings.autoLoreEnabled !== false}
 Additional user instructions: ${customInstructions || '(none)'}
@@ -527,7 +564,9 @@ Before returning JSON, inspect the passage for any agreement, obedience, composu
 2. A private relationship may assert sincere acceptance only when independent private evidence establishes it, not from dialogue alone. Otherwise store the conditional bargain and unresolved tension with inferred confidence, or omit it.
 3. Current Mind must distinguish what the NPC committed to aloud from what they privately want. If any inner_thought questions whether they meant the spoken yes, no other field may claim confirmed acceptance.
 Scan the proposed JSON for these contradictions and correct them before output.
-</REQUIRED_FINAL_VOLITION_AUDIT>
+</REQUIRED_FINAL_VOLITION_AUDIT>`;
+    const userText = user.replace(/\n<REQUIRED_FINAL_VOLITION_AUDIT>[\s\S]*<\/REQUIRED_FINAL_VOLITION_AUDIT>/u, match => (wantMinds ? match : ''));
+    const coverageAudit = `
 
 <REQUIRED_FINAL_COVERAGE_AUDIT>
 Before returning JSON, check coverage and placement against PASSAGE and CHARACTER_CARD:
@@ -535,17 +574,19 @@ Before returning JSON, check coverage and placement against PASSAGE and CHARACTE
 2. Every place where a scene in PASSAGE happens, or that someone goes to, has a location record; a smaller place inside a known one sets parent_location.
 3. Each character's current_location is the place where PASSAGE leaves them, and their current_state agrees with it.
 4. Details from CHARACTER_CARD are canon and may be recorded; anything else must be shown in PASSAGE.
-</REQUIRED_FINAL_COVERAGE_AUDIT>
+</REQUIRED_FINAL_COVERAGE_AUDIT>`;
+    const noveltyAudit = `
 
 <REQUIRED_SURFACE_NOVELTY_AUDIT>
 Before returning JSON, compare each proposed Current Mind field against RECENT_EXPRESSION_COOLDOWN. Rewrite or omit any already-spent gesture, prop use, gaze/body tell, self-command, conspicuous phrase, or dialogue-shaped sentence scaffold. Keep persistent emotion and conflict intact, but leave the narrator multiple fresh ways to express them. Do not solve repetition by flattening the NPC into generic calm exposition.
-</REQUIRED_SURFACE_NOVELTY_AUDIT>
+</REQUIRED_SURFACE_NOVELTY_AUDIT>`;
+    const userFinal = `${userText}${wantEntities ? coverageAudit : ''}${wantMinds ? noveltyAudit : ''}
 
 Return the strict JSON patch now.`;
 
     return [
-        { role: 'system', content: system },
-        { role: 'user', content: user },
+        { role: 'system', content: systemText },
+        { role: 'user', content: userFinal },
     ];
 }
 

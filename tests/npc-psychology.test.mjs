@@ -10,7 +10,7 @@ import {
     normalizeStore,
     renderBrain,
 } from '../core.js';
-import { buildAnalysisMessages } from '../prompts.js';
+import { buildAnalysisMessages } from '../prompts.js?v=12';
 
 function addMind(store, character, options = {}, messageIndex = 4) {
     mergeMindOperations(store, [{

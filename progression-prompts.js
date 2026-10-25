@@ -115,14 +115,14 @@ ELAPSED STORY-TIME INFERENCE
 - A small gesture embedded within a character's uninterrupted speech is normally part of that delivery envelope, not another fully sequential block. Split it out only when transition words or physical necessity show that it happens before or after the speech.
 - The local engine ignores unsupported overlap, sums the maximum duration inside each confirmed parallel group, then sums all sequential groups. Thus a repeated description is deduplicated, but an NPC's later answer is added.
 - When an explicit duration is an envelope for contained activity (for example, “they search for exactly fifteen minutes”), represent that envelope once; do not also add each described action inside it. Add only activity clearly occurring before or after the timed envelope.
-- The elapsed minimum/estimate/maximum must equal that critical-path timeline calculation. Do not omit the narrator's new contribution merely because it occurs in an assistant message.
+- Do not report elapsed totals: the engine computes them from the timeline. Do not omit the narrator's new contribution merely because it occurs in an assistant message.
 - A COMPRESSED STORY MEMORY may summarize spans already represented elsewhere. Use explicit summarized durations or scene changes when rebuilding missing history, but never count a restated event twice.
 - Count only the performed portion of interrupted, refused, hypothetical, intended, or failed actions.
 - Actions occurring together overlap rather than add. Use the longest plausible critical path through the exchange.
 - Explicit time anchors, clocks, dates, travel durations, waits, sleep, scene cuts, and montage language outweigh generic priors.
 - Never invent distance to justify a long travel duration. If the passage gives no scale, use a conservative local-action range consistent with the established scene: crossing a room or following a nearby path is usually seconds, while minutes or longer require distance, obstacles, waiting, or montage evidence.
 - Never use API latency, message timestamps, typing time, token length, or real-world wall time.
-- Give minimum, estimated, and maximum seconds plus confidence from 0 to 1, short evidence-based basis strings, and a list of completed actions. The bounds must satisfy minimum <= estimated <= maximum.
+- Give each timeline segment minimum, estimated and maximum seconds (minimum <= estimated <= maximum), plus one confidence from 0 to 1 for the whole estimate, short evidence-based basis strings, and a list of completed actions.
 - DETERMINISTIC_ELAPSED_ANCHORS is computed locally from declarative phrases such as “three full days pass.” Count each listed anchor exactly once. Do not reproduce an anchor as multiple timeline segments, and do not emit a detailed action-by-action timeline for time already enclosed by an exact anchor. Add only genuinely sequential time outside its envelope. The local engine enforces the anchor as a floor.
 - Useful soft priors, always subordinate to the fiction: a greeting or a few spoken lines usually takes seconds; searching a room takes minutes; meals and local travel may take tens of minutes; sleep takes hours. Do not mechanically assign these values when the passage establishes otherwise.
 - ${timeMode === 'cinematic' ? 'Cinematic mode: compress routine or montage activity when the prose clearly skips it, but retain explicit durations.' : timeMode === 'simulation' ? 'Simulation mode: favor physically plausible elapsed time and wider uncertainty where distance or action detail is missing.' : 'Balanced mode: use plausible physical time while respecting ordinary narrative compression.'}
@@ -148,7 +148,7 @@ TRUSTED TRIGGER EVENTS
 - Only definitions supplied in TRIGGERABLE_EVENT_DEFINITIONS are persistent trigger watchers. Never invent another definition in event_evaluations. The ordinary events array remains for story-established deadlines and progression beats; it must not be used to clone a trigger definition.
 - The local deterministic engine evaluates configured elapsed-time thresholds after applying your time estimate. You evaluate only semantic action, cancellation, revelation, public-disclosure, and resolution conditions against COMPLETED_PASSAGE.
 - Return exactly one event_evaluations acknowledgement for every definition supplied in TRIGGERABLE_EVENT_DEFINITIONS, even when nothing matched. Use the definition's exact key, set evaluated true, and give a concise reason. Omitting a supplied definition makes the complete response invalid. Do not return definitions that were not supplied.
-- Include condition objects only for conditions that actually match this completed passage. Every matched condition requires concise quoted-or-paraphrased evidence, the exact source message_indexes, and the actual actor for trigger_action.
+- Include condition objects only for conditions that actually match this completed passage. Every matched condition requires concise evidence quoted from the passage (the engine locates the message it came from; a quote that is not in the passage is discarded), and the actual actor for trigger_action.
 - A condition field is legal only when that definition configures its matching predicate: trigger_action requires a non-empty action_condition; cancellation requires cancellation_condition; revelation requires reveal_condition; resolution requires resolution_condition. Never use these fields as generic labels for the event description or its consequences. public_reveal is the sole definition-independent match field.
 - Respect created_at_message. Only strictly later message indexes are eligible; the completed message at which the definition was saved cannot retroactively activate it, including during a rebuild batch.
 - For action_timing after_outcome, trigger_action must describe a completed action, not dialogue about a possible action, an intention, hypothetical, refusal, failed attempt, or another character's action.
@@ -166,7 +166,6 @@ TRUSTED TRIGGER EVENTS
 OUTPUT SCHEMA
 {
   "time": {
-    "elapsed": {"minimum_seconds": 0, "estimated_seconds": 0, "maximum_seconds": 0},
     "confidence": 0.0,
     "basis": ["short observation from the passage"],
     "completed_actions": ["action actually completed"],
@@ -245,11 +244,11 @@ OUTPUT SCHEMA
       "key": "exact editor definition key",
       "evaluated": true,
       "reason": "concise explanation of what matched or why nothing matched",
-      "trigger_action": {"matched": true, "actor": "actual actor", "evidence": ["passage evidence"], "message_indexes": [0]},
-      "cancellation": {"matched": true, "evidence": ["passage evidence"], "message_indexes": [0]},
-      "revelation": {"matched": true, "evidence": ["passage evidence"], "message_indexes": [0]},
-      "public_reveal": {"matched": true, "evidence": ["passage evidence"], "message_indexes": [0]},
-      "resolution": {"matched": true, "evidence": ["passage evidence"], "message_indexes": [0]}
+      "trigger_action": {"matched": true, "actor": "actual actor", "evidence": ["quote from the passage"]},
+      "cancellation": {"matched": true, "evidence": ["quote from the passage"]},
+      "revelation": {"matched": true, "evidence": ["quote from the passage"]},
+      "public_reveal": {"matched": true, "evidence": ["quote from the passage"]},
+      "resolution": {"matched": true, "evidence": ["quote from the passage"]}
     }
   ]
 }`;

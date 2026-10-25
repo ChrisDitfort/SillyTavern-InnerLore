@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { createEmptyStore, mergeEntityOperations } from '../core.js?v=49';
-import { applyGameOperations, createGameState, gameContext, normalizeGameRecords, renderGamePacket } from '../game.js?v=4';
+import { applyGameOperations, createGameState, gameContext, normalizeGameRecords, renderGamePacket } from '../game.js?v=6';
 import {
     ACTION_SOURCE,
     GAME_TOOLS,
@@ -16,7 +16,7 @@ import {
     renderToolGuidance,
     resolveGameAction,
     resolveGameActions,
-} from '../game-actions.js';
+} from '../game-actions.js?v=3';
 
 const PLACE = { name: 'Salt Lantern', id: 'location:salt lantern' };
 

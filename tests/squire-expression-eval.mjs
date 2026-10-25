@@ -23,8 +23,8 @@ import {
     mergeEntityOperations,
     mergeMindOperations,
 } from '../core.js';
-import { extractResponseText } from '../llm-client.js';
-import { buildAnalysisMessages, formatTranscript } from '../prompts.js';
+import { extractResponseText } from '../llm-client.js?v=21';
+import { buildAnalysisMessages, formatTranscript } from '../prompts.js?v=12';
 
 const root = process.cwd();
 const fixturePath = process.env.INNERLORE_SQUIRE_FIXTURE || path.join(

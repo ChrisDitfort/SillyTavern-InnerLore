@@ -21,10 +21,10 @@ import {
     normalizeGameState,
     recentGameChanges,
     renderGamePacket,
-} from '../game.js?v=4';
-import { buildAbilityJudgeMessages, buildLedgerMessages, ledgerStateView } from '../game-prompts.js?v=4';
-import { gameRequestSettings, validateGamePayload } from '../game-client.js?v=2';
-import { dslOutputContract, parseInnerLoreDsl, parseInnerLoreOutput, prepareOutputMessages, stringifyInnerLoreDsl } from '../output-codec.js?v=5';
+} from '../game.js?v=6';
+import { buildAbilityJudgeMessages, buildLedgerMessages, ledgerStateView } from '../game-prompts.js?v=7';
+import { gameRequestSettings, validateGamePayload } from '../game-client.js?v=4';
+import { dslOutputContract, parseInnerLoreDsl, parseInnerLoreOutput, prepareOutputMessages, stringifyInnerLoreDsl } from '../output-codec.js?v=7';
 
 function world() {
     const store = createEmptyStore('abilities');
@@ -242,6 +242,6 @@ DONE`, { format: 'dsl', task: 'game' });
     assert.equal(ledger.abilities[0].delta, 10);
     assert.equal(ledger.contacts[0].number, '0771');
     assert.equal(ledger.device.present, true);
-    // The planner knows nothing of devices.
-    assert.throws(() => parseInnerLoreDsl('INNERLORE PLANNER 1\nDEVICE\npresent = TRUE\nEND\nDONE', 'planner'), /unknown record declaration/u);
+    // The planner may settle the player's device with a starting kit (whether it counts is the world's rules' call).
+    assert.deepEqual(parseInnerLoreDsl('INNERLORE PLANNER 1\nDEVICE\npresent = TRUE\nname = phone\nEND\nDONE', 'planner').device, { present: true, name: 'phone' });
 });

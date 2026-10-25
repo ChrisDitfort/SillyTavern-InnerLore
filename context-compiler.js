@@ -8,7 +8,7 @@
 import { cleanString, compilePromptInjection } from './core.js?v=49';
 import { contextProfileOverrides } from './context-config.js';
 import { collectRecentStoryExpressions } from './expression-cooldown.js';
-import { renderGamePacket } from './game.js?v=4';
+import { renderGamePacket } from './game.js?v=6';
 import { compileProgressionInjection } from './progression.js';
 import { deriveCameraFrame, deriveSceneState, renderCameraPacket } from './scene.js?v=8';
 

@@ -886,3 +886,128 @@ button.il-mv-card-toggle {
 .il-private-card.is-mind .il-sms-bubble.is-player{background:linear-gradient(135deg,#4c3a86,#6a4fb8);color:#f3edff;font-style:italic}
 .il-private-card.is-aside .il-sms-bubble.is-person{background:#1c2a22;color:#e2efe5}
 .il-private-card.is-aside .il-sms-bubble.is-player{background:linear-gradient(135deg,#3b5e45,#4f7a5a);color:#eefbf1}
+
+/* Under the fork's shell the connection pickers live in the API tab's roles. */
+#inner_lore_settings .il-shell-hidden {
+    display: none !important;
+}
+
+#inner_lore_settings .il-shell-roles-note {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+}
+
+#inner_lore_settings .il-shell-roles-note .menu_button {
+    margin: 0;
+}
+
+/* An exchange the story told without the game tools: the player's word moves the coin. */
+.il-confirms {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin: 10px 0 2px;
+}
+
+.il-confirm {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 7px 12px;
+    border: 1px dashed var(--SmartThemeQuoteColor, #e0b060);
+    border-radius: 14px;
+    background: var(--SmartThemeBlurTintColor, rgba(0, 0, 0, 0.35));
+    font-size: 0.9em;
+    line-height: 1.3;
+}
+
+.il-confirm > span {
+    flex: 1;
+    min-width: 0;
+}
+
+.il-confirm small {
+    display: block;
+    opacity: 0.7;
+    font-size: 0.86em;
+}
+
+.il-confirm button {
+    flex: none;
+    padding: 5px 11px;
+    border: 1px solid var(--SmartThemeQuoteColor, #e0b060);
+    border-radius: 999px;
+    background: rgba(224, 176, 96, 0.14);
+    color: inherit;
+    font: inherit;
+    font-size: 0.9em;
+    cursor: pointer;
+}
+
+.il-confirm button.is-quiet {
+    border-color: var(--SmartThemeBorderColor, rgba(255, 255, 255, 0.25));
+    background: transparent;
+}
+
+/* The pill while the server works for this world and no story is being told: quieter, out of the way. */
+.il-narrator-pill.is-background {
+    left: auto;
+    right: 0.5rem;
+    font-size: 0.78em;
+    font-weight: 500;
+    padding: 0.22rem 0.75rem;
+    opacity: 0.85;
+    animation: none;
+    box-shadow: 0 0.1rem 0.4rem rgba(0, 0, 0, 0.3);
+}
+
+.il-narrator-pill.is-background::after {
+    animation-duration: 3.2s;
+}
+
+/* A game tool call: what happened instead of the raw call; a call that changed nothing is not shown. */
+.mes.il-tool-message .mes_text details {
+    display: none;
+}
+
+.mes.il-tool-message.il-tool-noop {
+    display: none;
+}
+
+.il-tool-outcome {
+    font-size: 0.85em;
+    line-height: 1.35;
+    opacity: 0.85;
+}
+
+.il-tool-outcome i {
+    color: var(--SmartThemeQuoteColor, #e0b060);
+    margin-right: 0.15em;
+}
+
+/* Pictures sent in a text or shown mind to mind: the phone and the story card share these. */
+.il-sms-bubble.is-picture{padding:4px;max-width:min(78%,280px);white-space:normal}
+.il-sms-picture{margin:0;display:flex;flex-direction:column;gap:4px}
+.il-sms-picture-frame{width:min(250px,62vw);aspect-ratio:1/1;border-radius:13px;overflow:hidden;background:#141a24;display:grid;place-items:center}
+.il-sms-picture-frame img{width:100%;height:100%;object-fit:cover;display:block;cursor:zoom-in}
+.il-sms-picture-wait{font-size:.78em;color:#8f99a8;font-style:italic;padding:0 14px;text-align:center;line-height:1.35}
+.il-sms-picture.is-drawing .il-sms-picture-frame{background:linear-gradient(110deg,#141a24 30%,#202938 50%,#141a24 70%);background-size:220% 100%;animation:il-sms-shimmer 1.8s linear infinite}
+@keyframes il-sms-shimmer{to{background-position:-220% 0}}
+.il-sms-picture figcaption{font-size:.78em;color:#aeb6c2;padding:0 6px 3px;line-height:1.3}
+.il-sms-picture.is-failed .il-sms-picture-wait{color:#e3b2b2;font-style:normal}
+.il-sms-picture-retry{margin-top:8px;padding:5px 12px;border-radius:9px;border:1px solid rgba(226,201,154,.45);background:rgba(226,201,154,.1);color:#ecd9ac;font:inherit;font-size:.92em;font-style:normal;cursor:pointer}
+.il-sms-picture.is-mind .il-sms-picture-frame{border:1px solid rgba(167,139,250,.5);box-shadow:0 0 18px rgba(140,110,230,.4)}
+.il-sms-picture.is-mind figcaption{font-style:italic;color:#d6c9ff}
+.il-phone-lightbox{position:absolute;inset:0;z-index:5;background:rgba(4,6,10,.95);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;padding:16px;cursor:zoom-out}
+.il-phone-lightbox img{max-width:100%;max-height:78%;border-radius:12px;object-fit:contain}
+.il-phone-lightbox p{margin:0;max-width:560px;text-align:center;color:#c9cfd9;font-size:.9em}
+.il-phone-panel{position:relative}
+.il-private-card .il-sms-bubble.is-picture{max-width:min(82%,280px)}
+.il-picture-lightbox{position:fixed;top:0;left:0;width:100vw;height:100vh;height:100dvh;z-index:44000;background:rgba(4,6,10,.95);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;padding:16px;cursor:zoom-out;box-sizing:border-box}
+.il-picture-lightbox img{max-width:100%;max-height:78%;border-radius:12px;object-fit:contain}
+.il-picture-lightbox p{margin:0;max-width:560px;text-align:center;color:#c9cfd9;font-size:.9em}
+.il-sms-bubble.is-moment{align-self:center;max-width:min(92%,320px);background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.08)}
+.il-sms-bubble.is-moment .il-sms-picture-frame{width:min(300px,78vw)}
+.il-sms-bubble.is-moment figcaption{text-align:center}

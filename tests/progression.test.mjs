@@ -12,7 +12,7 @@ import {
     normalizeProgressionState,
     runProgressionScheduler,
 } from '../progression.js';
-import { buildProgressionMessages } from '../progression-prompts.js';
+import { buildProgressionMessages } from '../progression-prompts.js?v=2';
 
 function emptyPatch(time) {
     return { time, goals: [], processes: [], events: [] };

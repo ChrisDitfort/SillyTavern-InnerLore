@@ -152,7 +152,10 @@ test('a swipe during analysis discards the stale result and runs one deferred re
 
     chat[2].mes = 'Selected Branch is current canon.';
     listeners.get(events.MESSAGE_SWIPED)(2);
-    assert.equal(chatMetadata.inner_lore.needsRebuild, true);
+    // Nothing InnerLore committed came from message 2 (its pass is still in
+    // flight), so the world is not quarantined; the in-flight pass notices
+    // the swipe when it returns and discards its own stale result.
+    assert.equal(chatMetadata.inner_lore.needsRebuild, false);
     const replacementContext = [...prompts].reverse()
         .find(prompt => prompt.key === 'inner_lore_context')?.value || '';
     assert.ok(replacementContext.includes('Eleanor:'),

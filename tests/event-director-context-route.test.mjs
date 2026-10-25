@@ -22,6 +22,7 @@ function stubRouter() {
         get: register('GET'),
         post: register('POST'),
         put: register('PUT'),
+        patch: register('PATCH'),
         delete: register('DELETE'),
     };
 }

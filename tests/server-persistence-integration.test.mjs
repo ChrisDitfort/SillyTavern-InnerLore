@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { createEmptyStore, mergeEntityOperations } from '../core.js';
+import { createEmptyStore, mergeEntityOperations, messageFingerprint } from '../core.js';
 import { installMockInnerLoreStorage } from './mock-storage-server.mjs';
 import { createEventListeners } from './mock-event-source.mjs';
 
@@ -26,6 +26,8 @@ test('legacy chat JSON migrates once, then only a pointer remains while SQLite-s
         minimumImportance: 0,
     });
     store.lastProcessedIndex = 0;
+    // Message 0 has been read: editing it changes processed history.
+    store.processedFingerprints = { 0: messageFingerprint(chat[0]) };
     const chatMetadata = { inner_lore: store };
     const extensionSettings = {
         disabledExtensions: [],
@@ -83,7 +85,8 @@ test('legacy chat JSON migrates once, then only a pointer remains while SQLite-s
     const world = mock.worlds.get(persistedPointer.worldId);
     assert.equal(world.innerLore.store.entities['character:ada'].facts[0], 'Ada maintains the engine.');
 
-    listeners.get(events.MESSAGE_EDITED)();
+    chat[0].mes = 'Ada waits beside the cold engine.';
+    listeners.get(events.MESSAGE_EDITED)(0);
     await waitFor(() => world.innerLore.store.needsRebuild === true);
     assert.equal(chatMetadata.inner_lore.needsRebuild, true);
 

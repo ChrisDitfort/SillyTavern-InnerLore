@@ -26,7 +26,7 @@ import {
     stageFor,
     standingTier,
     tradeOverview,
-} from '../game.js';
+} from '../game.js?v=6';
 
 const CURRENCY = normalizeCurrency({
     name: 'Port Vell coin',

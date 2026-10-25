@@ -1,5 +1,5 @@
 import { canonicalNameKey, clamp, cleanString, contextSimilarity, hashString, uniqueStrings } from './core.js?v=49';
-import { appendOutputDiagnostics } from './output-codec.js?v=5';
+import { appendOutputDiagnostics } from './output-codec.js?v=7';
 
 export const EVENT_DIRECTOR_VERSION = 1;
 export const AUTOMATIC_EVENT_ORIGIN = 'automatic_director';
@@ -325,7 +325,9 @@ export function validateEventDirectorPayload(payloadValue, options = {}) {
     const confidence = clamp(numberOr(raw.confidence, 0), 0, 1);
     const minimumConfidence = clamp(numberOr(options.minimumConfidence, 0.82), 0, 1);
     if (confidence < minimumConfidence) {
-        throw new Error(`Automatic Event Director confidence ${confidence.toFixed(2)} is below ${minimumConfidence.toFixed(2)}.`);
+        // A soft decline, not a malformed answer: the client settles it as
+        // "no proposal" instead of asking the model to repair what it said.
+        throw Object.assign(new Error(`Automatic Event Director confidence ${confidence.toFixed(2)} is below ${minimumConfidence.toFixed(2)}.`), { code: 'low_confidence' });
     }
     const sourceCatalog = new Map((Array.isArray(options.sources) ? options.sources : [])
         .filter(source => source?.id).map(source => [source.id, source]));
@@ -356,7 +358,7 @@ export function validateEventDirectorPayload(payloadValue, options = {}) {
         rationale: textValue(raw.rationale, 2_000),
     };
     const duplicate = duplicateProposal(candidate, options.state || {});
-    if (duplicate) throw new Error(`Automatic Event Director proposal duplicates “${duplicate.title || duplicate.key}”.`);
+    if (duplicate) throw Object.assign(new Error(`Automatic Event Director proposal duplicates “${duplicate.title || duplicate.key}”.`), { code: 'duplicate' });
     return { proposal: candidate, reason: cleanString(payload.reason, 1_000) };
 }
 

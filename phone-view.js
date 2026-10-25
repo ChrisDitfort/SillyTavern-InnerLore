@@ -6,7 +6,7 @@
  * models or the story: index.js hands it a model and takes its callbacks.
  */
 import { escapeHtml } from './core.js?v=49';
-import { CHANNELS } from './private-chat.js?v=1';
+import { CHANNELS, renderPictureSlot } from './private-chat.js?v=4';
 
 const STYLE_ID = 'il_phone_inline_styles_v1';
 const STYLES = `
@@ -84,6 +84,7 @@ export const PHONE_ICON = {
     phone: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6.5" y="2.5" width="11" height="19" rx="2.4"/><path d="M10.5 5.2h3M11 18.6h2"/></svg>',
     aside: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5.5h10a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2H9l-3.5 3v-3H4a2 2 0 0 1-2-2v-4a2 2 0 0 1 2-2z"/><path d="M18.5 9.5h1.5a2 2 0 0 1 2 2v3.5a2 2 0 0 1-2 2h-.5v2.5l-3-2.5h-3"/></svg>',
     mind: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 20v-2.2A6.5 6.5 0 0 1 6.2 8.2 6 6 0 0 1 17.5 9.5c.6 1 1.6 2 2.3 2.8l-1.8.7v2a2 2 0 0 1-2 2h-1v3"/><path d="M9.5 10.5a2.5 2.5 0 0 1 5 0c0 1.5-2.5 2-2.5 3.5"/><circle cx="12" cy="16.3" r=".4" fill="currentColor"/></svg>',
+    camera: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8h3l1.6-2.2h6.8L17 8h3a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1z"/><circle cx="12" cy="13" r="3.6"/></svg>',
 };
 
 function ensureStyles() {
@@ -150,11 +151,15 @@ export function renderPhoneHome(model) {
     return parts.join('');
 }
 
-/** One conversation as bubbles; unflushed lines are shown a little lighter. */
+/** One conversation as bubbles; unflushed lines are shown a little lighter, a picture as its slot. */
 export function renderThreadLog(thread, { typing = false } = {}) {
-    const bubbles = (thread?.bubbles || []).map(bubble => (
-        `<div class="il-sms-bubble ${bubble.from === 'player' ? 'is-player' : 'is-person'}${bubble.flushed ? '' : ' is-pending'}">${escapeHtml(bubble.text)}</div>`
-    ));
+    const bubbles = (thread?.bubbles || []).map(bubble => {
+        const side = bubble.from === 'player' ? 'is-player' : 'is-person';
+        // The player's own view of the person, asked for in a quiet word: centred, apart from what is said.
+        if (bubble.picture?.moment) return `<div class="il-sms-bubble is-moment is-picture">${renderPictureSlot(bubble.picture.id, bubble.text, thread.channel)}</div>`;
+        if (bubble.picture) return `<div class="il-sms-bubble ${side} is-picture${bubble.flushed ? '' : ' is-pending'}">${renderPictureSlot(bubble.picture.id, bubble.text, thread.channel)}</div>`;
+        return `<div class="il-sms-bubble ${side}${bubble.flushed ? '' : ' is-pending'}">${escapeHtml(bubble.text)}</div>`;
+    });
     if (thread?.status === 'rejected') bubbles.push(`<div class="il-sms-bubble is-note">${escapeHtml(thread.person)} shut you out.</div>`);
     else if (thread?.status === 'ended') bubbles.push(`<div class="il-sms-bubble is-note">${escapeHtml(thread.person)} ended the conversation. Writing again starts it anew.</div>`);
     if (typing) bubbles.push('<div class="il-sms-typing" aria-label="typing"><span></span><span></span><span></span></div>');
@@ -162,7 +167,7 @@ export function renderThreadLog(thread, { typing = false } = {}) {
     return bubbles.join('');
 }
 
-export function createPhonePanel({ faceFor = null, onSend, onOpenThread, onStart, onPerson, onBack, onClose } = {}) {
+export function createPhonePanel({ faceFor = null, fillPictures = null, onPictureRetry = null, onMoment = null, onSend, onOpenThread, onStart, onPerson, onBack, onClose } = {}) {
     let overlay = null;
     let panel = null;
     let model = { playerName: '', deviceKnown: false, devicePresent: false, deviceName: 'Phone', threads: [], contacts: [], reachable: [], mind: null };
@@ -193,6 +198,13 @@ export function createPhonePanel({ faceFor = null, onSend, onOpenThread, onStart
         document.body.appendChild(overlay);
         overlay.addEventListener('click', event => {
             const target = event.target;
+            const lightbox = target.closest('.il-phone-lightbox');
+            if (lightbox) return lightbox.remove();
+            const retry = target.closest('[data-picture-retry]');
+            if (retry) return onPictureRetry?.(retry.dataset.pictureRetry);
+            const shown = target.closest('.il-sms-picture img');
+            if (shown) return showLightbox(shown);
+            if (target.closest('[data-action="moment"]')) return current?.thread ? onMoment?.(current.thread.key) : undefined;
             if (target.closest('[data-action="close"]')) return onClose?.();
             if (target.closest('[data-action="back"]')) return onBack?.();
             if (target.closest('[data-action="send"]')) return send();
@@ -208,7 +220,9 @@ export function createPhonePanel({ faceFor = null, onSend, onOpenThread, onStart
         overlay.addEventListener('keydown', event => {
             if (event.key === 'Escape') {
                 event.preventDefault();
-                if (view === 'thread') onBack?.();
+                const lightbox = panel?.querySelector('.il-phone-lightbox');
+                if (lightbox) lightbox.remove();
+                else if (view === 'thread') onBack?.();
                 else onClose?.();
             }
         });
@@ -221,6 +235,17 @@ export function createPhonePanel({ faceFor = null, onSend, onOpenThread, onStart
                 send();
             }
         });
+    };
+
+    // A picture, large, over the conversation; a tap or Escape puts it away.
+    const showLightbox = image => {
+        panel?.querySelector('.il-phone-lightbox')?.remove();
+        const caption = image.closest('.il-sms-picture')?.querySelector('figcaption')?.textContent || '';
+        const box = document.createElement('div');
+        box.className = 'il-phone-lightbox';
+        box.setAttribute('role', 'dialog');
+        box.innerHTML = `<img src="${escapeHtml(image.getAttribute('src') || '')}" alt="${escapeHtml(caption)}"><p>${escapeHtml(caption)}</p>`;
+        panel?.appendChild(box);
     };
 
     const send = () => {
@@ -247,6 +272,11 @@ export function createPhonePanel({ faceFor = null, onSend, onOpenThread, onStart
     const paintThread = () => {
         const thread = current.thread;
         const channel = CHANNELS[thread.channel];
+        // A repaint (a reply, a picture landing) keeps the player's place in what they are typing.
+        const typingBox = panel.querySelector('.il-phone-compose textarea');
+        const focused = Boolean(typingBox && document.activeElement === typingBox);
+        const caret = focused ? [typingBox.selectionStart, typingBox.selectionEnd] : null;
+        const lightbox = panel.querySelector('.il-phone-lightbox');
         panel.className = `il-phone-panel is-thread is-${thread.channel}`;
         const subtitle = thread.channel === 'aside'
             ? (current.placeName ? `Quietly, at ${current.placeName}` : 'Quietly, aside from the others')
@@ -257,6 +287,7 @@ export function createPhonePanel({ faceFor = null, onSend, onOpenThread, onStart
                 <span class="il-phone-face-slot" data-face="${escapeHtml(thread.person)}"></span>
                 <div class="il-phone-who" data-person="${escapeHtml(thread.person)}" style="cursor:pointer"><b>${escapeHtml(thread.person)}</b><small>${escapeHtml(subtitle)}</small></div>
                 <span class="il-phone-chip is-${thread.channel}">${escapeHtml(channel.short)}</span>
+                ${current.moments ? `<button type="button" class="il-phone-btn" data-action="moment" aria-label="See this moment" title="See ${escapeHtml(thread.person)} as you see them now">${PHONE_ICON.camera}</button>` : ''}
                 <button type="button" class="il-phone-btn is-text" data-action="close" title="Close and let the story know">Done</button>
             </div>
             <div class="il-sms-log">${renderThreadLog(thread, { typing: current.status?.kind === 'typing' })}</div>
@@ -270,6 +301,12 @@ export function createPhonePanel({ faceFor = null, onSend, onOpenThread, onStart
         if (face) face.dataset.name = thread.person;
         const box = panel.querySelector('.il-phone-compose textarea');
         if (box && draft) box.value = draft;
+        if (box && focused && !box.disabled) {
+            box.focus({ preventScroll: true });
+            try { box.setSelectionRange(...caret); } catch { /* a caret past the end is fine */ }
+        }
+        if (lightbox) panel.appendChild(lightbox);
+        fillPictures?.(panel);
         const log = panel.querySelector('.il-sms-log');
         if (log) log.scrollTop = log.scrollHeight;
     };

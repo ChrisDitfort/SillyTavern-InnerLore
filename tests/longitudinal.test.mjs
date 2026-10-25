@@ -14,7 +14,7 @@ import {
     summaryceptionRecallText,
 } from '../core.js';
 import { syncLorebook } from '../lorebook.js';
-import { buildAnalysisMessages, formatTranscript } from '../prompts.js';
+import { buildAnalysisMessages, formatTranscript } from '../prompts.js?v=12';
 
 const cast = [
     'Mara Venn',

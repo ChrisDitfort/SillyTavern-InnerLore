@@ -12,9 +12,14 @@ const failure = (status, code, message, details) => response(status, {
     error: { code, message, ...(details ? { details } : {}) },
 });
 
+import { applyPatch, isEmptyPatch, normalizePatch } from '../store-diff.js?v=4';
+
 export function installMockInnerLoreStorage() {
     const worlds = new Map();
     const deletedWorldIds = new Set();
+    const requests = [];
+    const jobs = new Map();
+    const claims = new Map();
     const originalFetch = globalThis.fetch;
 
     globalThis.fetch = async (input, options = {}) => {
@@ -47,10 +52,21 @@ export function installMockInnerLoreStorage() {
             return success(structuredClone(world), 201);
         }
 
+        // Server-side jobs: recorded, never run (a test that needs a result drives it by hand).
+        const jobMatch = route.match(/^\/jobs\/([^/]+)\/cancel$/u);
+        if (jobMatch && method === 'POST') {
+            const job = jobs.get(decodeURIComponent(jobMatch[1]));
+            if (!job) return failure(404, 'JOB_NOT_FOUND', 'Job not found');
+            job.status = 'cancelled';
+            job.error = body.reason || 'cancelled';
+            return success({ job: structuredClone(job) });
+        }
         const match = route.match(/^\/worlds\/([^/]+)(.*)$/u);
         if (!match) return failure(404, 'NOT_FOUND', 'Route not found');
         const worldId = decodeURIComponent(match[1]);
         const suffix = match[2];
+        // What each world was asked, in order: method and route.
+        requests.push({ worldId: decodeURIComponent(match[1]), method, suffix });
         const world = worlds.get(worldId);
         if (suffix === '' && method === 'GET') {
             if (!world) return failure(404, 'NOT_FOUND', 'World not found');
@@ -61,6 +77,25 @@ export function installMockInnerLoreStorage() {
         if (suffix === '/innerlore/store' && method === 'GET') {
             if (!world.innerLore) return failure(404, 'NOT_FOUND', 'InnerLore store not found');
             return success(structuredClone(world.innerLore));
+        }
+        if (suffix === '/jobs' && method === 'POST') {
+            const existing = [...jobs.values()].find(job => job.worldId === worldId && job.kind === body.kind && job.key === (body.key || '') && ['queued', 'running'].includes(job.status));
+            if (existing) return success({ jobId: existing.id, coalesced: true, job: structuredClone(existing) });
+            const job = { id: `job-${jobs.size + 1}`, worldId, chatId: body.chatId || '', kind: body.kind, key: body.key || '', status: 'queued', detail: '', error: '', input: structuredClone(body.input || {}), createdAt: Date.now(), startedAt: null, finishedAt: null };
+            jobs.set(job.id, job);
+            return success({ jobId: job.id, coalesced: false, job: structuredClone(job) });
+        }
+        if (suffix.startsWith('/jobs') && method === 'GET') {
+            return success({ jobs: [...jobs.values()].filter(job => job.worldId === worldId && ['queued', 'running'].includes(job.status)).map(job => structuredClone(job)) });
+        }
+        if (suffix.startsWith('/background') && method === 'GET') {
+            const active = [...jobs.values()].find(job => job.worldId === worldId && job.status === 'running') || null;
+            return success({ inFlight: active ? 1 : 0, activeJob: active ? { id: active.id, kind: active.kind, key: active.key } : null, queued: [...jobs.values()].filter(job => job.worldId === worldId && job.status === 'queued').length, room: true, providers: [], story: claims.get(worldId) || null });
+        }
+        if (suffix === '/story-claim' && method === 'POST') {
+            if (body.phase === 'end') claims.delete(worldId);
+            else claims.set(worldId, { provider: body.provider || '', cost: body.cost || 1, quiet: Boolean(body.quiet), at: Date.now() });
+            return success({ story: claims.get(worldId) || null });
         }
         if (suffix === '/innerlore/store' && method === 'PUT') {
             const actualRevision = world.innerLore?.revision || 0;
@@ -90,6 +125,26 @@ export function installMockInnerLoreStorage() {
                 scene: structuredClone(body.scene || world.innerLore?.scene || {}),
             };
             return success(structuredClone(world.innerLore), revision === 1 ? 201 : 200);
+        }
+        if (suffix === '/innerlore/store' && method === 'PATCH') {
+            if (!world.innerLore) return failure(404, 'STORE_NOT_FOUND', 'InnerLore store not found');
+            const patch = normalizePatch(body.patch);
+            const baseRevision = Number.isInteger(body.baseRevision) ? body.baseRevision : null;
+            if (isEmptyPatch(patch)) {
+                return success({ worldId, chatId: body.chatId, revision: world.innerLore.revision, moved: baseRevision !== null && baseRevision !== world.innerLore.revision, snapshotHash: '', unchanged: true });
+            }
+            const previousRevision = world.innerLore.revision;
+            const revision = previousRevision + 1;
+            world.innerLore = {
+                ...world.innerLore,
+                chatId: body.chatId || world.innerLore.chatId,
+                revision,
+                snapshotHash: `mock-${revision}`,
+                updatedAt: new Date().toISOString(),
+                store: applyPatch(structuredClone(world.innerLore.store), patch),
+            };
+            const moved = baseRevision !== null && baseRevision !== previousRevision;
+            return success({ worldId, chatId: world.innerLore.chatId, revision, updatedAt: world.innerLore.updatedAt, snapshotHash: `mock-${revision}`, moved, ...(moved ? { snapshot: structuredClone(world.innerLore.store) } : {}) });
         }
         if (suffix === '/innerlore/context/build' && method === 'POST') {
             if (!world.innerLore) return failure(404, 'NOT_FOUND', 'InnerLore store not found');
@@ -234,6 +289,9 @@ export function installMockInnerLoreStorage() {
     return {
         worlds,
         deletedWorldIds,
+        requests,
+        jobs,
+        claims,
         restore() { globalThis.fetch = originalFetch; },
     };
 }
